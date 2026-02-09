@@ -124,8 +124,9 @@ th[onclick]:hover {
             </p>
             
             <!-- Add New Slot Form -->
-            <form id="addSlotForm" class="row g-2 mb-3">
-                <div class="col-md-4">
+            <form id="addSlotForm" class="row g-2 mb-3 align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label small mb-1">Day</label>
                     <select name="day_of_week" class="form-select form-select-sm" id="newSlotDay">
                         <option value="-1">Every day</option>
                         <option value="0">Monday</option>
@@ -137,10 +138,28 @@ th[onclick]:hover {
                         <option value="6">Sunday</option>
                     </select>
                 </div>
-                <div class="col-md-4">
+                <div class="col-md-2">
+                    <label class="form-label small mb-1">Time</label>
                     <input type="time" name="time_slot" class="form-control form-control-sm" id="newSlotTime" required>
                 </div>
                 <div class="col-md-4">
+                    <label class="form-label small mb-1">Platforms</label>
+                    <div class="d-flex gap-2 flex-wrap">
+                        <div class="form-check form-check-inline mb-0">
+                            <input class="form-check-input" type="checkbox" id="newSlotAllPlatforms" checked onchange="toggleNewSlotAllPlatforms(this)">
+                            <label class="form-check-label small" for="newSlotAllPlatforms">All</label>
+                        </div>
+                        <div class="form-check form-check-inline mb-0">
+                            <input class="form-check-input new-slot-platform-cb" type="checkbox" name="platforms" value="linkedin" id="newSlotLinkedin" onchange="updateNewSlotAllCheckbox()">
+                            <label class="form-check-label small" for="newSlotLinkedin">LinkedIn</label>
+                        </div>
+                        <div class="form-check form-check-inline mb-0">
+                            <input class="form-check-input new-slot-platform-cb" type="checkbox" name="platforms" value="threads" id="newSlotThreads" onchange="updateNewSlotAllCheckbox()">
+                            <label class="form-check-label small" for="newSlotThreads">Threads</label>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3">
                     <button type="submit" class="btn btn-sm btn-primary w-100">
                         <i class="bi bi-plus"></i> Add Time Slot
                     </button>
@@ -156,6 +175,7 @@ th[onclick]:hover {
                             <tr>
                                 <th>Day</th>
                                 <th>Time</th>
+                                <th>Platforms</th>
                                 <th>Status</th>
                                 <th>Actions</th>
                             </tr>
@@ -166,6 +186,18 @@ th[onclick]:hover {
                                 <td>{{ slot.day_display }}</td>
                                 <td>{{ slot.time_slot }}</td>
                                 <td>
+                                    {% if not slot.platforms %}
+                                    <span class="badge bg-info text-dark">All Platforms</span>
+                                    {% else %}
+                                        {% if 'linkedin' in slot.platforms %}
+                                        <span class="badge" style="background-color: #0077B5;">LinkedIn</span>
+                                        {% endif %}
+                                        {% if 'threads' in slot.platforms %}
+                                        <span class="badge bg-dark">Threads</span>
+                                        {% endif %}
+                                    {% endif %}
+                                </td>
+                                <td>
                                     {% if slot.enabled %}
                                     <span class="badge bg-success">Enabled</span>
                                     {% else %}
@@ -173,7 +205,7 @@ th[onclick]:hover {
                                     {% endif %}
                                 </td>
                                 <td>
-                                    <button class="btn btn-xs btn-outline-primary" onclick="openEditSlotModal({{ slot.id }}, {{ slot.day_of_week }}, '{{ slot.time_slot }}')" title="Edit">
+                                    <button class="btn btn-xs btn-outline-primary" onclick='openEditSlotModal({{ slot.id }}, {{ slot.day_of_week }}, "{{ slot.time_slot }}", {{ slot.platforms | tojson }})' title="Edit">
                                         ✏️
                                     </button>
                                     <button class="btn btn-xs btn-outline-secondary" onclick="toggleSlot({{ slot.id }})" title="Toggle">
@@ -537,6 +569,24 @@ th[onclick]:hover {
                 <div class="mb-3">
                     <label class="form-label">Time</label>
                     <input type="time" class="form-control" id="edit-slot-time" required>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Platforms</label>
+                    <div class="d-flex gap-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="editSlotAllPlatforms" checked onchange="toggleEditSlotAllPlatforms(this)">
+                            <label class="form-check-label" for="editSlotAllPlatforms">All Platforms</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input edit-slot-platform-cb" type="checkbox" value="linkedin" id="editSlotLinkedin" onchange="updateEditSlotAllCheckbox()">
+                            <label class="form-check-label" for="editSlotLinkedin">LinkedIn</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input edit-slot-platform-cb" type="checkbox" value="threads" id="editSlotThreads" onchange="updateEditSlotAllCheckbox()">
+                            <label class="form-check-label" for="editSlotThreads">Threads</label>
+                        </div>
+                    </div>
+                    <small class="text-muted">Select specific platforms or leave "All Platforms" checked to use this slot for every platform.</small>
                 </div>
                 <div class="alert alert-info mb-0">
                     <small>
@@ -1439,12 +1489,50 @@ function submitEdit() {
 }
 
 // Time Slot Management
+
+// --- Add Slot: Platform checkbox helpers ---
+function toggleNewSlotAllPlatforms(checkbox) {
+    const platformCbs = document.querySelectorAll('.new-slot-platform-cb');
+    if (checkbox.checked) {
+        // "All" checked -> uncheck individual platforms (they will not be sent)
+        platformCbs.forEach(cb => { cb.checked = false; });
+    }
+}
+
+function updateNewSlotAllCheckbox() {
+    const platformCbs = document.querySelectorAll('.new-slot-platform-cb');
+    const anyChecked = Array.from(platformCbs).some(cb => cb.checked);
+    document.getElementById('newSlotAllPlatforms').checked = !anyChecked;
+}
+
+// --- Edit Slot: Platform checkbox helpers ---
+function toggleEditSlotAllPlatforms(checkbox) {
+    const platformCbs = document.querySelectorAll('.edit-slot-platform-cb');
+    if (checkbox.checked) {
+        platformCbs.forEach(cb => { cb.checked = false; });
+    }
+}
+
+function updateEditSlotAllCheckbox() {
+    const platformCbs = document.querySelectorAll('.edit-slot-platform-cb');
+    const anyChecked = Array.from(platformCbs).some(cb => cb.checked);
+    document.getElementById('editSlotAllPlatforms').checked = !anyChecked;
+}
+
 document.getElementById('addSlotForm').addEventListener('submit', function(e) {
     e.preventDefault();
     
     const formData = new FormData();
     formData.append('day_of_week', document.getElementById('newSlotDay').value);
     formData.append('time_slot', document.getElementById('newSlotTime').value);
+    
+    // Append selected platforms (if "All" is checked, send nothing = all platforms)
+    const allChecked = document.getElementById('newSlotAllPlatforms').checked;
+    if (!allChecked) {
+        document.querySelectorAll('.new-slot-platform-cb:checked').forEach(cb => {
+            formData.append('platforms', cb.value);
+        });
+    }
     
     fetch('{{ url_for("schedule_slot_add") }}', {
         method: 'POST',
@@ -1496,10 +1584,16 @@ function deleteSlot(slotId) {
         });
 }
 
-function openEditSlotModal(slotId, dayOfWeek, timeSlot) {
+function openEditSlotModal(slotId, dayOfWeek, timeSlot, platforms) {
     document.getElementById('edit-slot-id').value = slotId;
     document.getElementById('edit-slot-day').value = dayOfWeek;
     document.getElementById('edit-slot-time').value = timeSlot;
+    
+    // Set platform checkboxes based on current assignment
+    const isAllPlatforms = !platforms || platforms.length === 0;
+    document.getElementById('editSlotAllPlatforms').checked = isAllPlatforms;
+    document.getElementById('editSlotLinkedin').checked = !isAllPlatforms && platforms.includes('linkedin');
+    document.getElementById('editSlotThreads').checked = !isAllPlatforms && platforms.includes('threads');
     
     const modal = new bootstrap.Modal(document.getElementById('editSlotModal'));
     modal.show();
@@ -1518,6 +1612,14 @@ function submitSlotEdit() {
     const formData = new FormData();
     formData.append('day_of_week', dayOfWeek);
     formData.append('time_slot', timeSlot);
+    
+    // Append selected platforms (if "All" is checked, send nothing = all platforms)
+    const allChecked = document.getElementById('editSlotAllPlatforms').checked;
+    if (!allChecked) {
+        document.querySelectorAll('.edit-slot-platform-cb:checked').forEach(cb => {
+            formData.append('platforms', cb.value);
+        });
+    }
     
     fetch(`/schedule/slots/${slotId}/edit`, {
         method: 'POST',

@@ -189,6 +189,17 @@ def init_db(db_path: str = DB_PATH) -> None:
             )
             """
         )
+        # Platform assignments for time slots (many-to-many)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS time_slot_platforms (
+                slot_id INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                PRIMARY KEY (slot_id, platform),
+                FOREIGN KEY(slot_id) REFERENCES schedule_time_slots(id) ON DELETE CASCADE
+            )
+            """
+        )
         # Platform daily posting limits
         conn.execute(
             """
@@ -1785,10 +1796,40 @@ def get_scheduled_posts_for_article(
 # --- Schedule Time Slots Functions ---
 
 
+def get_slot_platforms(slot_id: int, db_path: str = DB_PATH) -> List[str]:
+    """Get the list of platforms assigned to a time slot.
+    
+    Returns an empty list if no platforms are explicitly assigned,
+    which means the slot applies to ALL platforms.
+    """
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "SELECT platform FROM time_slot_platforms WHERE slot_id = ? ORDER BY platform",
+            (slot_id,),
+        )
+        return [row[0] for row in cur.fetchall()]
+
+
+def set_slot_platforms(slot_id: int, platforms: List[str], db_path: str = DB_PATH) -> None:
+    """Set the platforms for a time slot (replaces any existing assignments).
+    
+    Pass an empty list to make the slot apply to all platforms.
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM time_slot_platforms WHERE slot_id = ?", (slot_id,))
+        for platform in platforms:
+            conn.execute(
+                "INSERT INTO time_slot_platforms (slot_id, platform) VALUES (?, ?)",
+                (slot_id, platform),
+            )
+        conn.commit()
+
+
 def add_time_slot(
     day_of_week: int,
     time_slot: str,
     enabled: bool = True,
+    platforms: List[str] | None = None,
     db_path: str = DB_PATH,
 ) -> int:
     """Add a new time slot for queue-based scheduling.
@@ -1797,6 +1838,8 @@ def add_time_slot(
         day_of_week: 0-6 (Monday-Sunday), or -1 for every day
         time_slot: Time in HH:MM format (24-hour)
         enabled: Whether the slot is active
+        platforms: List of platform names this slot applies to.
+                   None or empty list means all platforms.
     
     Returns:
         The ID of the created time slot
@@ -1810,12 +1853,24 @@ def add_time_slot(
             """,
             (day_of_week, time_slot, 1 if enabled else 0, created_at),
         )
+        slot_id = cur.lastrowid
+        # Store platform assignments if provided
+        if platforms:
+            for platform in platforms:
+                conn.execute(
+                    "INSERT INTO time_slot_platforms (slot_id, platform) VALUES (?, ?)",
+                    (slot_id, platform),
+                )
         conn.commit()
-        return cur.lastrowid
+        return slot_id
 
 
-def list_time_slots(db_path: str = DB_PATH) -> List[sqlite3.Row]:
-    """Get all configured time slots ordered by day and time."""
+def list_time_slots(db_path: str = DB_PATH) -> List[dict]:
+    """Get all configured time slots ordered by day and time.
+    
+    Each returned dict includes a 'platforms' key with the list of
+    platform names assigned to the slot (empty list = all platforms).
+    """
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.execute(
@@ -1824,20 +1879,53 @@ def list_time_slots(db_path: str = DB_PATH) -> List[sqlite3.Row]:
             ORDER BY day_of_week ASC, time_slot ASC
             """
         )
-        return cur.fetchall()
+        slots = []
+        for row in cur.fetchall():
+            slot = dict(row)
+            slot['platforms'] = get_slot_platforms(slot['id'], db_path)
+            slots.append(slot)
+        return slots
 
 
-def get_enabled_time_slots(db_path: str = DB_PATH) -> List[sqlite3.Row]:
-    """Get only enabled time slots."""
+def get_enabled_time_slots(platform: str | None = None, db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    """Get only enabled time slots, optionally filtered by platform.
+    
+    Args:
+        platform: If provided, only return slots that are assigned to this
+                  platform (or slots with no platform restriction, i.e. all-platform slots).
+        db_path: Database path
+    """
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        cur = conn.execute(
-            """
-            SELECT * FROM schedule_time_slots
-            WHERE enabled = 1
-            ORDER BY day_of_week ASC, time_slot ASC
-            """
-        )
+        if platform:
+            # Return slots that either:
+            # 1. Have no platform assignments (applies to all), OR
+            # 2. Are explicitly assigned to this platform
+            cur = conn.execute(
+                """
+                SELECT s.* FROM schedule_time_slots s
+                WHERE s.enabled = 1
+                AND (
+                    NOT EXISTS (
+                        SELECT 1 FROM time_slot_platforms tp WHERE tp.slot_id = s.id
+                    )
+                    OR EXISTS (
+                        SELECT 1 FROM time_slot_platforms tp
+                        WHERE tp.slot_id = s.id AND tp.platform = ?
+                    )
+                )
+                ORDER BY s.day_of_week ASC, s.time_slot ASC
+                """,
+                (platform,),
+            )
+        else:
+            cur = conn.execute(
+                """
+                SELECT * FROM schedule_time_slots
+                WHERE enabled = 1
+                ORDER BY day_of_week ASC, time_slot ASC
+                """
+            )
         return cur.fetchall()
 
 
@@ -1846,9 +1934,19 @@ def update_time_slot(
     day_of_week: int | None = None,
     time_slot: str | None = None,
     enabled: bool | None = None,
+    platforms: List[str] | None = None,
     db_path: str = DB_PATH,
 ) -> None:
-    """Update a time slot's settings."""
+    """Update a time slot's settings.
+    
+    Args:
+        slot_id: ID of the slot to update
+        day_of_week: New day of week (None to leave unchanged)
+        time_slot: New time (None to leave unchanged)
+        enabled: New enabled state (None to leave unchanged)
+        platforms: New platform list (None to leave unchanged;
+                   empty list to apply to all platforms)
+    """
     with sqlite3.connect(db_path) as conn:
         if day_of_week is not None:
             conn.execute(
@@ -1865,12 +1963,22 @@ def update_time_slot(
                 "UPDATE schedule_time_slots SET enabled = ? WHERE id = ?",
                 (1 if enabled else 0, slot_id),
             )
+        if platforms is not None:
+            conn.execute(
+                "DELETE FROM time_slot_platforms WHERE slot_id = ?", (slot_id,)
+            )
+            for platform in platforms:
+                conn.execute(
+                    "INSERT INTO time_slot_platforms (slot_id, platform) VALUES (?, ?)",
+                    (slot_id, platform),
+                )
         conn.commit()
 
 
 def delete_time_slot(slot_id: int, db_path: str = DB_PATH) -> None:
-    """Delete a time slot."""
+    """Delete a time slot and its platform assignments."""
     with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM time_slot_platforms WHERE slot_id = ?", (slot_id,))
         conn.execute("DELETE FROM schedule_time_slots WHERE id = ?", (slot_id,))
         conn.commit()
 
@@ -1899,7 +2007,7 @@ def get_next_available_slot(platform: str = "linkedin", db_path: str = DB_PATH) 
     """
     from datetime import datetime, timedelta
     
-    slots = get_enabled_time_slots(db_path)
+    slots = get_enabled_time_slots(platform=platform, db_path=db_path)
     if not slots:
         return None
     

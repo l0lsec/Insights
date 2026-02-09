@@ -3035,6 +3035,7 @@ def schedule_slots():
     
     slots_list = []
     for slot in slots:
+        # list_time_slots() already returns dicts with 'platforms' key
         slot_dict = dict(slot)
         if slot_dict['day_of_week'] == -1:
             slot_dict['day_display'] = 'Every day'
@@ -3050,6 +3051,7 @@ def schedule_slot_add():
     """Add a new time slot."""
     day_of_week = request.form.get('day_of_week', type=int, default=-1)
     time_slot = request.form.get('time_slot', '').strip()
+    platforms = request.form.getlist('platforms')
     
     if not time_slot:
         return jsonify({"error": "Time is required"}), 400
@@ -3067,10 +3069,15 @@ def schedule_slot_add():
     if day_of_week < -1 or day_of_week > 6:
         return jsonify({"error": "Invalid day of week"}), 400
     
+    # Validate platforms (empty list = all platforms)
+    valid_platforms = {'linkedin', 'threads'}
+    platforms = [p for p in platforms if p in valid_platforms]
+    
     slot_id = add_time_slot(
         day_of_week=day_of_week,
         time_slot=time_slot,
         enabled=True,
+        platforms=platforms if platforms else None,
     )
     
     # Redistribute all pending posts to use the new optimal slots
@@ -3088,6 +3095,7 @@ def schedule_slot_add():
             "day_display": day_display,
             "time_slot": time_slot,
             "enabled": True,
+            "platforms": platforms,
         },
         "redistributed": {
             "linkedin": linkedin_redistributed,
@@ -3120,9 +3128,10 @@ def schedule_slot_toggle(slot_id: int):
 
 @app.route('/schedule/slots/<int:slot_id>/edit', methods=['POST'])
 def schedule_slot_edit(slot_id: int):
-    """Edit a time slot's day and time."""
+    """Edit a time slot's day, time, and platform assignments."""
     day_of_week = request.form.get('day_of_week', type=int)
     time_slot = request.form.get('time_slot', '').strip()
+    platforms = request.form.getlist('platforms')
     
     if day_of_week is None:
         return jsonify({"error": "Day of week is required"}), 400
@@ -3143,8 +3152,17 @@ def schedule_slot_edit(slot_id: int):
     if day_of_week < -1 or day_of_week > 6:
         return jsonify({"error": "Invalid day of week"}), 400
     
-    # Update the slot
-    update_time_slot(slot_id, day_of_week=day_of_week, time_slot=time_slot)
+    # Validate platforms (empty list = all platforms)
+    valid_platforms = {'linkedin', 'threads'}
+    platforms = [p for p in platforms if p in valid_platforms]
+    
+    # Update the slot (pass empty list to clear platform restrictions)
+    update_time_slot(
+        slot_id,
+        day_of_week=day_of_week,
+        time_slot=time_slot,
+        platforms=platforms,
+    )
     
     # Redistribute all pending posts to use the new optimal slots
     linkedin_redistributed = redistribute_scheduled_posts('linkedin')
@@ -3152,6 +3170,7 @@ def schedule_slot_edit(slot_id: int):
     
     return jsonify({
         "success": True,
+        "platforms": platforms,
         "redistributed": {
             "linkedin": linkedin_redistributed,
             "threads": threads_redistributed,
