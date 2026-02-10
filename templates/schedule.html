@@ -18,6 +18,17 @@
 .drag-handle:hover {
     color: #0d6efd !important;
 }
+.drag-handle {
+    text-align: center;
+}
+.drag-handle.drag-enabled {
+    cursor: grab;
+    color: #6c757d;
+}
+.drag-handle.drag-disabled {
+    cursor: not-allowed;
+    color: #dee2e6;
+}
 tr.not-draggable .drag-handle {
     cursor: not-allowed !important;
 }
@@ -205,13 +216,13 @@ th[onclick]:hover {
                                     {% endif %}
                                 </td>
                                 <td>
-                                    <button class="btn btn-xs btn-outline-primary" onclick='openEditSlotModal({{ slot.id }}, {{ slot.day_of_week }}, "{{ slot.time_slot }}", {{ slot.platforms | tojson }})' title="Edit">
+                                    <button class="btn btn-xs btn-outline-primary edit-slot-btn" data-slot-id="{{ slot.id }}" data-day="{{ slot.day_of_week }}" data-time="{{ slot.time_slot }}" data-platforms="{{ slot.platforms | tojson | e }}" title="Edit">
                                         ✏️
                                     </button>
-                                    <button class="btn btn-xs btn-outline-secondary" onclick="toggleSlot({{ slot.id }})" title="Toggle">
+                                    <button class="btn btn-xs btn-outline-secondary toggle-slot-btn" data-slot-id="{{ slot.id }}" title="Toggle">
                                         {% if slot.enabled %}⏸️{% else %}▶️{% endif %}
                                     </button>
-                                    <button class="btn btn-xs btn-outline-danger" onclick="deleteSlot({{ slot.id }})" title="Delete">
+                                    <button class="btn btn-xs btn-outline-danger delete-slot-btn" data-slot-id="{{ slot.id }}" title="Delete">
                                         🗑️
                                     </button>
                                 </td>
@@ -377,7 +388,7 @@ th[onclick]:hover {
                 <tbody id="schedule-tbody">
                     {% for post in scheduled_posts %}
                     <tr data-post-id="{{ post.id }}" data-scheduled-for="{{ post.scheduled_for }}" class="{% if post.status != 'pending' %}not-draggable{% endif %}">
-                        <td class="drag-handle" style="cursor: {% if post.status == 'pending' %}grab{% else %}not-allowed{% endif %}; text-align: center; color: {% if post.status == 'pending' %}#6c757d{% else %}#dee2e6{% endif %};">
+                        <td class="drag-handle {% if post.status == 'pending' %}drag-enabled{% else %}drag-disabled{% endif %}">
                             {% if post.status == 'pending' %}⋮⋮{% else %}&nbsp;{% endif %}
                         </td>
                         <td>
@@ -436,18 +447,18 @@ th[onclick]:hover {
                         </td>
                         <td>
                             {% if post.status == 'pending' %}
-                            <button class="btn btn-sm btn-outline-primary" onclick="openEditModal({{ post.id }}, '{{ post.scheduled_for }}')" title="Edit Time">
+                            <button class="btn btn-sm btn-outline-primary edit-time-btn" data-post-id="{{ post.id }}" data-scheduled-for="{{ post.scheduled_for }}" title="Edit Time">
                                 ✏️ Time
                             </button>
                             {% if post.social_post_id or post.standalone_post_id %}
-                            <button class="btn btn-sm btn-outline-secondary" onclick="openEditContentModal({{ post.social_post_id or post.standalone_post_id }}, '{{ 'social' if post.social_post_id else 'standalone' }}', '{{ post.platform }}')" title="Edit Content" data-content="{{ (post.social_content or post.standalone_content or '')|e }}" data-image-url="{{ (post.social_image_url or post.standalone_image_url or '')|e }}">
+                            <button class="btn btn-sm btn-outline-secondary edit-content-btn" data-post-id="{{ post.social_post_id or post.standalone_post_id }}" data-post-type="{{ 'social' if post.social_post_id else 'standalone' }}" data-platform="{{ post.platform }}" data-content="{{ (post.social_content or post.standalone_content or '')|e }}" data-image-url="{{ (post.social_image_url or post.standalone_image_url or '')|e }}" title="Edit Content">
                                 📝 Content
                             </button>
                             {% endif %}
-                            <button class="btn btn-sm btn-success" onclick="postNow({{ post.id }}, '{{ post.platform }}')" title="Post Now">
+                            <button class="btn btn-sm btn-success post-now-btn" data-post-id="{{ post.id }}" data-platform="{{ post.platform }}" title="Post Now">
                                 🚀 Post Now
                             </button>
-                            <button class="btn btn-sm btn-outline-warning" onclick="cancelPost({{ post.id }})" title="Cancel">
+                            <button class="btn btn-sm btn-outline-warning cancel-post-btn" data-post-id="{{ post.id }}" title="Cancel">
                                 🚫 Cancel
                             </button>
                             {% elif post.status == 'posted' and post.linkedin_post_urn %}
@@ -467,17 +478,17 @@ th[onclick]:hover {
                                 </a>
                                 {% endif %}
                             {% elif post.status == 'failed' %}
-                            <button class="btn btn-sm btn-outline-success" onclick="retryPost({{ post.id }})" title="Retry Posting">
+                            <button class="btn btn-sm btn-outline-success retry-post-btn" data-post-id="{{ post.id }}" title="Retry Posting">
                                 🔄 Retry
                             </button>
-                            <button class="btn btn-sm btn-outline-danger" onclick="deletePost({{ post.id }})" title="Delete">
+                            <button class="btn btn-sm btn-outline-danger delete-post-btn" data-post-id="{{ post.id }}" title="Delete">
                                 🗑️ Delete
                             </button>
-                            <button class="btn btn-sm btn-outline-secondary" onclick="showError('{{ post.error_message|e }}')" title="Show Error">
+                            <button class="btn btn-sm btn-outline-secondary show-error-btn" data-error="{{ post.error_message|e }}" title="Show Error">
                                 ℹ️ Error
                             </button>
                             {% else %}
-                            <button class="btn btn-sm btn-outline-danger" onclick="deletePost({{ post.id }})" title="Delete">
+                            <button class="btn btn-sm btn-outline-danger delete-post-btn" data-post-id="{{ post.id }}" title="Delete">
                                 🗑️ Delete
                             </button>
                             {% endif %}
@@ -994,13 +1005,13 @@ function getTypeBadge(postType) {
 function getActionButtons(post) {
     if (post.status === 'pending') {
         return `
-            <button class="btn btn-sm btn-outline-primary" onclick="openEditModal(${post.id}, '${post.scheduled_for}')" title="Edit Time">
+            <button class="btn btn-sm btn-outline-primary edit-time-btn" data-post-id="${post.id}" data-scheduled-for="${post.scheduled_for}" title="Edit Time">
                 ✏️ Time
             </button>
-            <button class="btn btn-sm btn-success" onclick="postNow(${post.id}, '${post.platform}')" title="Post Now">
+            <button class="btn btn-sm btn-success post-now-btn" data-post-id="${post.id}" data-platform="${post.platform}" title="Post Now">
                 🚀 Post Now
             </button>
-            <button class="btn btn-sm btn-outline-warning" onclick="cancelPost(${post.id})" title="Cancel">
+            <button class="btn btn-sm btn-outline-warning cancel-post-btn" data-post-id="${post.id}" title="Cancel">
                 🚫 Cancel
             </button>
         `;
@@ -1012,20 +1023,21 @@ function getActionButtons(post) {
         }
         return '';
     } else if (post.status === 'failed') {
+        const safeError = (post.error_message || '').replace(/"/g, '&quot;');
         return `
-            <button class="btn btn-sm btn-outline-success" onclick="retryPost(${post.id})" title="Retry Posting">
+            <button class="btn btn-sm btn-outline-success retry-post-btn" data-post-id="${post.id}" title="Retry Posting">
                 🔄 Retry
             </button>
-            <button class="btn btn-sm btn-outline-danger" onclick="deletePost(${post.id})" title="Delete">
+            <button class="btn btn-sm btn-outline-danger delete-post-btn" data-post-id="${post.id}" title="Delete">
                 🗑️ Delete
             </button>
-            <button class="btn btn-sm btn-outline-secondary" onclick="showError('${(post.error_message || '').replace(/'/g, "\\'")}')" title="Show Error">
+            <button class="btn btn-sm btn-outline-secondary show-error-btn" data-error="${safeError}" title="Show Error">
                 ℹ️ Error
             </button>
         `;
     } else {
         return `
-            <button class="btn btn-sm btn-outline-danger" onclick="deletePost(${post.id})" title="Delete">
+            <button class="btn btn-sm btn-outline-danger delete-post-btn" data-post-id="${post.id}" title="Delete">
                 🗑️ Delete
             </button>
         `;
@@ -1193,10 +1205,9 @@ function disconnectThreads() {
         });
 }
 
-function postNow(postId, platform) {
+function postNow(postId, platform, btn) {
     if (!confirm(`Post this ${platform} content immediately?`)) return;
     
-    const btn = event.target;
     const originalText = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '⏳ Posting...';
@@ -1255,8 +1266,7 @@ function deletePost(postId) {
         });
 }
 
-function retryPost(postId) {
-    const btn = event.target;
+function retryPost(postId, btn) {
     const originalText = btn.innerHTML;
     btn.innerHTML = '⏳ Retrying...';
     btn.disabled = true;
@@ -1639,11 +1649,9 @@ function submitSlotEdit() {
 }
 
 // Content editing functions
-function openEditContentModal(postId, postType, platform) {
-    // Get the content and image from the data attributes of the clicked button
-    const btn = event.target.closest('button');
-    const currentContent = btn.dataset.content || '';
-    const currentImageUrl = btn.dataset.imageUrl || '';
+function openEditContentModal(postId, postType, platform, currentContent, currentImageUrl) {
+    currentContent = currentContent || '';
+    currentImageUrl = currentImageUrl || '';
     
     document.getElementById('edit-content-post-id').value = postId;
     document.getElementById('edit-content-post-type').value = postType;
@@ -1901,6 +1909,91 @@ function submitContentEdit() {
             saveBtn.disabled = false;
         });
 }
+
+// Delegated event handlers for buttons with data attributes
+// This avoids Jinja2 template expressions in inline onclick handlers
+document.addEventListener('click', function(e) {
+    // Edit slot button
+    var btn = e.target.closest('.edit-slot-btn');
+    if (btn) {
+        openEditSlotModal(
+            Number(btn.dataset.slotId),
+            Number(btn.dataset.day),
+            btn.dataset.time,
+            JSON.parse(btn.dataset.platforms || '[]')
+        );
+        return;
+    }
+
+    // Toggle slot button
+    btn = e.target.closest('.toggle-slot-btn');
+    if (btn) {
+        toggleSlot(Number(btn.dataset.slotId));
+        return;
+    }
+
+    // Delete slot button
+    btn = e.target.closest('.delete-slot-btn');
+    if (btn) {
+        deleteSlot(Number(btn.dataset.slotId));
+        return;
+    }
+
+    // Edit time button
+    btn = e.target.closest('.edit-time-btn');
+    if (btn) {
+        openEditModal(Number(btn.dataset.postId), btn.dataset.scheduledFor);
+        return;
+    }
+
+    // Edit content button
+    btn = e.target.closest('.edit-content-btn');
+    if (btn) {
+        openEditContentModal(
+            Number(btn.dataset.postId),
+            btn.dataset.postType,
+            btn.dataset.platform,
+            btn.dataset.content,
+            btn.dataset.imageUrl
+        );
+        return;
+    }
+
+    // Post now button
+    btn = e.target.closest('.post-now-btn');
+    if (btn) {
+        postNow(Number(btn.dataset.postId), btn.dataset.platform, btn);
+        return;
+    }
+
+    // Cancel post button
+    btn = e.target.closest('.cancel-post-btn');
+    if (btn) {
+        cancelPost(Number(btn.dataset.postId));
+        return;
+    }
+
+    // Retry post button
+    btn = e.target.closest('.retry-post-btn');
+    if (btn) {
+        retryPost(Number(btn.dataset.postId), btn);
+        return;
+    }
+
+    // Delete post button
+    btn = e.target.closest('.delete-post-btn');
+    if (btn) {
+        deletePost(Number(btn.dataset.postId));
+        return;
+    }
+
+    // Show error button
+    btn = e.target.closest('.show-error-btn');
+    if (btn) {
+        showError(btn.dataset.error);
+        return;
+    }
+});
 
 function updateDailyLimit(platform) {
     const input = document.getElementById(`${platform}-limit-input`);
