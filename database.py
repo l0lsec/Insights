@@ -155,17 +155,20 @@ def init_db(db_path: str = DB_PATH) -> None:
                 error_message TEXT,
                 created_at TEXT,
                 posted_at TEXT,
+                retry_count INTEGER DEFAULT 0,
                 FOREIGN KEY(social_post_id) REFERENCES social_posts(id),
                 FOREIGN KEY(article_id) REFERENCES articles(id),
                 FOREIGN KEY(standalone_post_id) REFERENCES standalone_posts(id)
             )
             """
         )
-        # Upgrade scheduled_posts table to include standalone_post_id if missing
+        # Upgrade scheduled_posts table to include missing columns
         cur = conn.execute("PRAGMA table_info(scheduled_posts)")
         sched_columns = [row[1] for row in cur.fetchall()]
         if "standalone_post_id" not in sched_columns:
             conn.execute("ALTER TABLE scheduled_posts ADD COLUMN standalone_post_id INTEGER")
+        if "retry_count" not in sched_columns:
+            conn.execute("ALTER TABLE scheduled_posts ADD COLUMN retry_count INTEGER DEFAULT 0")
         # Schedule settings for configurable time slots
         conn.execute(
             """
@@ -1688,6 +1691,22 @@ def update_scheduled_post_status(
             (status, linkedin_post_urn, error_message, posted_at, scheduled_id),
         )
         conn.commit()
+
+
+def increment_retry_count(scheduled_id: int, db_path: str = DB_PATH) -> int:
+    """Increment the retry count for a scheduled post and return the new value."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE scheduled_posts SET retry_count = COALESCE(retry_count, 0) + 1 WHERE id = ?",
+            (scheduled_id,),
+        )
+        conn.commit()
+        cur = conn.execute(
+            "SELECT retry_count FROM scheduled_posts WHERE id = ?",
+            (scheduled_id,),
+        )
+        row = cur.fetchone()
+        return row[0] if row else 0
 
 
 def cancel_scheduled_post(scheduled_id: int, db_path: str = DB_PATH) -> bool:

@@ -91,6 +91,7 @@ from database import (
     get_all_daily_limits,
     # Queue redistribution
     redistribute_scheduled_posts,
+    increment_retry_count,
     # Standalone posts functions (Command Center)
     add_standalone_post,
     list_standalone_posts,
@@ -4584,6 +4585,10 @@ def compose_generate_from_source():
 def scheduled_post_worker() -> None:
     """Background thread that processes scheduled posts."""
     import time as time_module
+    from datetime import datetime as dt_class
+    
+    MISSED_WINDOW_MINUTES = 10  # Posts overdue by more than this are rescheduled
+    MAX_RETRIES = 5             # Max retry attempts before permanent failure
     
     while True:
         try:
@@ -4599,10 +4604,47 @@ def scheduled_post_worker() -> None:
             # Cache tokens to avoid repeated DB queries
             linkedin_token = None
             threads_token = None
+            redistributed_platforms = set()  # Track platforms we've redistributed
             
             for post in pending:
                 try:
                     platform = post['platform'] if 'platform' in post.keys() else 'linkedin'
+                    
+                    # Skip if we already redistributed this platform's posts in this cycle
+                    if platform in redistributed_platforms:
+                        continue
+                    
+                    # --- Missed window detection ---
+                    # If the post is overdue by more than MISSED_WINDOW_MINUTES,
+                    # the app likely wasn't running. Reschedule instead of posting.
+                    try:
+                        scheduled_dt = dt_class.fromisoformat(post['scheduled_for'])
+                        now = dt_class.now()
+                        overdue_minutes = (now - scheduled_dt).total_seconds() / 60
+                    except (ValueError, TypeError):
+                        overdue_minutes = 0
+                    
+                    if overdue_minutes > MISSED_WINDOW_MINUTES:
+                        retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
+                        if retry_count >= MAX_RETRIES:
+                            update_scheduled_post_status(
+                                post['id'],
+                                status='failed',
+                                error_message=f'Missed window - max retries ({MAX_RETRIES}) exhausted',
+                            )
+                            app.logger.warning(
+                                "Post %d missed window and exhausted retries (%d/%d), marked failed",
+                                post['id'], retry_count, MAX_RETRIES,
+                            )
+                            continue
+                        increment_retry_count(post['id'])
+                        redistributed = redistribute_scheduled_posts(platform)
+                        redistributed_platforms.add(platform)
+                        app.logger.info(
+                            "Post %d missed window by %.0f min, rescheduled (retry %d/%d, %d posts redistributed)",
+                            post['id'], overdue_minutes, retry_count + 1, MAX_RETRIES, redistributed,
+                        )
+                        continue
                     
                     # Get article topic safely from sqlite3.Row
                     article_topic = post['article_topic'] if 'article_topic' in post.keys() else None
@@ -4691,12 +4733,23 @@ def scheduled_post_worker() -> None:
                             app.logger.info("Scheduled Threads post %d published successfully", post['id'])
                         else:
                             error_msg = str(result.get('error', 'Unknown error'))[:500]
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='failed',
-                                error_message=error_msg,
-                            )
-                            app.logger.error("Scheduled Threads post %d failed: %s", post['id'], error_msg)
+                            retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
+                            if retry_count < MAX_RETRIES:
+                                increment_retry_count(post['id'])
+                                redistribute_scheduled_posts(platform)
+                                redistributed_platforms.add(platform)
+                                app.logger.warning(
+                                    "Threads post %d failed (%s), rescheduled to next slot (retry %d/%d)",
+                                    post['id'], error_msg, retry_count + 1, MAX_RETRIES,
+                                )
+                                break  # Slots redistributed, restart on next cycle
+                            else:
+                                update_scheduled_post_status(
+                                    post['id'],
+                                    status='failed',
+                                    error_message=f'{error_msg} (max retries exhausted)',
+                                )
+                                app.logger.error("Scheduled Threads post %d failed permanently: %s", post['id'], error_msg)
                     
                     else:
                         # Handle LinkedIn posting (default)
@@ -4774,20 +4827,43 @@ def scheduled_post_worker() -> None:
                             app.logger.info("Scheduled LinkedIn post %d published successfully", post['id'])
                         else:
                             error_msg = str(result.get('error', 'Unknown error'))[:500]
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='failed',
-                                error_message=error_msg,
-                            )
-                            app.logger.error("Scheduled LinkedIn post %d failed: %s", post['id'], error_msg)
+                            retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
+                            if retry_count < MAX_RETRIES:
+                                increment_retry_count(post['id'])
+                                redistribute_scheduled_posts(platform)
+                                redistributed_platforms.add(platform)
+                                app.logger.warning(
+                                    "LinkedIn post %d failed (%s), rescheduled to next slot (retry %d/%d)",
+                                    post['id'], error_msg, retry_count + 1, MAX_RETRIES,
+                                )
+                                break  # Slots redistributed, restart on next cycle
+                            else:
+                                update_scheduled_post_status(
+                                    post['id'],
+                                    status='failed',
+                                    error_message=f'{error_msg} (max retries exhausted)',
+                                )
+                                app.logger.error("Scheduled LinkedIn post %d failed permanently: %s", post['id'], error_msg)
                         
                 except Exception as e:
                     app.logger.exception("Error processing scheduled post %d", post['id'])
-                    update_scheduled_post_status(
-                        post['id'],
-                        status='failed',
-                        error_message=str(e)[:500],
-                    )
+                    error_msg = str(e)[:500]
+                    retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
+                    if retry_count < MAX_RETRIES:
+                        increment_retry_count(post['id'])
+                        redistribute_scheduled_posts(platform)
+                        redistributed_platforms.add(platform)
+                        app.logger.warning(
+                            "Post %d exception (%s), rescheduled to next slot (retry %d/%d)",
+                            post['id'], error_msg, retry_count + 1, MAX_RETRIES,
+                        )
+                        break  # Slots redistributed, restart on next cycle
+                    else:
+                        update_scheduled_post_status(
+                            post['id'],
+                            status='failed',
+                            error_message=f'{error_msg} (max retries exhausted)',
+                        )
                     
         except Exception as e:
             app.logger.exception("Error in scheduled post worker")
