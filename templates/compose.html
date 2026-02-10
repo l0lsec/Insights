@@ -141,6 +141,20 @@
         border-radius: 12px;
     }
     
+    /* Add Post inline form */
+    .add-post-toggle-btn {
+        border-style: dashed;
+        border-width: 2px;
+        padding: 0.5rem;
+        font-weight: 500;
+        transition: all 0.2s ease;
+    }
+    .add-post-toggle-btn:hover {
+        background: #e8f0fe;
+        border-color: #667eea;
+        color: #667eea;
+    }
+    
     /* Social copy card styles - matching article.html */
     .social-copy-card {
         border-radius: 8px;
@@ -1044,6 +1058,76 @@
                         </button>
                     </div>
                     {% endif %}
+                    <!-- Inline Add Post -->
+                    <div class="mt-3 pt-3 border-top add-post-area" data-platform="{{ platform }}">
+                        <button class="btn btn-sm btn-outline-primary w-100 add-post-toggle-btn" id="add-post-btn-{{ platform }}" onclick="showAddPostForm('{{ platform }}')">
+                            ✏️ Write a New {{ platform|capitalize }} Post
+                        </button>
+                        <div class="d-none" id="add-post-form-{{ platform }}">
+                            <label class="form-label fw-bold small mb-1">New {{ platform|capitalize }} Post</label>
+                            <textarea class="form-control mb-2" id="add-post-textarea-{{ platform }}" rows="4"
+                                      placeholder="Write your {{ platform }} post here..." oninput="updateManualCharCount('{{ platform }}')"></textarea>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <small class="text-muted" id="add-post-charcount-{{ platform }}"></small>
+                                <div class="d-flex gap-2">
+                                    <button class="btn btn-sm btn-success" onclick="createManualPost('{{ platform }}')">
+                                        💾 Save Post
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" onclick="hideAddPostForm('{{ platform }}')">
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+</div>
+{% else %}
+<!-- Empty state: allow creating first manual posts -->
+<div class="card mb-4" id="saved-posts-section">
+    <div class="card-header bg-gradient d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white;">
+        <strong>📬 Posts</strong>
+        <span class="badge bg-light text-dark">0 posts</span>
+    </div>
+    <div class="card-body">
+        <p class="text-muted mb-3">No posts yet. Generate posts above or write one manually for a platform:</p>
+        <div id="saved-posts-container">
+            {% for platform in ['linkedin', 'threads', 'twitter', 'bluesky', 'facebook', 'mastodon'] %}
+            <div class="social-copy-card mb-3" data-platform="{{ platform }}">
+                <div class="social-copy-header d-flex justify-content-between align-items-center" style="background-color: var(--platform-{{ platform }}-color, #6c757d)">
+                    <div>
+                        <span class="social-icon">
+                            {% if platform == 'twitter' %}𝕏{% elif platform == 'linkedin' %}💼{% elif platform == 'facebook' %}📘{% elif platform == 'threads' %}🧵{% elif platform == 'bluesky' %}🦋{% elif platform == 'mastodon' %}🐘{% else %}📱{% endif %}
+                        </span>
+                        <span class="social-platform">{{ platform|capitalize }}</span>
+                    </div>
+                </div>
+                <div class="social-copy-body" data-platform="{{ platform }}">
+                    <div class="add-post-area" data-platform="{{ platform }}">
+                        <button class="btn btn-sm btn-outline-primary w-100 add-post-toggle-btn" id="add-post-btn-{{ platform }}" onclick="showAddPostForm('{{ platform }}')">
+                            ✏️ Write a New {{ platform|capitalize }} Post
+                        </button>
+                        <div class="d-none" id="add-post-form-{{ platform }}">
+                            <label class="form-label fw-bold small mb-1">New {{ platform|capitalize }} Post</label>
+                            <textarea class="form-control mb-2" id="add-post-textarea-{{ platform }}" rows="4"
+                                      placeholder="Write your {{ platform }} post here..." oninput="updateManualCharCount('{{ platform }}')"></textarea>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <small class="text-muted" id="add-post-charcount-{{ platform }}"></small>
+                                <div class="d-flex gap-2">
+                                    <button class="btn btn-sm btn-success" onclick="createManualPost('{{ platform }}')">
+                                        💾 Save Post
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" onclick="hideAddPostForm('{{ platform }}')">
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </div>
             {% endfor %}
@@ -3905,6 +3989,81 @@ function executeReplaceAll() {
         alert('Error: ' + error.message);
         btn.innerHTML = originalText;
         btn.disabled = false;
+    });
+}
+
+// --- Manual Post Creation ---
+
+const platformCharLimits = {
+    twitter: 280,
+    threads: 500,
+    linkedin: 3000,
+    bluesky: 300,
+    facebook: 5000,
+    mastodon: 500,
+};
+
+function showAddPostForm(platform) {
+    document.getElementById('add-post-btn-' + platform).classList.add('d-none');
+    document.getElementById('add-post-form-' + platform).classList.remove('d-none');
+    const textarea = document.getElementById('add-post-textarea-' + platform);
+    textarea.value = '';
+    textarea.focus();
+    updateManualCharCount(platform);
+}
+
+function hideAddPostForm(platform) {
+    document.getElementById('add-post-form-' + platform).classList.add('d-none');
+    document.getElementById('add-post-btn-' + platform).classList.remove('d-none');
+}
+
+function updateManualCharCount(platform) {
+    const textarea = document.getElementById('add-post-textarea-' + platform);
+    const counter = document.getElementById('add-post-charcount-' + platform);
+    if (!textarea || !counter) return;
+    const len = textarea.value.length;
+    const limit = platformCharLimits[platform] || 5000;
+    counter.textContent = len + ' / ' + limit + ' characters';
+    counter.classList.toggle('text-danger', len > limit);
+    counter.classList.toggle('text-muted', len <= limit);
+}
+
+function createManualPost(platform) {
+    const textarea = document.getElementById('add-post-textarea-' + platform);
+    const content = textarea.value.trim();
+    if (!content) {
+        alert('Please write some content for your post.');
+        textarea.focus();
+        return;
+    }
+
+    const formData = new FormData();
+    formData.append('platform', platform);
+    formData.append('content', content);
+
+    const saveBtn = textarea.closest('.add-post-area').querySelector('.btn-success');
+    const originalText = saveBtn.innerHTML;
+    saveBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Saving...';
+    saveBtn.disabled = true;
+
+    fetch('{{ url_for("compose_create_post") }}', {
+        method: 'POST',
+        body: formData,
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            location.reload();
+        } else {
+            alert('Error: ' + (data.error || 'Failed to create post'));
+            saveBtn.innerHTML = originalText;
+            saveBtn.disabled = false;
+        }
+    })
+    .catch(error => {
+        alert('Error: ' + error.message);
+        saveBtn.innerHTML = originalText;
+        saveBtn.disabled = false;
     });
 }
 </script>

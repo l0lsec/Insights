@@ -3559,6 +3559,41 @@ def compose_get_post(post_id: int):
     return jsonify(dict(post))
 
 
+@app.route('/compose/post/create', methods=['POST'])
+def compose_create_post():
+    """Create a standalone post manually (no AI generation)."""
+    platform = request.form.get('platform', '').strip().lower()
+    content = request.form.get('content', '').strip()
+    image_url = request.form.get('image_url', '').strip() or None
+
+    if not platform:
+        return jsonify({"error": "Platform is required"}), 400
+    if not content:
+        return jsonify({"error": "Content is required"}), 400
+
+    valid_platforms = ['linkedin', 'threads', 'twitter', 'bluesky', 'facebook', 'mastodon']
+    if platform not in valid_platforms:
+        return jsonify({"error": f"Invalid platform. Must be one of: {', '.join(valid_platforms)}"}), 400
+
+    post_id = add_standalone_post(
+        source_type='manual',
+        source_content='Manual post',
+        platform=platform,
+        content=content,
+        image_url=image_url,
+    )
+
+    return jsonify({
+        "success": True,
+        "post": {
+            "id": post_id,
+            "platform": platform,
+            "content": content,
+            "image_url": image_url,
+        }
+    })
+
+
 @app.route('/compose/post/<int:post_id>/edit', methods=['POST'])
 def compose_edit_post(post_id: int):
     """Edit a standalone post's content."""
