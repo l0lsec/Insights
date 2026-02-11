@@ -1221,6 +1221,38 @@ def update_threads_token(
         conn.commit()
 
 
+def update_threads_user_info(
+    user_id: str,
+    username: str | None = None,
+    display_name: str | None = None,
+    db_path: str = DB_PATH,
+) -> bool:
+    """Update Threads user info fields manually (user_id, username, display_name).
+
+    Returns True if a record was updated, False if no token exists.
+    """
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute("SELECT id FROM threads_tokens LIMIT 1")
+        existing = cur.fetchone()
+        if not existing:
+            return False
+
+        conn.execute(
+            """
+            UPDATE threads_tokens SET
+                user_id = ?,
+                username = COALESCE(?, username),
+                display_name = COALESCE(?, display_name),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (user_id, username, display_name, now, existing[0]),
+        )
+        conn.commit()
+        return True
+
+
 # --- Scheduled Posts Functions ---
 
 

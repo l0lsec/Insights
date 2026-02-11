@@ -64,6 +64,7 @@ from database import (
     get_threads_token,
     delete_threads_token,
     update_threads_token,
+    update_threads_user_info,
     # Scheduled posts functions
     add_scheduled_post,
     get_scheduled_post,
@@ -2296,11 +2297,28 @@ def threads_callback():
             user_id = user_info.get('id', user_id)
             username = user_info.get('username', '')
             display_name = user_info.get('name', '') or username
-            profile_picture_url = user_info.get('threads_profile_picture_url', '')
+            remote_picture_url = user_info.get('threads_profile_picture_url', '')
         else:
             username = ''
             display_name = 'Threads User'
-            profile_picture_url = ''
+            remote_picture_url = ''
+        
+        # Download and store profile picture locally (CDN URLs expire)
+        profile_picture_url = ''
+        if remote_picture_url:
+            try:
+                img_resp = requests.get(remote_picture_url, timeout=15)
+                if img_resp.status_code == 200:
+                    pic_filename = f"threads_profile_{user_id}.jpg"
+                    pic_path = os.path.join(app.static_folder, pic_filename)
+                    with open(pic_path, 'wb') as f:
+                        f.write(img_resp.content)
+                    profile_picture_url = url_for('static', filename=pic_filename)
+                    app.logger.info("Saved Threads profile picture to %s", pic_path)
+                else:
+                    app.logger.warning("Failed to download Threads profile picture: %s", img_resp.status_code)
+            except Exception as pic_err:
+                app.logger.warning("Could not save Threads profile picture: %s", pic_err)
         
         # Save token
         save_threads_token(
@@ -2330,6 +2348,50 @@ def threads_disconnect():
     """Disconnect Threads account."""
     delete_threads_token()
     return jsonify({"success": True, "message": "Threads disconnected"})
+
+
+@app.route('/threads/configure', methods=['GET', 'POST'])
+def threads_configure():
+    """Configure Threads user info manually or view setup instructions."""
+    token = get_threads_token()
+
+    if request.method == 'POST':
+        if not token:
+            return redirect(url_for('schedule_list') + '?error=threads_not_connected')
+
+        user_id = request.form.get('user_id', '').strip()
+        username = request.form.get('username', '').strip()
+        display_name = request.form.get('display_name', '').strip() or 'Threads User'
+
+        if not user_id:
+            return render_template(
+                'threads_configure.html',
+                token=token,
+                error="User ID is required",
+            )
+
+        success = update_threads_user_info(
+            user_id=user_id,
+            username=username or None,
+            display_name=display_name,
+        )
+
+        if success:
+            app.logger.info("Threads user info configured manually: %s (@%s)", user_id, username)
+            return redirect(url_for('schedule_list') + '?threads=configured')
+        else:
+            return render_template(
+                'threads_configure.html',
+                token=token,
+                error="Failed to save configuration. Make sure Threads is connected first.",
+            )
+
+    # GET request – show configuration / setup instructions
+    return render_template(
+        'threads_configure.html',
+        token=token,
+        is_new=request.args.get('new') == '1',
+    )
 
 
 @app.route('/threads/post/<int:post_id>', methods=['POST'])

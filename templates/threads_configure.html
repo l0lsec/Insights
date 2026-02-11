@@ -1,0 +1,242 @@
+{% extends "base.html" %}
+{% block title %}Configure Threads - PodInsights{% endblock %}
+{% block header %}Configure Threads{% endblock %}
+{% block content %}
+
+<div class="row justify-content-center">
+    <div class="col-lg-8">
+        {% if is_new %}
+        <div class="alert alert-info mb-4">
+            <h5 class="alert-heading"><i class="bi bi-info-circle"></i> Threads Connected Successfully!</h5>
+            <p class="mb-0">
+                Your Threads account is connected. You can review and update your account details below.
+            </p>
+        </div>
+        {% endif %}
+
+        <!-- Section 1: How to Create a Threads / Meta App -->
+        <div class="card mb-4">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #000000 0%, #333333 100%);">
+                <h5 class="mb-0">Step 1: Create a Meta Developer App</h5>
+            </div>
+            <div class="card-body">
+                <p>To connect Threads you need a <strong>Meta Developer App</strong> with the <strong>Threads API</strong> product enabled.</p>
+                <ol>
+                    <li>Go to the <a href="https://developers.facebook.com/apps/" target="_blank">Meta Developer Portal</a> and log in with your Facebook account.</li>
+                    <li>Click <strong>"Create App"</strong>.</li>
+                    <li>
+                        Choose a <strong>Use Case</strong>:
+                        <ul>
+                            <li>Select <strong>"Other"</strong>, then click <strong>Next</strong>.</li>
+                            <li>Select <strong>"Business"</strong> as the app type, then click <strong>Next</strong>.</li>
+                        </ul>
+                    </li>
+                    <li>Give your app a name (e.g. <em>"PodInsights Threads"</em>) and click <strong>"Create App"</strong>.</li>
+                    <li>On the app dashboard, scroll to <strong>"Add Products"</strong>, find <strong>"Threads API"</strong> and click <strong>"Set Up"</strong>.</li>
+                </ol>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #333333 0%, #555555 100%);">
+                <h5 class="mb-0">Step 2: Configure Your App Settings</h5>
+            </div>
+            <div class="card-body">
+                <ol>
+                    <li>
+                        In the left sidebar, go to <strong>App Settings &gt; Basic</strong>:
+                        <ul>
+                            <li>Copy the <strong>App ID</strong> &mdash; this is your <code>THREADS_APP_ID</code>.</li>
+                            <li>Click <strong>"Show"</strong> next to App Secret and copy it &mdash; this is your <code>THREADS_APP_SECRET</code>.</li>
+                        </ul>
+                    </li>
+                    <li>
+                        In the left sidebar, go to <strong>Threads API &gt; Settings</strong>:
+                        <ul>
+                            <li>Under <strong>"Threads Redirect Callback URLs"</strong>, add your callback URL:<br>
+                                <code>{{ request.url_root }}threads/callback</code></li>
+                        </ul>
+                    </li>
+                </ol>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #555555 0%, #777777 100%);">
+                <h5 class="mb-0">Step 3: Add Yourself as a Tester</h5>
+            </div>
+            <div class="card-body">
+                <p>While the app is in <strong>Development</strong> mode, only invited testers can authorize. You must add your own Threads account as a tester:</p>
+                <ol>
+                    <li>In the Meta Developer dashboard, go to <strong>App Roles &gt; Roles</strong>.</li>
+                    <li>Under <strong>"People"</strong>, click <strong>"Add People"</strong> and enter your <strong>Instagram / Threads username</strong>.</li>
+                    <li>
+                        Accept the tester invitation from your <strong>Threads app</strong>:
+                        <ul>
+                            <li>Open Threads &rarr; <strong>Settings</strong> &rarr; <strong>Account</strong> &rarr; <strong>Website Permissions</strong>.</li>
+                            <li>You should see a pending invite &mdash; accept it.</li>
+                        </ul>
+                    </li>
+                </ol>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #777777 0%, #999999 100%);">
+                <h5 class="mb-0">Step 4: Set Environment Variables &amp; Connect</h5>
+            </div>
+            <div class="card-body">
+                <ol>
+                    <li>
+                        Add the following to your <code>.env</code> file:
+                        <pre class="bg-light p-2 rounded mt-2 mb-2"><code>THREADS_APP_ID=your_app_id_here
+THREADS_APP_SECRET=your_app_secret_here
+THREADS_REDIRECT_URI={{ request.url_root }}threads/callback</code></pre>
+                    </li>
+                    <li>Restart PodInsights so the new variables are loaded.</li>
+                    <li>Return to the <a href="{{ url_for('schedule_list') }}">Schedule</a> page and click <strong>"Connect Threads"</strong>.</li>
+                    <li>Authorize the app when prompted &mdash; you will be redirected back automatically.</li>
+                </ol>
+            </div>
+        </div>
+
+        {% if token %}
+        <!-- Section 2: Manual Configuration -->
+        <div class="card mb-4">
+            <div class="card-header bg-secondary text-white">
+                <h5 class="mb-0">Configure Account Details Manually</h5>
+            </div>
+            <div class="card-body">
+                <p>These values were filled automatically during connection. Edit them if they are incorrect.</p>
+
+                {% if error %}
+                <div class="alert alert-danger">{{ error }}</div>
+                {% endif %}
+
+                <form method="POST" action="{{ url_for('threads_configure') }}">
+                    <div class="mb-3">
+                        <label for="user_id" class="form-label"><strong>Threads User ID</strong></label>
+                        <input type="text" class="form-control" id="user_id" name="user_id"
+                               value="{{ token['user_id'] or '' }}"
+                               placeholder="e.g., 12345678901234" required>
+                        <div class="form-text">
+                            Your numeric Threads user ID.
+                            <a href="#" data-bs-toggle="collapse" data-bs-target="#userIdHelp">How do I find my User ID?</a>
+                        </div>
+                        <div id="userIdHelp" class="collapse mt-2">
+                            <div class="card card-body bg-light">
+                                <strong>Finding your Threads User ID:</strong>
+                                <ul class="mb-0 mt-2">
+                                    <li>It is displayed here automatically after connecting your account.</li>
+                                    <li>You can also find it in the Threads API response or Meta Developer tools.</li>
+                                    <li>In Meta's <a href="https://developers.facebook.com/tools/explorer/" target="_blank">Graph API Explorer</a>, query <code>/me?fields=id</code> with your Threads token.</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="username" class="form-label"><strong>Username</strong> (optional)</label>
+                        <input type="text" class="form-control" id="username" name="username"
+                               value="{{ token['username'] or '' }}"
+                               placeholder="e.g., showupshowout">
+                        <div class="form-text">Your Threads handle without the @ symbol</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="display_name" class="form-label"><strong>Display Name</strong> (optional)</label>
+                        <input type="text" class="form-control" id="display_name" name="display_name"
+                               value="{{ token['display_name'] or '' }}"
+                               placeholder="e.g., Sedric Louissaint">
+                        <div class="form-text">Your name as it will appear in the app</div>
+                    </div>
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                        <a href="{{ url_for('schedule_list') }}" class="btn btn-outline-secondary">Cancel</a>
+                        <button type="submit" class="btn btn-dark">Save Configuration</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Section 3: Current Connection Status -->
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">Current Connection Status</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm mb-0">
+                    <tr>
+                        <th>Access Token</th>
+                        <td><span class="text-success">&#10003; Valid</span></td>
+                    </tr>
+                    <tr>
+                        <th>Expires</th>
+                        <td>{{ token['expires_at'] }}</td>
+                    </tr>
+                    <tr>
+                        <th>User ID</th>
+                        <td>
+                            {% if token['user_id'] %}
+                                <code>{{ token['user_id'] }}</code>
+                            {% else %}
+                                <span class="text-warning">Not configured</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Username</th>
+                        <td>
+                            {% if token['username'] %}
+                                <code>@{{ token['username'] }}</code>
+                            {% else %}
+                                <span class="text-warning">Not configured</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Display Name</th>
+                        <td>{{ token['display_name'] or 'Not set' }}</td>
+                    </tr>
+                    <tr>
+                        <th>Profile Picture</th>
+                        <td>
+                            {% if token['profile_picture_url'] %}
+                                <img src="{{ token['profile_picture_url'] }}" class="rounded-circle" width="40" height="40" alt="Profile">
+                                <span class="text-success ms-2">Saved locally</span>
+                            {% else %}
+                                <span class="text-muted">None</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                </table>
+                <hr>
+                <p class="mb-0 text-muted small">
+                    To refresh your profile info and token, 
+                    <a href="#" onclick="disconnectAndReconnect(); return false;" class="text-primary">disconnect and reconnect</a> your Threads account.
+                </p>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+function disconnectAndReconnect() {
+    if (confirm('This will disconnect your Threads account. You will need to reconnect to refresh your token. Continue?')) {
+        fetch('{{ url_for("threads_disconnect") }}', { method: 'POST' })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    window.location.href = '{{ url_for("threads_auth") }}';
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to disconnect. Please try again.');
+            });
+    }
+}
+</script>
+
+{% endblock %}

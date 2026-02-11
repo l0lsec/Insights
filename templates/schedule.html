@@ -1155,9 +1155,14 @@ function checkThreadsStatus() {
                                 ${data.display_name && data.display_name !== data.username ? '<br><small class="text-muted">' + data.display_name + '</small>' : ''}
                             </div>
                         </div>
-                        <button class="btn btn-sm btn-outline-danger" onclick="disconnectThreads()">
-                            Disconnect
-                        </button>
+                        <div>
+                            <a href="{{ url_for('threads_configure') }}" class="btn btn-sm btn-outline-secondary me-2">
+                                Configure
+                            </a>
+                            <button class="btn btn-sm btn-outline-danger" onclick="disconnectThreads()">
+                                Disconnect
+                            </button>
+                        </div>
                     </div>
                 `;
             } else if (data.configured) {
