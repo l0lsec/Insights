@@ -1,49 +1,71 @@
 <p align="center">
-  <img src="static/logo.png" alt="PodInsights Logo" width="200">
+  <img src="static/logo.png" alt="Insights Logo" width="200">
 </p>
 
-<h1 align="center">PodInsights</h1>
+<h1 align="center">Insights</h1>
 
 <p align="center">
-  <strong>AI-Powered Podcast Transcription, Summarization & Social Media Command Center</strong>
+  <strong>AI-Powered Content Platform for Ingestion, Analysis & Social Media Publishing</strong>
 </p>
 
 ---
 
-PodInsights is the ultimate podcast analysis and social media content creation tool for creators, researchers, and business professionals. Our tool combines state-of-the-art speech recognition with powerful AI to transform podcast content into actionable intelligence and platform-ready social media posts.
+Insights is an AI-powered content platform that turns RSS feeds, podcasts, articles, and URLs into summaries, generated articles, and platform-ready social media posts. It combines state-of-the-art speech recognition with OpenAI to process audio and text content, then helps you publish and schedule posts across LinkedIn, Threads, and more — all from a single web interface or CLI.
 
-### Key Features
+What started as a podcast transcription tool has grown into a complete content pipeline: ingest any source, let AI do the heavy lifting, and push polished posts out on your schedule.
 
-- **Accurate Podcast Transcription** - Convert any podcast episode into searchable text with industry-leading accuracy
-- **Intelligent Summarization** - Automatically generate concise summaries capturing the core message of any episode
-- **Action Item Extraction** - Never miss important tasks or follow-ups mentioned in podcast discussions
-- **Article Generation** - Transform podcast content into polished blog posts and articles on tech, privacy, and cybersecurity topics
-- **Social Media Content** - Auto-generate platform-optimized social media posts from your articles
-- **Command Center** - Your central hub for AI-powered social media content creation:
-  - Generate posts from freeform prompts, URLs, or existing text
-  - Save URL sources for future content generation
-  - Create multiple posts at once for different platforms
-  - Direct posting or queue scheduling
-- **LinkedIn Integration** - Post social media content directly to LinkedIn with rich link previews
-- **Threads Integration** - Post social media content directly to Threads (Meta)
-- **Advanced Post Scheduling** - Queue posts with configurable time slots, drag-and-drop reordering, and automated publishing
-- **JIRA Integration** - Seamlessly create tickets from extracted action items for project management
-- **RSS Feed Support** - Process entire podcast feeds directly from their source
+### Features
+
+#### Content Ingestion
+- **RSS Feeds** - Subscribe to audio (podcast) and text (blog/news) feeds with automatic metadata parsing
+- **URL Extraction** - Paste any URL and extract article content, metadata, and Open Graph images via trafilatura
+- **Direct Text Input** - Provide raw text for processing without a source URL
+- **Audio Transcription** - Transcribe podcast episodes using mlx-whisper (Apple Silicon), faster-whisper, or the OpenAI Whisper API
+
+#### AI Processing
+- **Summarization** - Generate concise summaries of transcripts and articles using OpenAI
+- **Action Item Extraction** - Pull actionable tasks and follow-ups from any processed content
+- **Article Generation** - Transform source content into polished blog posts, news articles, opinion pieces, or technical deep-dives
+- **Article Refinement** - Iteratively improve generated articles with AI-assisted feedback
+- **Social Media Copy** - Auto-generate platform-optimized posts for LinkedIn, Threads, Twitter/X, Facebook, Bluesky, Instagram, and Mastodon
+
+#### Social Media Management
+- **Command Center** - Central hub for generating posts from prompts, URLs, saved sources, or free text
+- **Multi-Platform Generation** - Create multiple posts per platform in a single batch (1-21 posts)
+- **Tone Selection** - Choose from professional, casual, witty, educational, or promotional tones
+- **Image Management** - Upload images, search stock photos (Unsplash, Pexels, Pixabay), and attach to posts
+- **Bulk Operations** - Bulk edit, delete, find-and-replace, and image assignment across posts
+
+#### Publishing & Scheduling
+- **LinkedIn Integration** - OAuth-based posting with rich link previews and image support
+- **Threads Integration** - OAuth-based posting with text and image support
+- **Time Slot Management** - Configure recurring posting times by day of week and platform
+- **Auto-Queue** - Posts automatically slot into the next available time
+- **Daily Limits** - Set per-platform daily posting caps
+- **Background Workers** - Automated publishing, feed refresh, and episode processing run in the background
+
+#### Integrations
+- **JIRA** - Create tickets from extracted action items with full source context
+- **Stock Images** - Search Unsplash, Pexels, and Pixabay for post images
+- **Cloudinary** - Optional cloud image hosting for platform compatibility
+- **OpenAI** - Powers transcription, summarization, article generation, and post creation
+
+#### API & Documentation
+- **Swagger/OpenAPI** - Interactive API docs at `/apidocs/` via Flasgger
+- **REST Endpoints** - Full API for programmatic access to all features
 
 ### Use Cases
 
-- Content creators tracking competitive analysis from industry podcasts
-- Researchers analyzing interview content for qualitative research
-- Business professionals extracting action items from recorded meetings
-- Podcast fans who want to quickly understand episode content before listening
-- Knowledge workers converting audio information into structured text data
-- Marketing teams scheduling social media content from podcast insights
-- Social media managers generating and scheduling posts from any URL or topic
-- Thought leaders building content queues for consistent social media presence
+- Content creators repurposing podcast episodes into articles and social posts
+- Marketing teams scheduling a consistent social media presence from any content source
+- Researchers extracting structured summaries and action items from interviews
+- Social media managers generating and queuing posts from URLs, topics, or existing text
+- Business professionals converting recorded meetings into JIRA tickets
+- Thought leaders building content queues across LinkedIn, Threads, and other platforms
+- Podcast fans who want quick summaries before committing to a full episode
 
-*PodInsights - Transforming podcast content into actionable intelligence and engaging social media content.*
+*Insights - Transforming content into actionable intelligence and engaging social media posts.*
 
-## Screenshots
 
 ### Feeds Page
 Manage your podcast and text RSS feeds from a central dashboard. Add new feeds, open existing ones, or delete feeds you no longer need.
@@ -61,7 +83,7 @@ View AI-generated summaries and extracted action items from processed episodes. 
 
 
 ### Generate Article
-Transform podcast insights into polished blog posts and articles. Choose your topic, style, and add optional context.
+Transform content into polished blog posts and articles. Choose your topic, style, and add optional context.
 
 
 ### Processing Status
@@ -86,156 +108,186 @@ View and manage your posting queue with drag-and-drop reordering, status/platfor
 
 ---
 
-PodInsights is a simple command-line tool that helps you transcribe podcast audio files and extract useful information from them. The current implementation relies on the [`faster-whisper`](https://github.com/guillaumekln/faster-whisper) library for transcription. Summarization and action item extraction are performed exclusively using OpenAI's chat models.
+## Project Structure
+
+| File | Description |
+|------|-------------|
+| `podinsights.py` | CLI entry point - transcribe, summarize, and extract action items from audio files |
+| `podinsights_web.py` | Flask web application with all routes, background workers, and UI logic |
+| `database.py` | SQLite database operations for feeds, episodes, articles, posts, schedules, and more |
+| `linkedin_client.py` | LinkedIn API client - OAuth flow, token management, and post publishing |
+| `threads_client.py` | Threads (Meta) API client - OAuth flow, token management, and post publishing |
+| `stock_images.py` | Stock image search across Unsplash, Pexels, and Pixabay with keyword extraction |
+| `templates/` | Flask HTML templates for all pages (feeds, articles, compose, schedule, etc.) |
+| `static/` | Static assets (logo, favicon) |
 
 ## Requirements
 
 - Python 3.11+
-- [`faster-whisper`](https://github.com/guillaumekln/faster-whisper) installed for audio transcription
-- [`openai`](https://pypi.org/project/openai/) and a valid `OPENAI_API_KEY` environment variable
-- For the web interface: [`Flask`](https://palletsprojects.com/p/flask/), [`feedparser`](https://pypi.org/project/feedparser/), and [`requests`](https://pypi.org/project/requests/)
-  (`sqlite3` from the standard library is used for episode tracking)
+- An [OpenAI API key](https://platform.openai.com/api-keys) for AI features
+- For audio transcription, one of:
+  - [`mlx-whisper`](https://github.com/ml-explore/mlx-examples/tree/main/whisper) (recommended for Apple Silicon Macs)
+  - [`faster-whisper`](https://github.com/guillaumekln/faster-whisper) (Linux, Windows, Intel Macs)
+  - OpenAI Whisper API (no extra package needed - uses your API key)
 
 ## Installation
 
-### Setting Up a Virtual Environment
+### 1. Create and activate a virtual environment
 
-1. **Create a virtual environment:**
+```bash
+python3 -m venv venv
+source venv/bin/activate   # macOS/Linux
+# venv\Scripts\activate    # Windows
+```
 
-   ```bash
-   python3 -m venv venv
-   ```
+### 2. Install dependencies
 
-2. **Activate the virtual environment:**
+```bash
+pip install -r requirements.txt
+```
 
-   - On macOS/Linux:
-     ```bash
-     source venv/bin/activate
-     ```
+The default `requirements.txt` includes `mlx-whisper` for Apple Silicon Macs. If you are on a different platform:
 
-   - On Windows:
-     ```bash
-     venv\Scripts\activate
-     ```
+- **Linux / Windows / Intel Mac** - Replace `mlx-whisper` with `faster-whisper`:
+  ```bash
+  pip install faster-whisper
+  ```
+- **Any platform (API-based)** - Skip both packages entirely. Set your `OPENAI_API_KEY` and Insights will use the OpenAI Whisper API as a fallback.
 
-3. **Install dependencies:**
+### 3. Configure environment variables
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+Copy the example file and fill in your values:
 
-   For audio transcription, also install `faster-whisper`:
-   ```bash
-   pip install faster-whisper
-   ```
-   > Note: `faster-whisper` may have platform-specific requirements. See [faster-whisper docs](https://github.com/guillaumekln/faster-whisper) for details.
+```bash
+cp .env.example .env
+```
 
-4. **Set up environment variables:**
+At minimum, set your OpenAI API key:
 
-   ```bash
-   export OPENAI_API_KEY="your-api-key-here"
-   ```
+```bash
+OPENAI_API_KEY=your-api-key-here
+```
 
-   For JIRA integration (optional):
-   ```bash
-   export JIRA_BASE_URL="https://example.atlassian.net"
-   export JIRA_EMAIL="your-email@example.com"
-   export JIRA_API_TOKEN="your-jira-token"
-   export JIRA_PROJECT_KEY="PROJ"
-   ```
+See the [Environment Variables](#environment-variables) section below for all options.
 
-5. **Run the application:**
+### 4. Run the application
 
-   - CLI:
-     ```bash
-     python podinsights.py path/to/podcast.mp3
-     ```
+**Web UI** (recommended):
+```bash
+python podinsights_web.py
+```
+Open `http://localhost:5001` in your browser.
 
-   - Web UI:
-     ```bash
-     python podinsights_web.py
-     ```
+**CLI** (quick one-off processing):
+```bash
+python podinsights.py path/to/podcast.mp3
+```
 
 ## Environment Variables
 
-The following environment variables control authentication, model selection, and integration features:
+All variables can be set in a `.env` file in the project root. See `.env.example` for a template.
 
-### Required for All Modes
+### Required
 
-- **`OPENAI_API_KEY`** *(required)*: Your OpenAI API key. Required for all summarization and action item extraction features.
+| Variable | Description |
+|----------|-------------|
+| `OPENAI_API_KEY` | Your OpenAI API key. Required for all AI features. |
 
-### Optional (Advanced Usage)
+### Optional (General)
 
-- **`OPENAI_MODEL`**: The OpenAI model to use for summarization, action item extraction, and article generation (default: `gpt-4o`). Set this if you want to use a different model.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENAI_MODEL` | `gpt-4o` | OpenAI model used for summarization, articles, and post generation |
+| `PORT` | `5001` | Port for the Flask web server |
+| `FLASK_SECRET_KEY` | auto-generated | Secret key for Flask sessions |
 
-### Required for JIRA Integration (Web UI)
+### JIRA Integration
 
-- **`JIRA_BASE_URL`**: The base URL of your JIRA Cloud instance (e.g., `https://example.atlassian.net`).
-- **`JIRA_EMAIL`**: The email address associated with your JIRA API token.
-- **`JIRA_API_TOKEN`**: Your JIRA API token.
-- **`JIRA_PROJECT_KEY`**: The project key where new issues should be created.
+| Variable | Description |
+|----------|-------------|
+| `JIRA_BASE_URL` | Your JIRA Cloud instance URL (e.g., `https://example.atlassian.net`) |
+| `JIRA_EMAIL` | Email associated with your JIRA API token |
+| `JIRA_API_TOKEN` | Your JIRA API token ([generate here](https://id.atlassian.com/manage-profile/security/api-tokens)) |
+| `JIRA_PROJECT_KEY` | Project key where issues are created |
 
-### Required for LinkedIn Integration (Web UI)
+### LinkedIn Integration
 
-- **`LINKEDIN_CLIENT_ID`**: Your LinkedIn app's Client ID from the [LinkedIn Developer Portal](https://www.linkedin.com/developers/).
-- **`LINKEDIN_CLIENT_SECRET`**: Your LinkedIn app's Client Secret.
-- **`LINKEDIN_REDIRECT_URI`**: The OAuth callback URL (default: `http://localhost:5001/linkedin/callback`). Must match the redirect URI configured in your LinkedIn app.
+| Variable | Description |
+|----------|-------------|
+| `LINKEDIN_CLIENT_ID` | Client ID from the [LinkedIn Developer Portal](https://www.linkedin.com/developers/) |
+| `LINKEDIN_CLIENT_SECRET` | Client Secret from your LinkedIn app |
+| `LINKEDIN_REDIRECT_URI` | OAuth callback URL (default: `http://localhost:5001/linkedin/callback`) |
+| `LINKEDIN_SCOPES` | OAuth scopes (default: `openid profile w_member_social`) |
 
-### Required for Threads Integration (Web UI)
+### Threads Integration
 
-- **`THREADS_APP_ID`**: Your Threads app's App ID from the [Meta Developer Portal](https://developers.facebook.com/).
-- **`THREADS_APP_SECRET`**: Your Threads app's App Secret.
-- **`THREADS_REDIRECT_URI`**: The OAuth callback URL (must be HTTPS, e.g., `https://your-domain.com/threads/callback`). Must match the redirect URI configured in your Meta app.
+| Variable | Description |
+|----------|-------------|
+| `THREADS_APP_ID` | App ID from the [Meta Developer Portal](https://developers.facebook.com/) |
+| `THREADS_APP_SECRET` | App Secret from your Meta app |
+| `THREADS_REDIRECT_URI` | OAuth callback URL (must be HTTPS, e.g., `https://your-domain.com/threads/callback`) |
+| `THREADS_SCOPES` | OAuth scopes (default: `threads_basic,threads_content_publish`) |
 
-### Optional for Web UI
+### Stock Images (all free)
 
-- **`PORT`**: The port for the Flask web server (default: `5001`). Set this if you want the web UI to run on a different port.
-- **`LINKEDIN_SCOPES`**: OAuth scopes for LinkedIn (default: `openid profile w_member_social`). Only change if you have specific scope requirements.
-- **`THREADS_SCOPES`**: OAuth scopes for Threads (default: `threads_basic,threads_content_publish`). Only change if you have specific scope requirements.
+| Variable | Rate Limit | Sign Up |
+|----------|-----------|---------|
+| `UNSPLASH_ACCESS_KEY` | 50 req/hour | [unsplash.com/developers](https://unsplash.com/developers) |
+| `PEXELS_API_KEY` | 200 req/hour | [pexels.com/api](https://www.pexels.com/api/) |
+| `PIXABAY_API_KEY` | 5,000 req/hour | [pixabay.com/api/docs](https://pixabay.com/api/docs/) |
+
+### Cloudinary (optional)
+
+| Variable | Description |
+|----------|-------------|
+| `CLOUDINARY_CLOUD_NAME` | Your Cloudinary cloud name |
+| `CLOUDINARY_API_KEY` | Cloudinary API key |
+| `CLOUDINARY_API_SECRET` | Cloudinary API secret |
+
+> Cloudinary provides publicly accessible image URLs needed by Threads and other platforms. Sign up free at [cloudinary.com](https://cloudinary.com).
 
 ## Usage (CLI)
+
+The CLI is designed for quick one-off processing of audio files:
 
 ```bash
 python podinsights.py path/to/podcast.mp3
 ```
 
-The script will attempt to transcribe the audio file using `faster-whisper`, then ask OpenAI to produce a short summary and extract action items. Results are also written to a JSON file next to the audio by default. You can specify a custom output path with the `--json` option. Use `--verbose` to enable debug logging.
-Progress messages are printed to the terminal so you can follow each step of the process.
+The script transcribes the audio, generates a summary, and extracts action items. Results are printed to the terminal and saved to a JSON file alongside the audio. Use `--json` to specify a custom output path and `--verbose` for debug logging.
 
-> **Note**: If the `faster-whisper` package is not installed, the script will raise a `NotImplementedError`. Install all dependencies via `pip install -r requirements.txt`.
-> **Note**: Summarization and action item extraction require OpenAI access. Ensure `OPENAI_API_KEY` is set in your environment.
+The JSON output contains:
+- `transcript` - the full transcript
+- `summary` - the generated summary
+- `action_items` - a list of extracted action items
 
-The JSON file contains three fields:
-
-- `transcript` – the full transcript of the audio
-- `summary` – the generated summary text
-- `action_items` – a list of extracted action items
+> **Note**: Summarization and action item extraction require `OPENAI_API_KEY` to be set.
 
 ## Usage (Web UI)
 
-A lightweight Flask application is provided in `podinsights_web.py`. It allows you to enter a podcast RSS feed URL, list the available episodes, and process an episode directly from your browser. Make sure you've installed dependencies from `requirements.txt`, then run:
+The web UI is the primary interface and provides access to all features. Start it with:
 
 ```bash
 python podinsights_web.py
 ```
 
-Navigate to `http://localhost:5001` and add an RSS feed URL. Stored feeds are listed on the home page so you can return to them later. Selecting a feed shows the episodes along with their processing status.
-When you process an episode a small overlay indicates progress until the results are displayed.
-The episode description is shown at the top of the results page so you have context when reviewing the summary and action items. The full transcript is also available on the page in a collapsible section for reference.
+Navigate to `http://localhost:5001` to get started.
 
-Episode descriptions and any images provided by the feed are displayed next to each title to help you identify episodes before processing.
+### Feeds & Content Processing
 
-You can listen to any episode directly from the browser. Each episode row now includes a small audio player so you can preview the content before processing or reviewing tickets.
+1. **Add feeds** - Enter an RSS feed URL on the home page (supports audio podcasts and text/news feeds)
+2. **Browse content** - Select a feed to see its episodes or articles with descriptions, images, and audio players
+3. **Process content** - Click an episode to transcribe and analyze it, or process text articles to extract summaries and action items
+4. **View results** - See AI-generated summaries, action items, and the full transcript on the results page
 
-Processed episodes are stored in a local SQLite database (`episodes.db`). Each episode records the transcript, summary, and action items. The feed view reports whether these pieces of information have been extracted.
-
+Processed content is stored in a local SQLite database (`podinsights.db`) for quick access.
 
 ### Generating Articles
 
-Transform podcast insights into polished articles for your blog or publication. After processing an episode, use the **Generate Article** section to create content focused on specific topics like cybersecurity, privacy, or emerging technology trends.
+Transform any processed content into polished articles:
 
-1. Process a podcast episode to get the transcript and summary
-2. Scroll to the "Generate Article" section
+1. Process an episode or article to get the transcript and summary
+2. Scroll to the **Generate Article** section
 3. Enter a topic or angle (e.g., "Privacy implications of AI voice assistants")
 4. Select an article style:
    - **Blog Post** - Conversational and engaging
@@ -244,191 +296,86 @@ Transform podcast insights into polished articles for your blog or publication. 
    - **Technical Deep-Dive** - Detailed for practitioners
 5. Click **Generate Article**
 
-All generated articles are saved and can be accessed from the **Articles** page in the navigation.
-
-### Creating JIRA Tickets
-
-You can create JIRA issues directly from the action items listed on the result
-page. Set the following environment variables so the web app can access your
-JIRA Cloud instance:
-
-- `JIRA_BASE_URL` – e.g. `https://example.atlassian.net`
-- `JIRA_EMAIL` – the email associated with an API token
-- `JIRA_API_TOKEN` – your JIRA API token
-- `JIRA_PROJECT_KEY` – project key for new issues
-
-Select the action items you want to track and click **Create JIRA Tickets**.
-Created issues are stored locally so you can access them later. When viewing an
-episode's results the associated JIRA tickets are listed with links. A dedicated
-"Tickets" page in the web interface lists every issue that has been created.
-
-Each created ticket includes context about where the action item came from. The
-description notes the podcast episode title and includes the generated summary
-so your team has immediate background when reviewing the issue.
-
-Ticket status is fetched directly from JIRA whenever you view the tickets page
-or the list of tickets on an episode's results page, so you can quickly see
-whether items are still open or have been resolved.
-
-The web interface also provides a **Status** page listing all queued and processed episodes from every feed. Use the **Queue** link next to an episode to process it in the background and track its progress on the Status page.
-
-### Posting to LinkedIn
-
-Share your generated social media content directly to LinkedIn with rich link previews. The integration supports both immediate posting and scheduled publishing.
-
-#### Setting Up LinkedIn Integration
-
-1. **Create a LinkedIn App** at the [LinkedIn Developer Portal](https://www.linkedin.com/developers/apps)
-2. **Add the required products** to your app:
-   - "Share on LinkedIn" - enables posting (provides `w_member_social` scope)
-   - "Sign In with LinkedIn using OpenID Connect" - enables user identification (provides `openid`, `profile` scopes)
-3. **Configure the OAuth redirect URL** in your app settings:
-   - Add `http://localhost:5001/linkedin/callback` (or your custom domain)
-4. **Set environment variables**:
-   ```bash
-   export LINKEDIN_CLIENT_ID="your-client-id"
-   export LINKEDIN_CLIENT_SECRET="your-client-secret"
-   export LINKEDIN_REDIRECT_URI="http://localhost:5001/linkedin/callback"
-   ```
-5. **Connect your account** by clicking "Connect LinkedIn" on any article page
-
-#### Posting Content
-
-From any article page, you can:
-- **Post Social Media Copy** - Click "Post to LinkedIn" (💼) next to any generated LinkedIn social post
-- **Add to Queue** - Click the ➕ button to schedule a post for the next available time slot
-- **Schedule for Specific Time** - Click the 📅 button to pick a custom date/time
-
-Posts containing URLs automatically include rich link previews with:
-- Title extracted from the linked page's Open Graph metadata
-- Description from the page
-- Thumbnail image uploaded to LinkedIn
-
-#### Scheduling Posts
-
-Use the **Schedule** page to manage your posting queue and configure automated publishing:
-
-1. **Configure Time Slots** - Set up recurring posting times:
-   - Add daily slots (e.g., "Post every day at 9:00 AM")
-   - Add day-specific slots (e.g., "Post on Mondays at 2:00 PM")
-   - Enable/disable slots as needed
-
-2. **Queue Posts** - From article pages, click the ➕ button to add posts to the queue. They'll automatically be assigned to the next available time slot.
-
-3. **Manage Scheduled Posts** - View, edit, or cancel pending posts from the Schedule page
-
-The background worker automatically publishes scheduled posts when their time arrives.
-
-### Posting to Threads
-
-Share your generated social media content directly to Threads (Meta). The integration supports both immediate posting and scheduled publishing.
-
-#### Setting Up Threads Integration
-
-1. **Create a Meta App** at the [Meta Developer Portal](https://developers.facebook.com/apps/)
-2. **Add the Threads API** use case to your app:
-   - Go to "Use cases" → "Add use case" → Select "Threads API"
-   - Request the following permissions: `threads_basic`, `threads_content_publish`
-3. **Configure the OAuth redirect URL** in your app settings:
-   - Navigate to Threads API → Settings
-   - Add your HTTPS redirect URI (e.g., `https://your-domain.com/threads/callback`)
-   - **Note:** Meta requires HTTPS for redirect URIs
-4. **Set environment variables**:
-   ```bash
-   export THREADS_APP_ID="your-app-id"
-   export THREADS_APP_SECRET="your-app-secret"
-   export THREADS_REDIRECT_URI="https://your-domain.com/threads/callback"
-   ```
-5. **Connect your account** by clicking "Connect Threads" on the Schedule page
-
-#### Local Development with HTTPS
-
-Meta requires HTTPS for OAuth redirect URIs. For local development, use [ngrok](https://ngrok.com/) to create a secure tunnel:
-
-1. **Install ngrok**:
-   ```bash
-   brew install ngrok  # macOS
-   # or download from https://ngrok.com/download
-   ```
-
-2. **Create a free account** at [dashboard.ngrok.com/signup](https://dashboard.ngrok.com/signup)
-
-3. **Configure ngrok** with your auth token:
-   ```bash
-   ngrok config add-authtoken YOUR_AUTH_TOKEN
-   ```
-
-4. **Start the tunnel**:
-   ```bash
-   ngrok http 5001
-   ```
-
-5. **Update your configuration**:
-   - Copy the HTTPS URL (e.g., `https://xxxx.ngrok-free.app`)
-   - Set `THREADS_REDIRECT_URI=https://xxxx.ngrok-free.app/threads/callback` in your `.env`
-   - Add the same URL to Meta Developer Portal's Valid OAuth Redirect URIs
-
-**Note:** Free ngrok URLs change each restart. Consider a paid plan for a stable subdomain.
-
-#### Posting Content to Threads
-
-From any article page, you can:
-- **Post to Threads** - Click the 🧵 button next to any generated social post
-- **Add to Queue** - Click the ➕ button and select "Threads" to schedule for the next available time slot
-- **Schedule for Specific Time** - Click the 📅 button, select "Threads", and pick a custom date/time
+Articles can be refined with AI-assisted feedback and are saved on the **Articles** page.
 
 ### Command Center
 
-The Command Center is your central hub for AI-powered social media content creation. Access it from the **Compose** link in the navigation.
+The Command Center (`/compose`) is your hub for social media content creation:
 
-#### Generating Posts
-
-Create posts from multiple sources using the tabbed interface:
-
+**Generating Posts:**
 1. **From Prompt** - Enter any topic or idea and let AI generate platform-optimized posts
 2. **From URL** - Paste a URL and the system extracts content to generate relevant posts
 3. **From Text** - Paste existing content and transform it into social media posts
-4. **From Saved Source** - Use previously saved URL content with additional instructions
+4. **From Saved Source** - Reuse previously saved URL content with different instructions
 
-For each generation:
-- Select target platforms (LinkedIn, Threads, etc.)
-- Choose how many posts to generate (1-10)
-- Add optional context or instructions to guide the AI
+For each generation, select target platforms, choose how many posts to create (1-10), set a tone, and add optional context.
 
-#### Managing Generated Posts
+**Managing Posts:**
+- Copy, edit, mark as used, post immediately, add to queue, schedule for a specific time, or delete
+- Attach images from uploads or stock photo search
+- Bulk edit, delete, or find-and-replace across posts
 
-Each generated post includes action buttons:
-- **📋 Copy** - Copy post content to clipboard
-- **✏️ Edit** - Modify the post content
-- **○/✓ Mark Used** - Track which posts you've used
-- **💼/🧵 Post Now** - Immediately publish to LinkedIn or Threads
-- **➕/✅ Queue Toggle** - Add to or remove from the schedule queue
-- **📅 Schedule** - Pick a specific date/time for posting
-- **🗑️ Delete** - Remove the post
-
-#### URL Sources
-
-When generating posts from URLs, the extracted content is automatically saved. Access saved sources from the **Sources** page to:
-- View previously extracted content
-- Generate new posts with different instructions
-- Build a library of content sources for future use
+**URL Sources:**
+When generating from URLs, extracted content is saved automatically. Access the **Sources** page to reuse content for future generations.
 
 ### Schedule Management
 
-The Schedule page provides comprehensive queue management:
+The **Schedule** page provides full queue management for automated publishing:
 
-#### Time Slots
-- Configure recurring posting times (daily or specific days)
+**Time Slots:**
+- Configure recurring posting times (daily or specific days of the week)
+- Assign slots to specific platforms
 - Set daily posting limits per platform
-- View next available slots for each platform
+- Enable/disable slots as needed
 
-#### Queue Features
-- **Drag-and-drop reordering** - Rearrange posts by dragging the grip handle (⋮⋮)
+**Queue Features:**
+- **Drag-and-drop reordering** - Rearrange posts by dragging the grip handle
 - **Filter by status** - View pending, posted, failed, or cancelled posts
 - **Filter by platform** - Show only LinkedIn or Threads posts
 - **Post Now** - Immediately publish any pending post (remaining posts auto-redistribute)
 - **Edit time** - Change the scheduled time for any pending post
 - **Bulk actions** - Select and delete multiple posts at once
+
+The background worker checks every 60 seconds and publishes posts when their scheduled time arrives.
+
+### Creating JIRA Tickets
+
+Create JIRA issues directly from extracted action items. Set the following environment variables:
+
+- `JIRA_BASE_URL` - e.g., `https://example.atlassian.net`
+- `JIRA_EMAIL` - email associated with an API token
+- `JIRA_API_TOKEN` - your JIRA API token
+- `JIRA_PROJECT_KEY` - project key for new issues
+
+Select action items on any results page and click **Create JIRA Tickets**. Each ticket includes the source context (episode title and summary) so your team has immediate background. Ticket status syncs live from JIRA whenever you view the tickets page.
+
+### Posting to LinkedIn
+
+#### Setup
+
+1. Create a LinkedIn App at the [LinkedIn Developer Portal](https://www.linkedin.com/developers/apps)
+2. Add the **Share on LinkedIn** and **Sign In with LinkedIn using OpenID Connect** products
+3. Add `http://localhost:5001/linkedin/callback` as an OAuth redirect URL
+4. Set `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, and `LINKEDIN_REDIRECT_URI` in your `.env`
+5. Click **Connect LinkedIn** in the web UI
+
+Posts containing URLs automatically include rich link previews with title, description, and thumbnail.
+
+### Posting to Threads
+
+#### Setup
+
+1. Create a Meta App at the [Meta Developer Portal](https://developers.facebook.com/apps/)
+2. Add the **Threads API** use case and request `threads_basic` and `threads_content_publish` permissions
+3. Add your HTTPS redirect URI in Threads API settings
+4. Set `THREADS_APP_ID`, `THREADS_APP_SECRET`, and `THREADS_REDIRECT_URI` in your `.env`
+5. Click **Connect Threads** in the web UI
+
+> **Local Development:** Meta requires HTTPS for OAuth redirects. Use [ngrok](https://ngrok.com/) to create a tunnel:
+> ```bash
+> ngrok http 5001
+> ```
+> Then set `THREADS_REDIRECT_URI` to the ngrok HTTPS URL and add it to your Meta app settings.
 
 ## Credits
 
