@@ -770,6 +770,12 @@
                 <button type="button" class="btn btn-sm btn-secondary d-none" id="find-stock-images-btn" onclick="findStockImagesForSelected()">
                     🔍 Find Stock Images (<span id="find-stock-count">0</span>)
                 </button>
+                <button type="button" class="btn btn-sm btn-outline-success d-none" id="mark-used-selected-btn" onclick="markUsedSelectedPosts()">
+                    ✓ Mark as Used (<span id="mark-used-count">0</span>)
+                </button>
+                <button type="button" class="btn btn-sm btn-primary d-none" id="post-now-selected-btn" onclick="postNowSelectedPosts()">
+                    🚀 Post Now (<span id="post-now-count">0</span>)
+                </button>
                 <button type="button" class="btn btn-sm btn-outline-info" onclick="openSearchReplaceModal()">
                     🔍 Find & Replace
                 </button>
@@ -2566,6 +2572,8 @@ function toggleSelectMode() {
     const removeImageBtn = document.getElementById('remove-image-selected-btn');
     const addImageBtn = document.getElementById('add-image-selected-btn');
     const findStockBtn = document.getElementById('find-stock-images-btn');
+    const markUsedBtn = document.getElementById('mark-used-selected-btn');
+    const postNowBtn = document.getElementById('post-now-selected-btn');
     const selectModeBtns = document.querySelectorAll('.select-mode-btn');
     
     if (selectModeActive) {
@@ -2589,6 +2597,8 @@ function toggleSelectMode() {
         removeImageBtn.classList.add('d-none');
         addImageBtn.classList.add('d-none');
         findStockBtn.classList.add('d-none');
+        markUsedBtn.classList.add('d-none');
+        postNowBtn.classList.add('d-none');
     }
     updateSelectedCount();
 }
@@ -2636,24 +2646,51 @@ function updateSelectedCount() {
     const removeImageBtn = document.getElementById('remove-image-selected-btn');
     const addImageBtn = document.getElementById('add-image-selected-btn');
     const findStockBtn = document.getElementById('find-stock-images-btn');
+    const markUsedBtn = document.getElementById('mark-used-selected-btn');
+    const postNowBtn = document.getElementById('post-now-selected-btn');
     
     if (count > 0 && selectModeActive) {
         deleteBtn.classList.remove('d-none');
         removeImageBtn.classList.remove('d-none');
         addImageBtn.classList.remove('d-none');
         findStockBtn.classList.remove('d-none');
+        markUsedBtn.classList.remove('d-none');
         
         // Update counts for image buttons
         document.getElementById('remove-image-count').textContent = count;
         document.getElementById('add-image-count').textContent = count;
         document.getElementById('find-stock-count').textContent = count;
         
+        // Determine if mark-used should be "mark used" or "mark unused"
+        let usedCount = 0;
+        selected.forEach(cb => {
+            const postItem = cb.closest('.post-item');
+            if (postItem && postItem.querySelector('.used-badge')) {
+                usedCount++;
+            }
+        });
+        const allUsed = usedCount === count;
+        document.getElementById('mark-used-count').textContent = count;
+        if (allUsed) {
+            markUsedBtn.innerHTML = '○ Mark as Unused (<span id="mark-used-count">' + count + '</span>)';
+            markUsedBtn.classList.remove('btn-outline-success');
+            markUsedBtn.classList.add('btn-outline-secondary');
+            markUsedBtn.dataset.action = 'unuse';
+        } else {
+            markUsedBtn.innerHTML = '✓ Mark as Used (<span id="mark-used-count">' + count + '</span>)';
+            markUsedBtn.classList.remove('btn-outline-secondary');
+            markUsedBtn.classList.add('btn-outline-success');
+            markUsedBtn.dataset.action = 'use';
+        }
+        
         let queueableCount = 0;
         let queuedCount = 0;
+        let postableCount = 0;
         selected.forEach(cb => {
             const card = cb.closest('.social-copy-card');
             const platform = card ? card.dataset.platform : '';
             if (platform === 'linkedin' || platform === 'threads') {
+                postableCount++;
                 const postItem = cb.closest('.post-item');
                 const queueToggleBtn = postItem.querySelector('.queue-toggle-btn');
                 const isQueued = queueToggleBtn && queueToggleBtn.dataset.queued === 'true';
@@ -2667,6 +2704,7 @@ function updateSelectedCount() {
         
         document.getElementById('queue-selected-count').textContent = queueableCount;
         document.getElementById('unqueue-selected-count').textContent = queuedCount;
+        document.getElementById('post-now-count').textContent = postableCount;
         
         if (queueableCount > 0) {
             queueBtn.classList.remove('d-none');
@@ -2679,6 +2717,12 @@ function updateSelectedCount() {
         } else {
             unqueueBtn.classList.add('d-none');
         }
+        
+        if (postableCount > 0) {
+            postNowBtn.classList.remove('d-none');
+        } else {
+            postNowBtn.classList.add('d-none');
+        }
     } else {
         deleteBtn.classList.add('d-none');
         queueBtn.classList.add('d-none');
@@ -2686,6 +2730,8 @@ function updateSelectedCount() {
         removeImageBtn.classList.add('d-none');
         addImageBtn.classList.add('d-none');
         findStockBtn.classList.add('d-none');
+        markUsedBtn.classList.add('d-none');
+        postNowBtn.classList.add('d-none');
     }
     
     const selectAllBtn = document.getElementById('select-all-btn');
@@ -2760,6 +2806,171 @@ function deleteSelectedPosts() {
             alert('Error: ' + (data.error || 'Failed to delete posts'));
         }
     });
+}
+
+function markUsedSelectedPosts() {
+    const selected = document.querySelectorAll('.post-select-checkbox:checked');
+    const postIds = Array.from(selected).map(cb => parseInt(cb.dataset.postId));
+
+    if (postIds.length === 0) {
+        alert('No posts selected');
+        return;
+    }
+
+    const btn = document.getElementById('mark-used-selected-btn');
+    const markAsUsed = btn.dataset.action !== 'unuse';
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '⏳ Marking...';
+    btn.disabled = true;
+
+    fetch('/compose/posts/bulk-toggle-used', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ post_ids: postIds, used: markAsUsed })
+    })
+    .then(response => response.json())
+    .then(data => {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+
+        if (data.success) {
+            postIds.forEach(postId => {
+                const postItem = document.querySelector(`.post-item[data-post-id="${postId}"]`);
+                if (!postItem) return;
+
+                const toggleBtn = postItem.querySelector('[onclick*="toggleUsed"]');
+                const usedBadge = postItem.querySelector('.used-badge');
+
+                if (markAsUsed) {
+                    if (toggleBtn) {
+                        toggleBtn.innerHTML = '✓';
+                        toggleBtn.classList.remove('btn-outline-secondary');
+                        toggleBtn.classList.add('btn-outline-success');
+                    }
+                    if (!usedBadge) {
+                        const badgeContainer = postItem.querySelector('.d-flex.align-items-center.gap-2');
+                        if (badgeContainer) {
+                            const newBadge = document.createElement('span');
+                            newBadge.className = 'badge bg-success used-badge';
+                            newBadge.textContent = '✓ Used';
+                            badgeContainer.appendChild(newBadge);
+                        }
+                    }
+                } else {
+                    if (toggleBtn) {
+                        toggleBtn.innerHTML = '○';
+                        toggleBtn.classList.remove('btn-outline-success');
+                        toggleBtn.classList.add('btn-outline-secondary');
+                    }
+                    if (usedBadge) {
+                        usedBadge.remove();
+                    }
+                }
+            });
+
+            toggleSelectMode();
+            const action = markAsUsed ? 'used' : 'unused';
+            showToast(`Marked ${data.updated_count} post${data.updated_count !== 1 ? 's' : ''} as ${action}`, 'success');
+        } else {
+            alert('Error: ' + (data.error || 'Failed to mark posts'));
+        }
+    })
+    .catch(err => {
+        btn.innerHTML = originalText;
+        btn.disabled = false;
+        alert('Error marking posts');
+    });
+}
+
+async function postNowSelectedPosts() {
+    const selected = document.querySelectorAll('.post-select-checkbox:checked');
+
+    const postsToPublish = [];
+    selected.forEach(cb => {
+        const card = cb.closest('.social-copy-card');
+        const platform = card ? card.dataset.platform : '';
+        if (platform === 'linkedin' || platform === 'threads') {
+            postsToPublish.push({
+                postId: parseInt(cb.dataset.postId),
+                platform: platform,
+                postItem: cb.closest('.post-item'),
+            });
+        }
+    });
+
+    if (postsToPublish.length === 0) {
+        alert('No LinkedIn or Threads posts selected');
+        return;
+    }
+
+    if ((postsToPublish.some(p => p.platform === 'linkedin') && !linkedinConnected) ||
+        (postsToPublish.some(p => p.platform === 'threads') && !threadsConnected)) {
+        alert('Please connect the required platforms first');
+        return;
+    }
+
+    if (!confirm(`Post ${postsToPublish.length} selected post${postsToPublish.length !== 1 ? 's' : ''} now? This will publish them immediately to their platforms.`)) {
+        return;
+    }
+
+    const btn = document.getElementById('post-now-selected-btn');
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '⏳ Posting...';
+    btn.disabled = true;
+
+    let successCount = 0;
+    let errorCount = 0;
+    const errors = [];
+
+    for (const post of postsToPublish) {
+        try {
+            const response = await fetch(`/compose/post/${post.postId}/${post.platform}`, {
+                method: 'POST',
+            });
+            const data = await response.json();
+
+            if (data.success) {
+                successCount++;
+                if (post.postItem) {
+                    const toggleBtn = post.postItem.querySelector('[onclick*="toggleUsed"]');
+                    if (toggleBtn) {
+                        toggleBtn.innerHTML = '✓';
+                        toggleBtn.classList.remove('btn-outline-secondary');
+                        toggleBtn.classList.add('btn-outline-success');
+                    }
+                    if (!post.postItem.querySelector('.used-badge')) {
+                        const badgeContainer = post.postItem.querySelector('.d-flex.align-items-center.gap-2');
+                        if (badgeContainer) {
+                            const newBadge = document.createElement('span');
+                            newBadge.className = 'badge bg-success used-badge';
+                            newBadge.textContent = '✓ Used';
+                            badgeContainer.appendChild(newBadge);
+                        }
+                    }
+                }
+            } else {
+                errorCount++;
+                errors.push(`${post.platform} post ${post.postId}: ${data.error || 'Unknown error'}`);
+            }
+        } catch (e) {
+            errorCount++;
+            errors.push(`${post.platform} post ${post.postId}: ${e.message}`);
+        }
+    }
+
+    btn.innerHTML = originalText;
+    btn.disabled = false;
+
+    toggleSelectMode();
+
+    if (errorCount === 0) {
+        showToast(`Posted ${successCount} post${successCount !== 1 ? 's' : ''} successfully`, 'success');
+    } else {
+        showToast(`Posted ${successCount}, failed ${errorCount}`, errorCount > successCount ? 'error' : 'warning');
+        if (errors.length > 0) {
+            console.error('Post Now errors:', errors);
+        }
+    }
 }
 
 async function queueSelectedPosts() {

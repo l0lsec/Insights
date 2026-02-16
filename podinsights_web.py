@@ -4070,6 +4070,31 @@ def compose_toggle_used(post_id: int):
     return jsonify({"success": True, "used": new_status})
 
 
+@app.route('/compose/posts/bulk-toggle-used', methods=['POST'])
+def compose_bulk_toggle_used():
+    """Bulk mark/unmark standalone posts as used."""
+    data = request.get_json()
+    post_ids = data.get('post_ids', [])
+    used = data.get('used', True)
+
+    if not post_ids:
+        return jsonify({"error": "No posts selected"}), 400
+
+    post_ids = [int(pid) for pid in post_ids]
+    updated = 0
+    for post_id in post_ids:
+        post = get_standalone_post(post_id)
+        if post:
+            mark_standalone_post_used(post_id, used)
+            updated += 1
+
+    return jsonify({
+        "success": True,
+        "updated_count": updated,
+        "used": used,
+    })
+
+
 @app.route('/compose/post/<int:post_id>/linkedin', methods=['POST'])
 def compose_post_to_linkedin(post_id: int):
     """Post a standalone post to LinkedIn immediately."""
