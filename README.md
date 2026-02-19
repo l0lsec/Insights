@@ -142,9 +142,14 @@ source venv/bin/activate   # macOS/Linux
 
 ### 2. Install dependencies
 
+Use the venv’s pip so packages install into the venv (avoids “Defaulting to user installation” and scripts not on PATH):
+
 ```bash
-pip install -r requirements.txt
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 ```
+
+If you see **“Defaulting to user installation because normal site-packages is not writeable”** or scripts installed to `~/Library/Python/3.x/bin`, you’re not using the venv’s pip. Use `python -m pip` (and run the app with `python podinsights_web.py`), not `pip3`/`python3`, so the venv’s interpreter is used. With the venv activated, `which python` should show a path inside the project’s `venv/`.
 
 The default `requirements.txt` includes `mlx-whisper` for Apple Silicon Macs. If you are on a different platform:
 

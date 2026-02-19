@@ -5,7 +5,8 @@ requests>=2.31.0
 openai>=1.0.0
 python-dotenv>=1.0.0
 beautifulsoup4>=4.12.0
-lxml>=5.0.0
+# Pin to 5.x: lxml 6+ removed html_clean (trafilatura/jusText need it)
+lxml>=5.0.0,<6.0.0
 Pillow>=10.0.0
 cloudinary>=1.36.0
 trafilatura>=1.6.0

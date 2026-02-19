@@ -1,5 +1,7 @@
 """Command line utilities for transcribing and analysing podcasts."""
 
+from __future__ import annotations
+
 import os
 import json
 import logging
