@@ -65,6 +65,13 @@ from database import (
     delete_threads_token,
     update_threads_token,
     update_threads_user_info,
+    # Facebook token functions
+    save_facebook_token,
+    get_facebook_token,
+    delete_facebook_token,
+    update_facebook_token,
+    update_facebook_page_selection,
+    update_facebook_group_ids,
     # Scheduled posts functions
     add_scheduled_post,
     get_scheduled_post,
@@ -149,6 +156,12 @@ from threads_client import (
     get_threads_client,
     calculate_token_expiry as threads_calculate_token_expiry,
     is_token_expired as threads_is_token_expired,
+)
+from facebook_client import (
+    FacebookClient,
+    get_facebook_client,
+    calculate_token_expiry as facebook_calculate_token_expiry,
+    is_token_expired as facebook_is_token_expired,
 )
 from stock_images import (
     search_stock_images,
@@ -2479,6 +2492,349 @@ def threads_post_social(post_id: int):
 
 
 # ============================================================================
+# Facebook Integration Routes
+# ============================================================================
+
+
+@app.route('/facebook/status')
+def facebook_status():
+    """Check Facebook connection status."""
+    client = get_facebook_client()
+    token = get_facebook_token()
+
+    if not client.is_configured():
+        return jsonify({
+            "connected": False,
+            "configured": False,
+            "message": "Facebook credentials not configured. Set FACEBOOK_APP_ID and FACEBOOK_APP_SECRET.",
+        })
+
+    if not token:
+        return jsonify({
+            "connected": False,
+            "configured": True,
+            "message": "Not connected to Facebook",
+        })
+
+    if facebook_is_token_expired(token['expires_at']):
+        try:
+            new_token = client.refresh_access_token(token['access_token'])
+            expires_at = facebook_calculate_token_expiry(new_token.get('expires_in', 5184000))
+            update_facebook_token(
+                access_token=new_token['access_token'],
+                expires_at=expires_at,
+            )
+            token = get_facebook_token()
+        except Exception as e:
+            app.logger.warning("Failed to refresh Facebook token: %s", e)
+            return jsonify({
+                "connected": False,
+                "configured": True,
+                "message": "Token expired. Please reconnect.",
+            })
+
+    return jsonify({
+        "connected": True,
+        "configured": True,
+        "user_name": token['user_name'],
+        "user_id": token['user_id'],
+        "page_name": token['page_name'],
+        "page_id": token['page_id'],
+    })
+
+
+@app.route('/facebook/auth')
+def facebook_auth():
+    """Start Facebook OAuth flow."""
+    client = get_facebook_client()
+
+    if not client.is_configured():
+        return jsonify({"error": "Facebook not configured"}), 400
+
+    auth_url, state = client.get_authorization_url()
+    session['facebook_oauth_state'] = state
+
+    return redirect(auth_url)
+
+
+@app.route('/facebook/callback')
+def facebook_callback():
+    """Handle Facebook OAuth callback."""
+    error = request.args.get('error')
+    if error:
+        error_desc = request.args.get('error_description', 'Unknown error')
+        app.logger.error("Facebook OAuth error: %s - %s", error, error_desc)
+        return render_template(
+            'article_error.html',
+            error=f"Facebook authorization failed: {error_desc}",
+        )
+
+    code = request.args.get('code')
+    state = request.args.get('state')
+
+    stored_state = session.pop('facebook_oauth_state', None)
+    if not stored_state or stored_state != state:
+        app.logger.warning("Facebook OAuth state mismatch")
+        return render_template(
+            'article_error.html',
+            error="Security verification failed. Please try again.",
+        )
+
+    if not code:
+        return render_template(
+            'article_error.html',
+            error="No authorization code received from Facebook.",
+        )
+
+    client = get_facebook_client()
+
+    try:
+        token_data = client.exchange_code_for_token(code)
+        short_lived_token = token_data['access_token']
+
+        long_lived_data = client.get_long_lived_token(short_lived_token)
+        access_token = long_lived_data['access_token']
+        expires_in = long_lived_data.get('expires_in', 5184000)
+
+        expires_at = facebook_calculate_token_expiry(expires_in)
+
+        user_info = client.get_user_profile(access_token)
+        user_id = user_info.get('id', '') if user_info else ''
+        user_name = user_info.get('name', 'Facebook User') if user_info else 'Facebook User'
+
+        pages = client.get_user_pages(access_token)
+        page_id = pages[0]['id'] if pages else None
+        page_name = pages[0]['name'] if pages else None
+        page_access_token = pages[0]['access_token'] if pages else None
+
+        groups = client.get_user_groups(access_token)
+        group_ids = ','.join(g['id'] for g in groups) if groups else None
+
+        save_facebook_token(
+            access_token=access_token,
+            expires_at=expires_at,
+            user_id=user_id,
+            user_name=user_name,
+            page_id=page_id,
+            page_name=page_name,
+            page_access_token=page_access_token,
+            group_ids=group_ids,
+        )
+
+        app.logger.info("Facebook connected for user: %s", user_name)
+
+        if pages and len(pages) > 1:
+            return redirect(url_for('facebook_configure') + '?new=1')
+
+        return redirect(url_for('schedule_list') + '?facebook=connected')
+
+    except Exception as e:
+        app.logger.exception("Facebook OAuth exchange failed")
+        return render_template(
+            'article_error.html',
+            error=f"Failed to connect to Facebook: {str(e)}",
+        )
+
+
+@app.route('/facebook/disconnect', methods=['POST'])
+def facebook_disconnect():
+    """Disconnect Facebook account."""
+    delete_facebook_token()
+    return jsonify({"success": True, "message": "Facebook disconnected"})
+
+
+@app.route('/facebook/configure', methods=['GET', 'POST'])
+def facebook_configure():
+    """Configure which Facebook Page/Group to post to."""
+    token = get_facebook_token()
+
+    if request.method == 'POST':
+        if not token:
+            return redirect(url_for('schedule_list') + '?error=facebook_not_connected')
+
+        page_id = request.form.get('page_id', '').strip()
+        group_ids = request.form.get('group_ids', '').strip()
+
+        if page_id:
+            client = get_facebook_client()
+            pages = client.get_user_pages(token['access_token'])
+            selected = next((p for p in pages if p['id'] == page_id), None)
+            if selected:
+                update_facebook_page_selection(
+                    page_id=selected['id'],
+                    page_name=selected['name'],
+                    page_access_token=selected['access_token'],
+                )
+
+        if group_ids is not None:
+            update_facebook_group_ids(group_ids)
+
+        app.logger.info("Facebook page/group selection updated")
+        return redirect(url_for('schedule_list') + '?facebook=configured')
+
+    pages = []
+    groups = []
+    if token:
+        client = get_facebook_client()
+        pages = client.get_user_pages(token['access_token'])
+        groups = client.get_user_groups(token['access_token'])
+
+    return render_template(
+        'facebook_configure.html',
+        token=token,
+        pages=pages,
+        groups=groups,
+        is_new=request.args.get('new') == '1',
+    )
+
+
+@app.route('/facebook/post/<int:post_id>', methods=['POST'])
+def facebook_post_social(post_id: int):
+    """Post a social media post to Facebook immediately."""
+    post = get_social_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    if post['platform'] != 'facebook':
+        return jsonify({"error": "This post is not for Facebook"}), 400
+
+    token = get_facebook_token()
+    if not token:
+        return jsonify({"error": "Facebook not connected. Please connect your account first."}), 401
+
+    if not token['page_id'] or not token['page_access_token']:
+        return jsonify({"error": "No Facebook Page selected. Please configure in Settings."}), 400
+
+    if facebook_is_token_expired(token['expires_at']):
+        client = get_facebook_client()
+        try:
+            new_token = client.refresh_access_token(token['access_token'])
+            expires_at = facebook_calculate_token_expiry(new_token.get('expires_in', 5184000))
+            update_facebook_token(
+                access_token=new_token['access_token'],
+                expires_at=expires_at,
+            )
+            token = get_facebook_token()
+        except Exception as e:
+            app.logger.warning("Failed to refresh Facebook token: %s", e)
+            return jsonify({"error": "Facebook token expired. Please reconnect."}), 401
+
+    client = get_facebook_client()
+
+    try:
+        image_url = post['image_url'] if 'image_url' in post.keys() else None
+
+        result = client.publish_smart_post(
+            page_access_token=token['page_access_token'],
+            page_id=token['page_id'],
+            text=post['content'],
+            image_url=image_url,
+        )
+
+        if result['success']:
+            mark_social_post_used(post_id, True)
+
+            now = datetime.now().isoformat(timespec='seconds')
+            add_scheduled_post(
+                social_post_id=post_id,
+                article_id=post['article_id'] if 'article_id' in post.keys() else None,
+                post_type='social',
+                platform='facebook',
+                scheduled_for=now,
+                status='posted',
+                linkedin_post_urn=result.get('permalink'),
+            )
+
+            return jsonify({
+                "success": True,
+                "post_id": result.get('post_id'),
+                "permalink": result.get('permalink'),
+                "message": "Posted to Facebook successfully!",
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": result.get('error', 'Unknown error'),
+            }), 400
+
+    except Exception as e:
+        app.logger.exception("Failed to post to Facebook")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/compose/post/<int:post_id>/facebook', methods=['POST'])
+def compose_post_to_facebook(post_id: int):
+    """Post a standalone post to Facebook immediately."""
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    token = get_facebook_token()
+    if not token:
+        return jsonify({"error": "Facebook not connected. Please connect your account first."}), 401
+
+    if not token['page_id'] or not token['page_access_token']:
+        return jsonify({"error": "No Facebook Page selected. Please configure in Settings."}), 400
+
+    if facebook_is_token_expired(token['expires_at']):
+        client = get_facebook_client()
+        try:
+            new_token = client.refresh_access_token(token['access_token'])
+            expires_at = facebook_calculate_token_expiry(new_token.get('expires_in', 5184000))
+            update_facebook_token(
+                access_token=new_token['access_token'],
+                expires_at=expires_at,
+            )
+            token = get_facebook_token()
+        except Exception as e:
+            app.logger.warning("Failed to refresh Facebook token: %s", e)
+            return jsonify({"error": "Facebook token expired. Please reconnect."}), 401
+
+    client = get_facebook_client()
+
+    try:
+        image_url = post['image_url'] if 'image_url' in post.keys() else None
+
+        result = client.publish_smart_post(
+            page_access_token=token['page_access_token'],
+            page_id=token['page_id'],
+            text=post['content'],
+            image_url=image_url,
+        )
+
+        if result['success']:
+            mark_standalone_post_used(post_id, True)
+
+            now = datetime.now().isoformat(timespec='seconds')
+            add_scheduled_post(
+                social_post_id=None,
+                article_id=None,
+                standalone_post_id=post_id,
+                post_type='standalone',
+                platform='facebook',
+                scheduled_for=now,
+                status='posted',
+                linkedin_post_urn=result.get('permalink'),
+            )
+
+            return jsonify({
+                "success": True,
+                "post_id": result.get('post_id'),
+                "permalink": result.get('permalink'),
+                "message": "Posted to Facebook successfully!",
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": result.get('error', 'Unknown error'),
+            }), 400
+
+    except Exception as e:
+        app.logger.exception("Failed to post to Facebook")
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
 # Scheduled Posts Routes
 # ============================================================================
 
@@ -2607,7 +2963,7 @@ def schedule_list():
     
     # Get next available slot for each platform
     next_slots = {}
-    for plat in ['linkedin', 'threads']:
+    for plat in ['linkedin', 'threads', 'facebook']:
         slot = get_next_available_slot(platform=plat)
         if slot:
             try:
@@ -2630,6 +2986,7 @@ def schedule_list():
     # Count posts by platform
     linkedin_count = sum(1 for p in scheduled if p.get('platform') == 'linkedin')
     threads_count = sum(1 for p in scheduled if p.get('platform') == 'threads')
+    facebook_count = sum(1 for p in scheduled if p.get('platform') == 'facebook')
     
     return render_template(
         'schedule.html',
@@ -2648,6 +3005,7 @@ def schedule_list():
         threads_username=threads_username,
         linkedin_count=linkedin_count,
         threads_count=threads_count,
+        facebook_count=facebook_count,
     )
 
 
@@ -2696,12 +3054,14 @@ def schedule_list_json():
     # Count posts by platform
     linkedin_count = sum(1 for p in scheduled if p.get('platform') == 'linkedin')
     threads_count = sum(1 for p in scheduled if p.get('platform') == 'threads')
+    facebook_count = sum(1 for p in scheduled if p.get('platform') == 'facebook')
     
     return jsonify({
         "success": True,
         "posts": scheduled,
         "linkedin_count": linkedin_count,
         "threads_count": threads_count,
+        "facebook_count": facebook_count,
         "total_count": len(scheduled),
     })
 
@@ -4726,6 +5086,7 @@ def scheduled_post_worker() -> None:
             # Cache tokens to avoid repeated DB queries
             linkedin_token = None
             threads_token = None
+            facebook_token = None
             redistributed_platforms = set()  # Track platforms we've redistributed
             
             for post in pending:
@@ -4872,6 +5233,88 @@ def scheduled_post_worker() -> None:
                                     error_message=f'{error_msg} (max retries exhausted)',
                                 )
                                 app.logger.error("Scheduled Threads post %d failed permanently: %s", post['id'], error_msg)
+                    
+                    elif platform == 'facebook':
+                        # Handle Facebook posting
+                        if facebook_token is None:
+                            facebook_token = get_facebook_token()
+                        
+                        if not facebook_token:
+                            app.logger.warning("Scheduled Facebook post %d due but Facebook not connected", post['id'])
+                            update_scheduled_post_status(
+                                post['id'],
+                                status='failed',
+                                error_message='Facebook not connected',
+                            )
+                            continue
+                        
+                        if not facebook_token['page_id'] or not facebook_token['page_access_token']:
+                            app.logger.warning("Scheduled Facebook post %d due but no Page selected", post['id'])
+                            update_scheduled_post_status(
+                                post['id'],
+                                status='failed',
+                                error_message='No Facebook Page selected',
+                            )
+                            continue
+                        
+                        if facebook_is_token_expired(facebook_token['expires_at']):
+                            fb_client = get_facebook_client()
+                            try:
+                                new_token = fb_client.refresh_access_token(facebook_token['access_token'])
+                                expires_at = facebook_calculate_token_expiry(new_token.get('expires_in', 5184000))
+                                update_facebook_token(
+                                    access_token=new_token['access_token'],
+                                    expires_at=expires_at,
+                                )
+                                facebook_token = get_facebook_token()
+                            except Exception as e:
+                                app.logger.error("Failed to refresh Facebook token: %s", e)
+                                update_scheduled_post_status(
+                                    post['id'],
+                                    status='failed',
+                                    error_message='Facebook token expired',
+                                )
+                                continue
+                        
+                        fb_client = get_facebook_client()
+                        
+                        result = fb_client.publish_smart_post(
+                            page_access_token=facebook_token['page_access_token'],
+                            page_id=facebook_token['page_id'],
+                            text=content[:5000],
+                            image_url=image_url,
+                        )
+                        
+                        if result['success']:
+                            update_scheduled_post_status(
+                                post['id'],
+                                status='posted',
+                                linkedin_post_urn=result.get('permalink'),
+                            )
+                            if post['social_post_id']:
+                                mark_social_post_used(post['social_post_id'], True)
+                            if post['standalone_post_id']:
+                                mark_standalone_post_used(post['standalone_post_id'], True)
+                            app.logger.info("Scheduled Facebook post %d published successfully", post['id'])
+                        else:
+                            error_msg = str(result.get('error', 'Unknown error'))[:500]
+                            retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
+                            if retry_count < MAX_RETRIES:
+                                increment_retry_count(post['id'])
+                                redistribute_scheduled_posts(platform)
+                                redistributed_platforms.add(platform)
+                                app.logger.warning(
+                                    "Facebook post %d failed (%s), rescheduled to next slot (retry %d/%d)",
+                                    post['id'], error_msg, retry_count + 1, MAX_RETRIES,
+                                )
+                                break
+                            else:
+                                update_scheduled_post_status(
+                                    post['id'],
+                                    status='failed',
+                                    error_message=f'{error_msg} (max retries exhausted)',
+                                )
+                                app.logger.error("Scheduled Facebook post %d failed permanently: %s", post['id'], error_msg)
                     
                     else:
                         # Handle LinkedIn posting (default)

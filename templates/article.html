@@ -233,6 +233,22 @@
                                     <button class="btn btn-outline-warning" onclick="openScheduleModal({{ post.id }}, 'social', 'threads')" title="Schedule for Specific Time">
                                         📅
                                     </button>
+                                    {% elif platform == 'facebook' %}
+                                    <button class="btn btn-outline-primary facebook-post-btn" onclick="postToFacebook({{ post.id }}, this)" title="Post to Facebook Now" data-post-id="{{ post.id }}">
+                                        📘
+                                    </button>
+                                    {% if post.scheduled and post.scheduled.facebook %}
+                                    <button class="btn btn-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'social', 'facebook', this, true)" title="Click to remove from queue (Scheduled: {{ post.scheduled.facebook }})" data-post-id="{{ post.id }}" data-platform="facebook" data-queued="true">
+                                        ✅
+                                    </button>
+                                    {% else %}
+                                    <button class="btn btn-outline-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'social', 'facebook', this, false)" title="Add to Queue" data-post-id="{{ post.id }}" data-platform="facebook" data-queued="false">
+                                        ➕
+                                    </button>
+                                    {% endif %}
+                                    <button class="btn btn-outline-warning" onclick="openScheduleModal({{ post.id }}, 'social', 'facebook')" title="Schedule for Specific Time">
+                                        📅
+                                    </button>
                                     {% endif %}
                                     <button class="btn btn-outline-danger" onclick="deletePost({{ post.id }}, this)" title="Delete">
                                         🗑️
@@ -1391,6 +1407,86 @@ function postToThreads(postId, btn) {
                 
                 setTimeout(() => {
                     btn.innerHTML = '🧵';
+                    btn.disabled = false;
+                }, 2000);
+            } else {
+                btn.innerHTML = '❌';
+                alert('Failed to post: ' + (data.error ? JSON.stringify(data.error) : 'Unknown error'));
+                setTimeout(() => {
+                    btn.innerHTML = originalHtml;
+                    btn.disabled = false;
+                }, 2000);
+            }
+        })
+        .catch(error => {
+            btn.innerHTML = '❌';
+            alert('Error: ' + error.message);
+            setTimeout(() => {
+                btn.innerHTML = originalHtml;
+                btn.disabled = false;
+            }, 2000);
+        });
+}
+
+// ============================================================================
+// Facebook Integration Functions
+// ============================================================================
+
+let facebookConnected = false;
+
+document.addEventListener('DOMContentLoaded', function() {
+    checkFacebookStatus();
+});
+
+function checkFacebookStatus() {
+    fetch('{{ url_for("facebook_status") }}')
+        .then(response => response.json())
+        .then(data => {
+            facebookConnected = data.connected;
+        })
+        .catch(error => {
+            console.error('Error checking Facebook status:', error);
+        });
+}
+
+function postToFacebook(postId, btn) {
+    if (!facebookConnected) {
+        alert('Please connect Facebook first. Go to Schedule page to connect.');
+        return;
+    }
+
+    if (!confirm('Post this to Facebook now?')) return;
+
+    const originalHtml = btn.innerHTML;
+    btn.innerHTML = '⏳';
+    btn.disabled = true;
+
+    fetch(`/facebook/post/${postId}`, { method: 'POST' })
+        .then(response => response.json().then(data => ({ ok: response.ok, data })))
+        .then(({ ok, data }) => {
+            if (data.success) {
+                btn.innerHTML = '✅';
+                btn.classList.remove('btn-outline-primary');
+                btn.classList.add('btn-success');
+
+                const postItem = btn.closest('.post-item');
+                const usedBadge = postItem.querySelector('.used-badge');
+                if (!usedBadge) {
+                    const badgeContainer = postItem.querySelector('.d-flex.align-items-center.gap-2');
+                    const newBadge = document.createElement('span');
+                    newBadge.className = 'badge bg-success used-badge';
+                    newBadge.textContent = '✓ Used';
+                    badgeContainer.appendChild(newBadge);
+                }
+
+                const fbBadge = document.createElement('span');
+                fbBadge.className = 'badge ms-1';
+                fbBadge.style.backgroundColor = '#1877F2';
+                fbBadge.textContent = '📘 Posted';
+                btn.parentNode.insertBefore(fbBadge, btn.nextSibling);
+
+                setTimeout(() => {
+                    btn.innerHTML = '📘';
                     btn.disabled = false;
                 }, 2000);
             } else {

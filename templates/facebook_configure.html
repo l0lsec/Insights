@@ -1,0 +1,224 @@
+{% extends "base.html" %}
+{% block title %}Configure Facebook - PodInsights{% endblock %}
+{% block header %}Configure Facebook{% endblock %}
+{% block content %}
+
+<div class="row justify-content-center">
+    <div class="col-lg-8">
+        {% if is_new %}
+        <div class="alert alert-info mb-4">
+            <h5 class="alert-heading"><i class="bi bi-info-circle"></i> Facebook Connected Successfully!</h5>
+            <p class="mb-0">
+                Your Facebook account is connected. Select which Page to post to below.
+            </p>
+        </div>
+        {% endif %}
+
+        {% if not token %}
+        <!-- Setup instructions when not connected -->
+        <div class="card mb-4">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #1877F2 0%, #0d5bbf 100%);">
+                <h5 class="mb-0">Step 1: Create a Meta Developer App</h5>
+            </div>
+            <div class="card-body">
+                <p>To connect Facebook you need a <strong>Meta Developer App</strong> with <strong>Facebook Login</strong> enabled.</p>
+                <ol>
+                    <li>Go to the <a href="https://developers.facebook.com/apps/" target="_blank">Meta Developer Portal</a> and log in.</li>
+                    <li>Click <strong>"Create App"</strong>.</li>
+                    <li>Choose <strong>"Other"</strong> as the use case, then <strong>"Business"</strong> as the app type.</li>
+                    <li>Give your app a name (e.g. <em>"PodInsights Facebook"</em>) and click <strong>"Create App"</strong>.</li>
+                    <li>On the dashboard, find <strong>"Facebook Login for Business"</strong> and click <strong>"Set Up"</strong>.</li>
+                </ol>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #0d5bbf 0%, #0a4a99 100%);">
+                <h5 class="mb-0">Step 2: Configure Permissions &amp; Redirect URI</h5>
+            </div>
+            <div class="card-body">
+                <ol>
+                    <li>
+                        In <strong>App Settings &gt; Basic</strong>:
+                        <ul>
+                            <li>Copy the <strong>App ID</strong> &rarr; this is your <code>FACEBOOK_APP_ID</code>.</li>
+                            <li>Click <strong>"Show"</strong> next to App Secret &rarr; this is your <code>FACEBOOK_APP_SECRET</code>.</li>
+                        </ul>
+                    </li>
+                    <li>
+                        In <strong>Facebook Login &gt; Settings</strong>:
+                        <ul>
+                            <li>Under <strong>"Valid OAuth Redirect URIs"</strong>, add:<br>
+                                <code>{{ request.url_root }}facebook/callback</code></li>
+                        </ul>
+                    </li>
+                    <li>
+                        In <strong>App Review &gt; Permissions and Features</strong>, request:
+                        <ul>
+                            <li><code>pages_manage_posts</code> &mdash; to post on Pages you manage</li>
+                            <li><code>pages_read_engagement</code> &mdash; to read Page info</li>
+                            <li><code>publish_to_groups</code> (optional) &mdash; to post in Groups you admin</li>
+                        </ul>
+                        <small class="text-muted">In development mode, these work for app admins/testers without review.</small>
+                    </li>
+                </ol>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #0a4a99 0%, #083c7a 100%);">
+                <h5 class="mb-0">Step 3: Set Environment Variables &amp; Connect</h5>
+            </div>
+            <div class="card-body">
+                <ol>
+                    <li>
+                        Add to your <code>.env</code> file:
+                        <pre class="bg-light p-2 rounded mt-2 mb-2"><code>FACEBOOK_APP_ID=your_app_id_here
+FACEBOOK_APP_SECRET=your_app_secret_here
+FACEBOOK_REDIRECT_URI={{ request.url_root }}facebook/callback</code></pre>
+                    </li>
+                    <li>Restart PodInsights so the new variables are loaded.</li>
+                    <li>Return to the <a href="{{ url_for('compose_page') }}">Command Center</a> and click <strong>"Connect"</strong> on the Facebook card.</li>
+                </ol>
+            </div>
+        </div>
+        {% endif %}
+
+        {% if token %}
+        <!-- Page Selection -->
+        <div class="card mb-4">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #1877F2 0%, #0d5bbf 100%);">
+                <h5 class="mb-0">Select Facebook Page</h5>
+            </div>
+            <div class="card-body">
+                <p>Choose which Facebook Page to publish posts to.</p>
+
+                <form method="POST" action="{{ url_for('facebook_configure') }}">
+                    {% if pages %}
+                    <div class="mb-3">
+                        <label class="form-label"><strong>Your Pages</strong></label>
+                        {% for page in pages %}
+                        <div class="form-check mb-2">
+                            <input class="form-check-input" type="radio" name="page_id" 
+                                   id="page-{{ page.id }}" value="{{ page.id }}"
+                                   {% if token['page_id'] == page.id %}checked{% endif %}>
+                            <label class="form-check-label" for="page-{{ page.id }}">
+                                <strong>{{ page.name }}</strong>
+                                <small class="text-muted">({{ page.category }})</small>
+                            </label>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% else %}
+                    <div class="alert alert-warning mb-3">
+                        <strong>No Pages found.</strong> Make sure your Facebook account manages at least one Page, and that the app has <code>pages_manage_posts</code> permission.
+                    </div>
+                    {% endif %}
+
+                    {% if groups %}
+                    <hr>
+                    <div class="mb-3">
+                        <label class="form-label"><strong>Your Groups</strong> <small class="text-muted">(optional, requires <code>publish_to_groups</code>)</small></label>
+                        <input type="hidden" name="group_ids" id="group-ids-input" value="{{ token['group_ids'] or '' }}">
+                        {% for group in groups %}
+                        <div class="form-check mb-2">
+                            <input class="form-check-input group-checkbox" type="checkbox"
+                                   id="group-{{ group.id }}" value="{{ group.id }}"
+                                   {% if token['group_ids'] and group.id in token['group_ids'].split(',') %}checked{% endif %}
+                                   onchange="updateGroupIds()">
+                            <label class="form-check-label" for="group-{{ group.id }}">
+                                <strong>{{ group.name }}</strong>
+                                <small class="text-muted">({{ group.privacy }})</small>
+                            </label>
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                        <a href="{{ url_for('compose_page') }}" class="btn btn-outline-secondary">Cancel</a>
+                        <button type="submit" class="btn btn-primary" style="background-color: #1877F2; border-color: #1877F2;">Save Selection</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Connection Status -->
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">Connection Status</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm mb-0">
+                    <tr>
+                        <th>Access Token</th>
+                        <td><span class="text-success">&#10003; Valid</span></td>
+                    </tr>
+                    <tr>
+                        <th>Expires</th>
+                        <td>{{ token['expires_at'] }}</td>
+                    </tr>
+                    <tr>
+                        <th>User</th>
+                        <td>{{ token['user_name'] or 'Unknown' }} <small class="text-muted">({{ token['user_id'] }})</small></td>
+                    </tr>
+                    <tr>
+                        <th>Selected Page</th>
+                        <td>
+                            {% if token['page_name'] %}
+                                <strong>{{ token['page_name'] }}</strong> <small class="text-muted">({{ token['page_id'] }})</small>
+                            {% else %}
+                                <span class="text-warning">No page selected</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Groups</th>
+                        <td>
+                            {% if token['group_ids'] %}
+                                <code>{{ token['group_ids'] }}</code>
+                            {% else %}
+                                <span class="text-muted">None selected</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                </table>
+                <hr>
+                <p class="mb-0 text-muted small">
+                    To refresh your connection,
+                    <a href="#" onclick="disconnectAndReconnect(); return false;" class="text-primary">disconnect and reconnect</a> your Facebook account.
+                </p>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+function updateGroupIds() {
+    const checked = document.querySelectorAll('.group-checkbox:checked');
+    const ids = Array.from(checked).map(cb => cb.value).join(',');
+    document.getElementById('group-ids-input').value = ids;
+}
+
+function disconnectAndReconnect() {
+    if (confirm('This will disconnect your Facebook account. You will need to reconnect to refresh your token. Continue?')) {
+        fetch('{{ url_for("facebook_disconnect") }}', { method: 'POST' })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    window.location.href = '{{ url_for("facebook_auth") }}';
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to disconnect. Please try again.');
+            });
+    }
+}
+</script>
+
+{% endblock %}

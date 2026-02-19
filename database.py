@@ -139,6 +139,24 @@ def init_db(db_path: str = DB_PATH) -> None:
             )
             """
         )
+        # Facebook OAuth tokens storage (Pages + Groups)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS facebook_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                access_token TEXT,
+                expires_at TEXT,
+                user_id TEXT,
+                user_name TEXT,
+                page_id TEXT,
+                page_name TEXT,
+                page_access_token TEXT,
+                group_ids TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
         # Scheduled posts queue for LinkedIn and other platforms
         conn.execute(
             """
@@ -1248,6 +1266,177 @@ def update_threads_user_info(
             WHERE id = ?
             """,
             (user_id, username, display_name, now, existing[0]),
+        )
+        conn.commit()
+        return True
+
+
+# --- Facebook Token Functions ---
+
+
+def save_facebook_token(
+    access_token: str,
+    expires_at: str,
+    user_id: str,
+    user_name: str | None = None,
+    page_id: str | None = None,
+    page_name: str | None = None,
+    page_access_token: str | None = None,
+    group_ids: str | None = None,
+    db_path: str = DB_PATH,
+) -> int:
+    """Save or update Facebook OAuth tokens. Returns the token record id."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute("SELECT id FROM facebook_tokens LIMIT 1")
+        existing = cur.fetchone()
+
+        if existing:
+            conn.execute(
+                """
+                UPDATE facebook_tokens SET
+                    access_token = ?,
+                    expires_at = ?,
+                    user_id = ?,
+                    user_name = ?,
+                    page_id = ?,
+                    page_name = ?,
+                    page_access_token = ?,
+                    group_ids = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    access_token,
+                    expires_at,
+                    user_id,
+                    user_name,
+                    page_id,
+                    page_name,
+                    page_access_token,
+                    group_ids,
+                    now,
+                    existing[0],
+                ),
+            )
+            conn.commit()
+            return existing[0]
+        else:
+            cur = conn.execute(
+                """
+                INSERT INTO facebook_tokens
+                    (access_token, expires_at, user_id, user_name,
+                     page_id, page_name, page_access_token, group_ids,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    access_token,
+                    expires_at,
+                    user_id,
+                    user_name,
+                    page_id,
+                    page_name,
+                    page_access_token,
+                    group_ids,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            return cur.lastrowid
+
+
+def get_facebook_token(db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
+    """Get the stored Facebook token (single user mode)."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM facebook_tokens LIMIT 1")
+        return cur.fetchone()
+
+
+def delete_facebook_token(db_path: str = DB_PATH) -> None:
+    """Delete all Facebook tokens (disconnect)."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM facebook_tokens")
+        conn.commit()
+
+
+def update_facebook_token(
+    access_token: str,
+    expires_at: str,
+    db_path: str = DB_PATH,
+) -> None:
+    """Update the access token after a refresh."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE facebook_tokens SET
+                access_token = ?,
+                expires_at = ?,
+                updated_at = ?
+            """,
+            (access_token, expires_at, now),
+        )
+        conn.commit()
+
+
+def update_facebook_page_selection(
+    page_id: str,
+    page_name: str,
+    page_access_token: str,
+    db_path: str = DB_PATH,
+) -> bool:
+    """Update the selected Facebook Page for posting.
+
+    Returns True if a record was updated, False if no token exists.
+    """
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute("SELECT id FROM facebook_tokens LIMIT 1")
+        existing = cur.fetchone()
+        if not existing:
+            return False
+
+        conn.execute(
+            """
+            UPDATE facebook_tokens SET
+                page_id = ?,
+                page_name = ?,
+                page_access_token = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (page_id, page_name, page_access_token, now, existing[0]),
+        )
+        conn.commit()
+        return True
+
+
+def update_facebook_group_ids(
+    group_ids: str,
+    db_path: str = DB_PATH,
+) -> bool:
+    """Update the selected Facebook Group IDs (comma-separated).
+
+    Returns True if a record was updated, False if no token exists.
+    """
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute("SELECT id FROM facebook_tokens LIMIT 1")
+        existing = cur.fetchone()
+        if not existing:
+            return False
+
+        conn.execute(
+            """
+            UPDATE facebook_tokens SET
+                group_ids = ?,
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (group_ids, now, existing[0]),
         )
         conn.commit()
         return True

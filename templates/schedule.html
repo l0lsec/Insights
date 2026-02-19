@@ -55,7 +55,7 @@ th[onclick]:hover {
 <!-- Social Connections -->
 <div class="row mb-4">
     <!-- LinkedIn Connection Status -->
-    <div class="col-md-6 mb-3 mb-md-0">
+    <div class="col-md-4 mb-3 mb-md-0">
         <div class="card h-100">
             <div class="card-header d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #0077B5 0%, #005885 100%); color: white;">
                 <strong>💼 LinkedIn</strong>
@@ -73,7 +73,7 @@ th[onclick]:hover {
     </div>
     
     <!-- Threads Connection Status -->
-    <div class="col-md-6">
+    <div class="col-md-4 mb-3 mb-md-0">
         <div class="card h-100">
             <div class="card-header d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #000000 0%, #333333 100%); color: white;">
                 <strong>🧵 Threads</strong>
@@ -83,6 +83,24 @@ th[onclick]:hover {
                 <div id="threads-status-content">
                     <div class="d-flex align-items-center">
                         <div class="spinner-border spinner-border-sm text-dark me-2" role="status"></div>
+                        <span>Checking connection...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Facebook Connection Status -->
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #1877F2 0%, #0d5bbf 100%); color: white;">
+                <strong>📘 Facebook</strong>
+                <span id="facebook-status-badge" class="badge bg-secondary">Checking...</span>
+            </div>
+            <div class="card-body">
+                <div id="facebook-status-content">
+                    <div class="d-flex align-items-center">
+                        <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
                         <span>Checking connection...</span>
                     </div>
                 </div>
@@ -107,7 +125,7 @@ th[onclick]:hover {
                     </button>
                 </div>
                 <div class="row mt-2">
-                    <div class="col-md-6">
+                    <div class="col-md-4">
                         <span class="badge" style="background-color: #0077B5;">💼 LinkedIn</span>
                         <span id="next-slot-linkedin">
                             {% if next_slots and next_slots.linkedin %}
@@ -117,11 +135,21 @@ th[onclick]:hover {
                             {% endif %}
                         </span>
                     </div>
-                    <div class="col-md-6">
+                    <div class="col-md-4">
                         <span class="badge bg-dark">🧵 Threads</span>
                         <span id="next-slot-threads">
                             {% if next_slots and next_slots.threads %}
                             {{ next_slots.threads }}
+                            {% else %}
+                            <span class="text-muted">No slots available</span>
+                            {% endif %}
+                        </span>
+                    </div>
+                    <div class="col-md-4">
+                        <span class="badge" style="background-color: #1877F2;">📘 Facebook</span>
+                        <span id="next-slot-facebook">
+                            {% if next_slots and next_slots.facebook %}
+                            {{ next_slots.facebook }}
                             {% else %}
                             <span class="text-muted">No slots available</span>
                             {% endif %}
@@ -168,6 +196,10 @@ th[onclick]:hover {
                             <input class="form-check-input new-slot-platform-cb" type="checkbox" name="platforms" value="threads" id="newSlotThreads" onchange="updateNewSlotAllCheckbox()">
                             <label class="form-check-label small" for="newSlotThreads">Threads</label>
                         </div>
+                        <div class="form-check form-check-inline mb-0">
+                            <input class="form-check-input new-slot-platform-cb" type="checkbox" name="platforms" value="facebook" id="newSlotFacebook" onchange="updateNewSlotAllCheckbox()">
+                            <label class="form-check-label small" for="newSlotFacebook">Facebook</label>
+                        </div>
                     </div>
                 </div>
                 <div class="col-md-3">
@@ -205,6 +237,9 @@ th[onclick]:hover {
                                         {% endif %}
                                         {% if 'threads' in slot.platforms %}
                                         <span class="badge bg-dark">Threads</span>
+                                        {% endif %}
+                                        {% if 'facebook' in slot.platforms %}
+                                        <span class="badge" style="background-color: #1877F2;">Facebook</span>
                                         {% endif %}
                                     {% endif %}
                                 </td>
@@ -255,7 +290,7 @@ th[onclick]:hover {
             
             <div class="row g-3">
                 <!-- LinkedIn Limit -->
-                <div class="col-md-6">
+                <div class="col-md-4">
                     <div class="card h-100" style="border-left: 4px solid #0077B5;">
                         <div class="card-body">
                             <div class="d-flex justify-content-between align-items-center mb-2">
@@ -278,7 +313,7 @@ th[onclick]:hover {
                 </div>
                 
                 <!-- Threads Limit -->
-                <div class="col-md-6">
+                <div class="col-md-4">
                     <div class="card h-100" style="border-left: 4px solid #000000;">
                         <div class="card-body">
                             <div class="d-flex justify-content-between align-items-center mb-2">
@@ -292,6 +327,29 @@ th[onclick]:hover {
                                        value="{{ daily_limits.get('threads', 0) }}" min="0" 
                                        placeholder="0 = unlimited">
                                 <button class="btn btn-outline-dark" type="button" onclick="updateDailyLimit('threads')">
+                                    Save
+                                </button>
+                            </div>
+                            <small class="text-muted">0 = no limit</small>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Facebook Limit -->
+                <div class="col-md-4">
+                    <div class="card h-100" style="border-left: 4px solid #1877F2;">
+                        <div class="card-body">
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <span class="fw-bold">📘 Facebook</span>
+                                <span class="badge" style="background-color: #1877F2;" id="facebook-limit-badge">
+                                    {{ daily_limits.get('facebook', 0) or 'Unlimited' }}{% if daily_limits.get('facebook', 0) %}/day{% endif %}
+                                </span>
+                            </div>
+                            <div class="input-group input-group-sm">
+                                <input type="number" class="form-control" id="facebook-limit-input" 
+                                       value="{{ daily_limits.get('facebook', 0) }}" min="0" 
+                                       placeholder="0 = unlimited">
+                                <button class="btn btn-outline-primary" type="button" onclick="updateDailyLimit('facebook')">
                                     Save
                                 </button>
                             </div>
@@ -323,6 +381,7 @@ th[onclick]:hover {
                         <option value="">All Platforms</option>
                         <option value="linkedin" {% if platform_filter == 'linkedin' %}selected{% endif %}>💼 LinkedIn</option>
                         <option value="threads" {% if platform_filter == 'threads' %}selected{% endif %}>🧵 Threads</option>
+                        <option value="facebook" {% if platform_filter == 'facebook' %}selected{% endif %}>📘 Facebook</option>
                     </select>
                     <div class="input-group input-group-sm" style="width: auto;">
                         <span class="input-group-text">From</span>
@@ -341,6 +400,7 @@ th[onclick]:hover {
                 </form>
                 <span class="badge" style="background-color: #0077B5;">💼 {{ linkedin_count }}</span>
                 <span class="badge bg-dark">🧵 {{ threads_count }}</span>
+                <span class="badge" style="background-color: #1877F2;">📘 {{ facebook_count }}</span>
                 <span class="badge bg-secondary">{{ scheduled_posts|length }} total</span>
                 <button class="btn btn-sm btn-outline-primary d-none" id="move-top-btn" onclick="moveSelectedToTop()" title="Move selected to top of queue">
                     ⬆️ Move to Top
@@ -743,6 +803,7 @@ function openImageLightbox(imageUrl) {
 document.addEventListener('DOMContentLoaded', function() {
     checkLinkedInStatus();
     checkThreadsStatus();
+    checkFacebookStatus();
     // Auto-refresh next slots to ensure they're current
     refreshNextSlots();
     
@@ -816,10 +877,12 @@ function reorderQueue(postIds) {
 function refreshNextSlots() {
     const linkedinSpan = document.getElementById('next-slot-linkedin');
     const threadsSpan = document.getElementById('next-slot-threads');
+    const facebookSpan = document.getElementById('next-slot-facebook');
     
     // Show loading state
     if (linkedinSpan) linkedinSpan.innerHTML = '<span class="text-muted">Loading...</span>';
     if (threadsSpan) threadsSpan.innerHTML = '<span class="text-muted">Loading...</span>';
+    if (facebookSpan) facebookSpan.innerHTML = '<span class="text-muted">Loading...</span>';
     
     // Fetch LinkedIn next slot
     fetch('/schedule/next-slot?platform=linkedin')
@@ -851,6 +914,22 @@ function refreshNextSlots() {
         })
         .catch(() => {
             if (threadsSpan) threadsSpan.innerHTML = '<span class="text-muted">Error loading</span>';
+        });
+
+    // Fetch Facebook next slot
+    fetch('/schedule/next-slot?platform=facebook')
+        .then(response => response.json())
+        .then(data => {
+            if (facebookSpan) {
+                if (data.available && data.display) {
+                    facebookSpan.textContent = data.display;
+                } else {
+                    facebookSpan.innerHTML = '<span class="text-muted">No slots available</span>';
+                }
+            }
+        })
+        .catch(() => {
+            if (facebookSpan) facebookSpan.innerHTML = '<span class="text-muted">Error loading</span>';
         });
 }
 
@@ -990,6 +1069,7 @@ function getPlatformBadge(platform) {
     switch(platform) {
         case 'linkedin': return '<span class="badge" style="background-color: #0077B5;">💼 LinkedIn</span>';
         case 'threads': return '<span class="badge" style="background-color: #000000;">🧵 Threads</span>';
+        case 'facebook': return '<span class="badge" style="background-color: #1877F2;">📘 Facebook</span>';
         default: return `<span class="badge bg-secondary">${platform}</span>`;
     }
 }
@@ -1203,6 +1283,79 @@ function disconnectThreads() {
         .then(data => {
             if (data.success) {
                 checkThreadsStatus();
+            }
+        })
+        .catch(error => {
+            alert('Error: ' + error.message);
+        });
+}
+
+// Check Facebook connection status
+function checkFacebookStatus() {
+    fetch('{{ url_for("facebook_status") }}')
+        .then(response => response.json())
+        .then(data => {
+            const badge = document.getElementById('facebook-status-badge');
+            const content = document.getElementById('facebook-status-content');
+
+            if (data.connected) {
+                badge.className = 'badge bg-success';
+                badge.textContent = 'Connected';
+                const pageName = data.page_name || 'No page selected';
+                content.innerHTML = `
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <strong>${data.user_name}</strong>
+                            <br><small class="text-muted">Page: ${pageName}</small>
+                        </div>
+                        <div>
+                            <a href="{{ url_for('facebook_configure') }}" class="btn btn-sm btn-outline-secondary me-2">
+                                Configure
+                            </a>
+                            <button class="btn btn-sm btn-outline-danger" onclick="disconnectFacebook()">
+                                Disconnect
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else if (data.configured) {
+                badge.className = 'badge bg-warning text-dark';
+                badge.textContent = 'Not Connected';
+                content.innerHTML = `
+                    <div class="d-flex justify-content-between align-items-center">
+                        <span>${data.message || 'Click to connect your Facebook account'}</span>
+                        <a href="{{ url_for('facebook_auth') }}" class="btn btn-primary" style="background-color: #1877F2; border-color: #1877F2;">
+                            Connect Facebook
+                        </a>
+                    </div>
+                `;
+            } else {
+                badge.className = 'badge bg-secondary';
+                badge.textContent = 'Not Configured';
+                content.innerHTML = `
+                    <div class="alert alert-warning mb-0">
+                        <strong>Facebook Not Configured</strong><br>
+                        <small>${data.message || 'Set FACEBOOK_APP_ID and FACEBOOK_APP_SECRET environment variables.'}</small>
+                    </div>
+                `;
+            }
+        })
+        .catch(error => {
+            console.error('Error checking Facebook status:', error);
+            document.getElementById('facebook-status-badge').textContent = 'Error';
+            document.getElementById('facebook-status-content').innerHTML =
+                '<span class="text-danger">Failed to check Facebook status</span>';
+        });
+}
+
+function disconnectFacebook() {
+    if (!confirm('Are you sure you want to disconnect Facebook?')) return;
+
+    fetch('{{ url_for("facebook_disconnect") }}', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                checkFacebookStatus();
             }
         })
         .catch(error => {

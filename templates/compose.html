@@ -228,7 +228,7 @@
 
 <!-- Platform Connections -->
 <div class="row mb-4">
-    <div class="col-md-6 mb-3 mb-md-0">
+    <div class="col-md-4 mb-3 mb-md-0">
         <div class="card h-100">
             <div class="card-header d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #0077B5 0%, #005885 100%); color: white;">
                 <strong>💼 LinkedIn</strong>
@@ -244,7 +244,7 @@
             </div>
         </div>
     </div>
-    <div class="col-md-6">
+    <div class="col-md-4 mb-3 mb-md-0">
         <div class="card h-100">
             <div class="card-header d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #000 0%, #333 100%); color: white;">
                 <strong>🧵 Threads</strong>
@@ -254,6 +254,22 @@
                 <div id="threads-status-content">
                     <div class="d-flex align-items-center">
                         <div class="spinner-border spinner-border-sm text-dark me-2" role="status"></div>
+                        <span>Checking connection...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #1877F2 0%, #0d5bbf 100%); color: white;">
+                <strong>📘 Facebook</strong>
+                <span id="facebook-status-badge" class="badge bg-secondary">Checking...</span>
+            </div>
+            <div class="card-body py-2">
+                <div id="facebook-status-content">
+                    <div class="d-flex align-items-center">
+                        <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
                         <span>Checking connection...</span>
                     </div>
                 </div>
@@ -805,6 +821,7 @@
                 <option value="">All Platforms</option>
                 <option value="linkedin">💼 LinkedIn</option>
                 <option value="threads">🧵 Threads</option>
+                <option value="facebook">📘 Facebook</option>
             </select>
             <select class="form-select form-select-sm" style="width: auto;" id="filter-image" onchange="applyPostFilters()">
                 <option value="">All Images</option>
@@ -844,7 +861,7 @@
                                 {% endif %}
                                 {% if post.scheduled %}
                                     {% for sched_platform, sched_time in post.scheduled.items() %}
-                                    <span class="badge {% if sched_platform == 'linkedin' %}text-bg-primary{% elif sched_platform == 'threads' %}text-bg-dark{% else %}bg-info{% endif %}" 
+                                    <span class="badge {% if sched_platform == 'linkedin' %}text-bg-primary{% elif sched_platform == 'threads' %}text-bg-dark{% elif sched_platform == 'facebook' %}text-bg-info{% else %}bg-info{% endif %}" 
                                           title="{{ sched_time }}">
                                         📅 {{ sched_platform|capitalize }}
                                     </span>
@@ -854,7 +871,7 @@
                                     {% for posted_platform, posted_data in post.posted.items() %}
                                     {% if posted_data.url %}
                                     <a href="{{ posted_data.url }}" target="_blank" rel="noopener" 
-                                       class="badge text-decoration-none {% if posted_platform == 'linkedin' %}bg-primary{% elif posted_platform == 'threads' %}bg-dark{% else %}bg-success{% endif %}" 
+                                       class="badge text-decoration-none {% if posted_platform == 'linkedin' %}bg-primary{% elif posted_platform == 'threads' %}bg-dark{% elif posted_platform == 'facebook' %}bg-info{% else %}bg-success{% endif %}" 
                                        title="Posted {{ posted_data.posted_at[:16] if posted_data.posted_at else '' }} - Click to view">
                                         🔗 {{ posted_platform|capitalize }}
                                     </a>
@@ -902,6 +919,22 @@
                                 </button>
                                 {% endif %}
                                 <button class="btn btn-outline-warning" onclick="openScheduleModal({{ post.id }}, 'standalone', 'threads')" title="Schedule for Specific Time">
+                                    📅
+                                </button>
+                                {% elif platform == 'facebook' %}
+                                <button class="btn btn-outline-primary facebook-post-btn" onclick="postToFacebook({{ post.id }}, this)" title="Post to Facebook Now" data-post-id="{{ post.id }}">
+                                    📘
+                                </button>
+                                {% if post.scheduled and post.scheduled.facebook %}
+                                <button class="btn btn-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'standalone', 'facebook', this, true)" title="Click to remove from queue (Scheduled: {{ post.scheduled.facebook }})" data-post-id="{{ post.id }}" data-platform="facebook" data-queued="true">
+                                    ✅
+                                </button>
+                                {% else %}
+                                <button class="btn btn-outline-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'standalone', 'facebook', this, false)" title="Add to Queue" data-post-id="{{ post.id }}" data-platform="facebook" data-queued="false">
+                                    ➕
+                                </button>
+                                {% endif %}
+                                <button class="btn btn-outline-warning" onclick="openScheduleModal({{ post.id }}, 'standalone', 'facebook')" title="Schedule for Specific Time">
                                     📅
                                 </button>
                                 {% endif %}
@@ -1190,6 +1223,10 @@
                         <div class="fs-4 fw-bold text-dark" id="unscheduled-threads-count">0</div>
                         <div class="small text-muted">Threads posts</div>
                     </div>
+                    <div class="text-center">
+                        <div class="fs-4 fw-bold" style="color: #1877F2;" id="unscheduled-facebook-count">0</div>
+                        <div class="small text-muted">Facebook posts</div>
+                    </div>
                 </div>
             </div>
             <div class="modal-footer justify-content-center flex-wrap gap-2">
@@ -1199,6 +1236,9 @@
                 </button>
                 <button type="button" class="btn btn-dark" onclick="queueAllUnscheduled('threads')">
                     🧵 Queue Threads
+                </button>
+                <button type="button" class="btn" style="background-color: #1877F2; color: white;" onclick="queueAllUnscheduled('facebook')">
+                    📘 Queue Facebook
                 </button>
                 <button type="button" class="btn btn-success" onclick="queueAllBothPlatforms()">
                     🚀 Queue All
@@ -1368,6 +1408,7 @@
 <script>
 let linkedinConnected = false;
 let threadsConnected = false;
+let facebookConnected = false;
 let selectModeActive = false;
 
 // Image lightbox function
@@ -1380,6 +1421,7 @@ function openImageLightbox(imageUrl) {
 document.addEventListener('DOMContentLoaded', function() {
     checkLinkedInStatus();
     checkThreadsStatus();
+    checkFacebookStatus();
     
     // Platform checkbox toggle
     document.querySelectorAll('.platform-checkbox-box').forEach(box => {
@@ -1490,6 +1532,56 @@ function disconnectThreads() {
         .then(() => {
             threadsConnected = false;
             checkThreadsStatus();
+        });
+}
+
+function checkFacebookStatus() {
+    fetch('{{ url_for("facebook_status") }}')
+        .then(response => response.json())
+        .then(data => {
+            const badge = document.getElementById('facebook-status-badge');
+            const content = document.getElementById('facebook-status-content');
+
+            if (data.connected) {
+                facebookConnected = true;
+                badge.className = 'badge bg-success';
+                badge.textContent = 'Connected';
+                const pageName = data.page_name || 'No page selected';
+                content.innerHTML = `
+                    <div class="d-flex justify-content-between align-items-center">
+                        <span><strong>${data.user_name}</strong> <small class="text-muted">(${pageName})</small></span>
+                        <div class="btn-group btn-group-sm">
+                            <a href="{{ url_for('facebook_configure') }}" class="btn btn-outline-secondary" title="Change Page">⚙️</a>
+                            <button class="btn btn-outline-danger" onclick="disconnectFacebook()">Disconnect</button>
+                        </div>
+                    </div>
+                `;
+            } else if (data.configured) {
+                badge.className = 'badge bg-warning text-dark';
+                badge.textContent = 'Not Connected';
+                content.innerHTML = `
+                    <div class="d-flex justify-content-between align-items-center">
+                        <span>Connect to post to Facebook</span>
+                        <a href="{{ url_for('facebook_auth') }}" class="btn btn-sm btn-primary">Connect</a>
+                    </div>
+                `;
+            } else {
+                badge.className = 'badge bg-secondary';
+                badge.textContent = 'Not Configured';
+                content.innerHTML = '<small class="text-muted">Set FACEBOOK_APP_ID and FACEBOOK_APP_SECRET</small>';
+            }
+        })
+        .catch(() => {
+            document.getElementById('facebook-status-badge').textContent = 'Error';
+        });
+}
+
+function disconnectFacebook() {
+    if (!confirm('Disconnect Facebook?')) return;
+    fetch('{{ url_for("facebook_disconnect") }}', { method: 'POST' })
+        .then(() => {
+            facebookConnected = false;
+            checkFacebookStatus();
         });
 }
 
@@ -2409,6 +2501,43 @@ function postToThreads(postId, btn) {
         });
 }
 
+function postToFacebook(postId, btn) {
+    if (!facebookConnected) {
+        alert('Please connect Facebook first');
+        return;
+    }
+    if (!confirm('Post to Facebook now?')) return;
+
+    const originalText = btn.innerHTML;
+    btn.innerHTML = '⏳';
+    btn.disabled = true;
+
+    fetch(`/compose/post/${postId}/facebook`, { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                btn.innerHTML = '✅';
+                btn.classList.remove('btn-outline-primary');
+                btn.classList.add('btn-success');
+                showToast('Posted to Facebook!', 'success');
+                const postItem = btn.closest('.post-item');
+                const usedBtn = postItem.querySelector('button[title="Mark as used"]');
+                if (usedBtn && !usedBtn.classList.contains('btn-outline-success')) {
+                    toggleUsed(postId, usedBtn);
+                }
+            } else {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+                alert('Error: ' + (data.error || 'Failed to post'));
+            }
+        })
+        .catch(error => {
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+            alert('Error: ' + error.message);
+        });
+}
+
 function toggleQueue(postId, postType, platform, btn, isQueued) {
     if (platform === 'linkedin' && !linkedinConnected) {
         alert('Please connect LinkedIn first');
@@ -2416,6 +2545,10 @@ function toggleQueue(postId, postType, platform, btn, isQueued) {
     }
     if (platform === 'threads' && !threadsConnected) {
         alert('Please connect Threads first');
+        return;
+    }
+    if (platform === 'facebook' && !facebookConnected) {
+        alert('Please connect Facebook first');
         return;
     }
     
@@ -2501,6 +2634,10 @@ function openScheduleModal(postId, postType, platform) {
     }
     if (platform === 'threads' && !threadsConnected) {
         alert('Please connect Threads first');
+        return;
+    }
+    if (platform === 'facebook' && !facebookConnected) {
+        alert('Please connect Facebook first');
         return;
     }
     
@@ -2889,7 +3026,7 @@ async function postNowSelectedPosts() {
     selected.forEach(cb => {
         const card = cb.closest('.social-copy-card');
         const platform = card ? card.dataset.platform : '';
-        if (platform === 'linkedin' || platform === 'threads') {
+        if (platform === 'linkedin' || platform === 'threads' || platform === 'facebook') {
             postsToPublish.push({
                 postId: parseInt(cb.dataset.postId),
                 platform: platform,
@@ -2899,12 +3036,13 @@ async function postNowSelectedPosts() {
     });
 
     if (postsToPublish.length === 0) {
-        alert('No LinkedIn or Threads posts selected');
+        alert('No LinkedIn, Threads, or Facebook posts selected');
         return;
     }
 
     if ((postsToPublish.some(p => p.platform === 'linkedin') && !linkedinConnected) ||
-        (postsToPublish.some(p => p.platform === 'threads') && !threadsConnected)) {
+        (postsToPublish.some(p => p.platform === 'threads') && !threadsConnected) ||
+        (postsToPublish.some(p => p.platform === 'facebook') && !facebookConnected)) {
         alert('Please connect the required platforms first');
         return;
     }
@@ -3505,6 +3643,7 @@ async function findStockImagesForSelected() {
 function showQueueAllModal() {
     let linkedinCount = 0;
     let threadsCount = 0;
+    let facebookCount = 0;
     
     document.querySelectorAll('.social-copy-card[data-platform="linkedin"] .post-item').forEach(item => {
         const queueBtn = item.querySelector('.btn-outline-success[data-platform="linkedin"]');
@@ -3517,9 +3656,16 @@ function showQueueAllModal() {
         const usedBadge = item.querySelector('.used-badge');
         if (queueBtn && !queueBtn.disabled && !usedBadge) threadsCount++;
     });
+
+    document.querySelectorAll('.social-copy-card[data-platform="facebook"] .post-item').forEach(item => {
+        const queueBtn = item.querySelector('.btn-outline-success[data-platform="facebook"]');
+        const usedBadge = item.querySelector('.used-badge');
+        if (queueBtn && !queueBtn.disabled && !usedBadge) facebookCount++;
+    });
     
     document.getElementById('unscheduled-linkedin-count').textContent = linkedinCount;
     document.getElementById('unscheduled-threads-count').textContent = threadsCount;
+    document.getElementById('unscheduled-facebook-count').textContent = facebookCount;
     
     new bootstrap.Modal(document.getElementById('queueAllModal')).show();
 }
@@ -3531,6 +3677,10 @@ async function queueAllUnscheduled(platform) {
     }
     if (platform === 'threads' && !threadsConnected) {
         alert('Please connect Threads first');
+        return;
+    }
+    if (platform === 'facebook' && !facebookConnected) {
+        alert('Please connect Facebook first');
         return;
     }
     
@@ -3591,8 +3741,9 @@ async function queueAllUnscheduled(platform) {
 async function queueAllBothPlatforms() {
     const linkedinCount = parseInt(document.getElementById('unscheduled-linkedin-count').textContent) || 0;
     const threadsCount = parseInt(document.getElementById('unscheduled-threads-count').textContent) || 0;
+    const facebookCount = parseInt(document.getElementById('unscheduled-facebook-count').textContent) || 0;
     
-    if (linkedinCount === 0 && threadsCount === 0) {
+    if (linkedinCount === 0 && threadsCount === 0 && facebookCount === 0) {
         showToast('No unscheduled posts to queue', 'warning');
         return;
     }
@@ -3603,6 +3754,10 @@ async function queueAllBothPlatforms() {
     }
     if (threadsCount > 0 && !threadsConnected) {
         alert('Please connect Threads first to queue Threads posts');
+        return;
+    }
+    if (facebookCount > 0 && !facebookConnected) {
+        alert('Please connect Facebook first to queue Facebook posts');
         return;
     }
     
@@ -3625,6 +3780,14 @@ async function queueAllBothPlatforms() {
         const threadsResult = await queuePlatformPosts('threads');
         totalSuccess += threadsResult.success;
         totalFail += threadsResult.fail;
+    }
+
+    // Queue Facebook posts
+    if (facebookCount > 0 && facebookConnected) {
+        showToast(`Adding ${facebookCount} Facebook posts to queue...`, 'info');
+        const facebookResult = await queuePlatformPosts('facebook');
+        totalSuccess += facebookResult.success;
+        totalFail += facebookResult.fail;
     }
     
     if (totalFail === 0) {
