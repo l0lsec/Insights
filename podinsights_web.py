@@ -127,6 +127,7 @@ from database import (
     delete_uploaded_image,
     # Recent prompts
     list_recent_prompts,
+    list_recent_image_prompts,
     clear_recent_prompts,
     delete_prompt_by_content,
     delete_prompts_bulk,
@@ -144,6 +145,8 @@ from podinsights import (
     generate_posts_from_prompt,
     generate_posts_from_url,
     generate_posts_from_text,
+    generate_posts_from_images,
+    check_ollama_status,
 )
 from linkedin_client import (
     LinkedInClient,
@@ -3782,6 +3785,19 @@ def compose_page():
         for p in recent_prompts
     ]
     
+    # Get recent image prompt+image combos for reuse
+    recent_img = list_recent_image_prompts(limit=10)
+    recent_image_prompts_list = [
+        {
+            'prompt': r['source_content'] or '',
+            'image_url': r['image_url'],
+            'preview': (r['source_content'][:60] + '...' if r['source_content'] and len(r['source_content']) > 60
+                        else r['source_content']) or '(no prompt)',
+            'created_at': r['created_at'],
+        }
+        for r in recent_img
+    ]
+
     return render_template(
         'compose.html',
         posts_by_platform=posts_by_platform,
@@ -3791,6 +3807,7 @@ def compose_page():
         linkedin_connected=linkedin_connected,
         threads_connected=threads_connected,
         recent_prompts=recent_prompts_list,
+        recent_image_prompts=recent_image_prompts_list,
     )
 
 
@@ -3880,7 +3897,7 @@ def compose_generate():
     topic = request.form.get('topic', '').strip() or None
     image_url = request.form.get('image_url', '').strip() or None
     
-    if not content:
+    if source_type != 'image' and not content:
         return jsonify({"error": "Content is required"}), 400
     
     if not platforms:
@@ -3930,28 +3947,121 @@ def compose_generate():
                 posts_per_platform=posts_per_platform,
                 extra_context=extra_context,
             )
+        elif source_type == 'image':
+            import base64 as b64module
+            import urllib.request as _urlreq
+            import mimetypes
+
+            use_local = request.form.get('use_local', 'false').lower() in ('true', '1', 'yes')
+            files = request.files.getlist('images')
+            recall_urls = request.form.getlist('recall_image_urls')
+
+            images_payload = []
+            first_image_bytes = None
+
+            if files and files[0].filename:
+                # Fresh file uploads
+                if len(files) > 4:
+                    return jsonify({"error": "Maximum 4 images allowed"}), 400
+                for f in files:
+                    if not allowed_file(f.filename):
+                        return jsonify({"error": f"File type not allowed: {f.filename}"}), 400
+                    raw = f.read()
+                    if len(raw) > 16 * 1024 * 1024:
+                        return jsonify({"error": f"File too large: {f.filename} (max 16MB)"}), 400
+                    if first_image_bytes is None:
+                        first_image_bytes = raw
+                        first_image_ext = f.filename.rsplit('.', 1)[1].lower() if '.' in f.filename else 'jpg'
+                    mime = f.content_type or 'image/jpeg'
+                    images_payload.append({
+                        "base64": b64module.b64encode(raw).decode(),
+                        "mime_type": mime,
+                    })
+            elif recall_urls:
+                # Recalled from recent image prompts -- fetch by URL
+                for url in recall_urls[:4]:
+                    try:
+                        resp = _urlreq.urlopen(url, timeout=10)
+                        raw = resp.read()
+                        mime = resp.headers.get('Content-Type', '') or mimetypes.guess_type(url)[0] or 'image/jpeg'
+                        if first_image_bytes is None:
+                            first_image_bytes = raw
+                        image_url = image_url or url
+                        images_payload.append({
+                            "base64": b64module.b64encode(raw).decode(),
+                            "mime_type": mime,
+                        })
+                    except Exception:
+                        app.logger.warning("Could not fetch recalled image: %s", url)
+                if not images_payload:
+                    return jsonify({"error": "Could not fetch the recalled image(s)"}), 400
+            else:
+                return jsonify({"error": "At least one image is required"}), 400
+
+            generated = generate_posts_from_images(
+                images=images_payload,
+                prompt=content or None,
+                platforms=platforms,
+                tone=tone,
+                posts_per_platform=posts_per_platform,
+                extra_context=extra_context,
+                use_local=use_local,
+            )
+
+            if first_image_bytes and not image_url:
+                try:
+                    from io import BytesIO
+                    from PIL import Image
+                    img = Image.open(BytesIO(first_image_bytes))
+                    img.verify()
+                    if CLOUDINARY_CONFIGURED:
+                        result = cloudinary.uploader.upload(
+                            first_image_bytes,
+                            folder="podinsights",
+                            resource_type="image",
+                        )
+                        image_url = result['secure_url']
+                    else:
+                        unique_fn = f"{uuid.uuid4().hex}.{first_image_ext}"
+                        filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_fn)
+                        with open(filepath, 'wb') as fp:
+                            fp.write(first_image_bytes)
+                        image_url = f"{request.host_url}static/uploads/{unique_fn}"
+                except Exception:
+                    app.logger.debug("Could not auto-upload first image for attachment")
         else:
             return jsonify({"error": f"Unknown source type: {source_type}"}), 400
         
         # Save generated posts to database
+        source_label = content[:1000] if content else f"[{len(request.files.getlist('images'))} image(s)]"
+        requested_platforms = {p.lower() for p in platforms}
         saved_posts = {}
         for platform, post_data in generated.items():
             if platform == 'raw':
-                # Handle raw response (JSON parsing failed)
                 continue
             
+            # Normalize platform name (LLMs sometimes return "Threads" or "X")
+            norm_platform = platform.lower().strip()
+            platform_aliases = {"x": "twitter"}
+            norm_platform = platform_aliases.get(norm_platform, norm_platform)
+
+            # Drop platforms the user didn't ask for (local models hallucinate extras)
+            if norm_platform not in requested_platforms:
+                continue
+
             posts_list = post_data if isinstance(post_data, list) else [post_data]
-            saved_posts[platform] = []
+            if norm_platform not in saved_posts:
+                saved_posts[norm_platform] = []
             
             for post_content in posts_list:
                 post_id = add_standalone_post(
                     source_type=source_type,
-                    source_content=content[:1000],  # Truncate for storage
-                    platform=platform,
+                    source_content=source_label,
+                    platform=norm_platform,
                     content=post_content,
                     image_url=image_url,
                 )
-                saved_posts[platform].append({
+                saved_posts[norm_platform].append({
                     'id': post_id,
                     'content': post_content,
                     'image_url': image_url,
@@ -3970,6 +4080,12 @@ def compose_generate():
     except Exception as e:
         app.logger.exception("Failed to generate posts")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/compose/ollama-status', methods=['GET'])
+def compose_ollama_status():
+    """Return Ollama availability and installed vision models."""
+    return jsonify(check_ollama_status())
 
 
 @app.route('/compose/post/<int:post_id>', methods=['GET'])

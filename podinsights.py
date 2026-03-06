@@ -8,8 +8,32 @@ import logging
 from typing import List
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
+OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "llama3.2-vision")
 
 logger = logging.getLogger(__name__)
+
+
+def check_ollama_status() -> dict:
+    """Check if Ollama is running and list available vision-capable models."""
+    import urllib.request
+    import urllib.error
+
+    result = {"available": False, "models": [], "configured_model": OLLAMA_VISION_MODEL}
+    try:
+        req = urllib.request.Request(f"{OLLAMA_BASE_URL}/api/tags", method="GET")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            data = json.loads(resp.read().decode())
+        all_models = [m["name"] for m in data.get("models", [])]
+        vision_keywords = ("vision", "llava", "moondream", "bakllava")
+        result["models"] = [
+            m for m in all_models
+            if any(kw in m.lower() for kw in vision_keywords)
+        ]
+        result["available"] = True
+    except Exception:
+        logger.debug("Ollama not reachable at %s", OLLAMA_BASE_URL)
+    return result
 
 
 def configure_logging(verbose: bool = False) -> None:
@@ -958,6 +982,229 @@ def generate_posts_from_text(
     except Exception as exc:
         logger.exception("Post generation from text failed")
         raise RuntimeError("Failed to generate posts from text") from exc
+
+
+def _normalize_llm_posts(parsed: dict | list) -> dict | None:
+    """Convert various LLM output shapes into ``{platform: content_or_list}``."""
+    if isinstance(parsed, dict):
+        # Already the expected shape, but values might be dicts with a "post" key
+        result = {}
+        for k, v in parsed.items():
+            if isinstance(v, str):
+                result[k] = v
+            elif isinstance(v, list):
+                result[k] = [
+                    item.get("post", item.get("content", str(item)))
+                    if isinstance(item, dict) else str(item)
+                    for item in v
+                ]
+            elif isinstance(v, dict):
+                result[k] = v.get("post", v.get("content", str(v)))
+        return result if result else None
+
+    if isinstance(parsed, list):
+        # Array of {"platform": "...", "post": "..."} objects
+        result: dict[str, list[str]] = {}
+        for item in parsed:
+            if not isinstance(item, dict):
+                continue
+            plat = item.get("platform", "").lower().strip()
+            text = item.get("post", item.get("content", item.get("text", "")))
+            if plat and text and isinstance(text, str):
+                result.setdefault(plat, []).append(text)
+        # Unwrap single-element lists
+        for k, v in result.items():
+            if len(v) == 1:
+                result[k] = v[0]
+        return result if result else None
+
+    return None
+
+
+def _extract_json_from_llm(text: str) -> dict | None:
+    """Best-effort extraction of a JSON dict from an LLM response.
+
+    Handles: plain JSON, markdown fences, embedded JSON, and
+    array-of-objects format that local models sometimes produce.
+    """
+    import re
+
+    def _try_parse(s: str) -> dict | None:
+        try:
+            return _normalize_llm_posts(json.loads(s))
+        except (json.JSONDecodeError, ValueError):
+            return None
+
+    # 1. Direct parse
+    result = _try_parse(text)
+    if result:
+        return result
+
+    # 2. Markdown code fences
+    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)```", text, re.DOTALL)
+    if fence_match:
+        result = _try_parse(fence_match.group(1).strip())
+        if result:
+            return result
+
+    # 3. First { … last }  (object)
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        result = _try_parse(text[start:end + 1])
+        if result:
+            return result
+
+    # 4. First [ … last ]  (array)
+    start = text.find("[")
+    end = text.rfind("]")
+    if start != -1 and end > start:
+        result = _try_parse(text[start:end + 1])
+        if result:
+            return result
+
+    return None
+
+
+def generate_posts_from_images(
+    images: list[dict],
+    prompt: str | None = None,
+    platforms: List[str] | None = None,
+    tone: str = "professional",
+    posts_per_platform: int = 1,
+    extra_context: str | None = None,
+    use_local: bool = False,
+) -> dict:
+    """Generate social media posts by analysing one or more images.
+
+    Parameters
+    ----------
+    images:
+        List of dicts with ``base64`` (base64-encoded bytes) and ``mime_type``.
+    prompt:
+        Optional user guidance on what to focus on in the image(s).
+    platforms:
+        Platforms to generate for.
+    tone:
+        Desired tone/style.
+    posts_per_platform:
+        Number of unique posts per platform.
+    extra_context:
+        Optional additional instructions.
+    use_local:
+        If *True*, use Ollama locally instead of OpenAI.
+    """
+    if platforms is None:
+        platforms = ["linkedin", "threads", "twitter"]
+
+    posts_per_platform = max(1, min(posts_per_platform, 10))
+
+    try:
+        from openai import OpenAI
+
+        if use_local:
+            client = OpenAI(base_url=f"{OLLAMA_BASE_URL}/v1", api_key="ollama")
+            model = OLLAMA_VISION_MODEL
+        else:
+            client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            if not client.api_key:
+                raise RuntimeError("OPENAI_API_KEY is not configured")
+            model = OPENAI_MODEL
+
+        tone_guides = {
+            "professional": "Professional and authoritative, suitable for business audiences",
+            "casual": "Casual and conversational, friendly and approachable",
+            "witty": "Witty and clever, with humor where appropriate",
+            "educational": "Educational and informative, focuses on teaching",
+            "promotional": "Promotional and persuasive, drives action",
+        }
+        tone_instruction = tone_guides.get(tone, tone_guides["professional"])
+
+        platform_guidelines = {
+            "twitter": "280 characters max, punchy and engaging, 3-5 relevant hashtags",
+            "linkedin": "Professional tone, 1-3 paragraphs, thought leadership angle, 3-5 professional hashtags",
+            "facebook": "Conversational, can be longer, engaging question or hook, 2-3 hashtags",
+            "threads": "Casual and authentic, similar to Twitter but can be slightly longer, 3-5 hashtags",
+            "bluesky": "Similar to Twitter, concise and engaging, 3-5 hashtags",
+            "instagram": "Visual-focused caption, emojis welcome, 10-15 relevant hashtags at the end",
+            "mastodon": "Thoughtful and community-focused, 3-5 hashtags",
+        }
+
+        platform_list = "\n".join([
+            f"- {p.upper()}: {platform_guidelines.get(p, 'Standard social media post with hashtags')}"
+            for p in platforms
+        ])
+
+        platform_keys = ", ".join(f'"{p}"' for p in platforms)
+        if posts_per_platform > 1:
+            example_val = '["First post #hashtag", "Second post #hashtag"]'
+        else:
+            example_val = '"Your post text here #hashtag"'
+        json_example = "{" + ", ".join(
+            f'"{p}": {example_val}' for p in platforms
+        ) + "}"
+
+        prompt_section = f"FOCUS: {prompt}\n" if prompt else ""
+        extra_section = f"CONTEXT: {extra_context}\n" if extra_context else ""
+
+        user_content: list[dict] = [
+            {
+                "type": "text",
+                "text": (
+                    f"Look at the image and write social media posts about it.\n"
+                    f"{prompt_section}"
+                    f"{extra_section}"
+                    f"Tone: {tone_instruction}\n"
+                    f"Platforms: {platform_list}\n\n"
+                    f"Reply with ONLY a JSON object. No other text.\n"
+                    f"Use ONLY these keys: {platform_keys}\n"
+                    f"{'Each key maps to an array of ' + str(posts_per_platform) + ' post strings.' if posts_per_platform > 1 else 'Each key maps to a single post string.'}\n"
+                    f"Example:\n{json_example}"
+                ),
+            }
+        ]
+
+        for img in images:
+            user_content.append({
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{img['mime_type']};base64,{img['base64']}",
+                },
+            })
+
+        logger.debug(
+            "Generating posts from %d image(s) via %s",
+            len(images),
+            "Ollama" if use_local else "OpenAI",
+        )
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are a social media content creator. "
+                        "You write engaging posts about images. "
+                        "You ALWAYS reply with valid JSON only."
+                    ),
+                },
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.6 if use_local else 0.8,
+            max_tokens=1500 if use_local else 3000,
+        )
+
+        raw_text = response.choices[0].message.content.strip()
+        result = _extract_json_from_llm(raw_text)
+        if result:
+            logger.debug("Generated posts for %d platforms from images", len(result))
+            return result
+
+        logger.warning("Could not extract JSON; distributing raw text across platforms")
+        return {p: raw_text for p in platforms}
+    except Exception as exc:
+        logger.exception("Post generation from images failed")
+        raise RuntimeError("Failed to generate posts from images") from exc
 
 
 def write_results_json(transcript: str, summary: str, actions: List[str], output_path: str) -> None:

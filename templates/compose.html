@@ -301,6 +301,11 @@
                     📝 From Text
                 </button>
             </li>
+            <li class="nav-item me-2" role="presentation">
+                <button class="nav-link" id="image-tab" data-bs-toggle="pill" data-bs-target="#image-content" type="button" role="tab">
+                    📷 From Image(s)
+                </button>
+            </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link {% if selected_source %}active{% endif %}" id="saved-tab" data-bs-toggle="pill" data-bs-target="#saved-content" type="button" role="tab">
                     📚 From Saved Source
@@ -514,6 +519,75 @@
                 </div>
             </div>
             
+            <!-- Image Tab -->
+            <div class="tab-pane fade" id="image-content" role="tabpanel">
+                <!-- Local / Cloud Toggle -->
+                <div class="d-flex align-items-center mb-3 gap-2">
+                    <span class="fw-bold small">AI Provider:</span>
+                    <div class="btn-group btn-group-sm" role="group" id="image-provider-toggle">
+                        <input type="radio" class="btn-check" name="imageProvider" id="provider-local" value="local">
+                        <label class="btn btn-outline-success" for="provider-local">
+                            <span id="ollama-status-dot" class="me-1">●</span> Local (Ollama)
+                        </label>
+                        <input type="radio" class="btn-check" name="imageProvider" id="provider-cloud" value="cloud" checked>
+                        <label class="btn btn-outline-primary" for="provider-cloud">
+                            ☁️ Cloud (OpenAI)
+                        </label>
+                    </div>
+                    <span id="ollama-status-text" class="small text-muted ms-1"></span>
+                </div>
+
+                <!-- Drop Zone -->
+                <div id="image-drop-zone" class="rounded-3 text-center p-4 mb-3"
+                     style="cursor:pointer; transition: background .15s; border: 2px dashed #dee2e6;">
+                    <div id="image-drop-placeholder">
+                        <div class="fs-1 mb-2">📷</div>
+                        <p class="mb-1 fw-bold">Drop images here or click to browse</p>
+                        <p class="text-muted small mb-0">Up to 4 images &bull; PNG, JPG, GIF, WebP &bull; 16 MB each</p>
+                    </div>
+                    <input type="file" id="image-file-input" multiple accept="image/png,image/jpeg,image/gif,image/webp"
+                           class="d-none">
+                </div>
+
+                <!-- Preview Grid -->
+                <div id="image-preview-grid" class="row g-2 mb-3 d-none"></div>
+
+                <!-- Optional Prompt + Recent Image Prompts -->
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <label class="form-label fw-bold mb-0">Focus / Prompt (Optional)</label>
+                        {% if recent_image_prompts %}
+                        <div class="dropdown">
+                            <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button"
+                                    id="recent-image-prompts-btn" data-bs-toggle="dropdown"
+                                    aria-expanded="false" data-bs-auto-close="outside">
+                                📜 Recent Images
+                            </button>
+                            <div class="dropdown-menu dropdown-menu-end p-0" style="min-width: 360px; max-height: 400px;">
+                                <div class="px-3 py-2 bg-light border-bottom">
+                                    <span class="small fw-bold">Recent Image + Prompt Combos</span>
+                                </div>
+                                <div style="max-height: 320px; overflow-y: auto;">
+                                    {% for rip in recent_image_prompts %}
+                                    <a href="#" class="dropdown-item d-flex align-items-center gap-2 py-2"
+                                       onclick="useRecentImagePrompt({{ loop.index0 }}); return false;">
+                                        <img src="{{ rip.image_url }}" alt=""
+                                             style="width:48px; height:48px; object-fit:cover; border-radius:4px; flex-shrink:0;">
+                                        <div class="small text-wrap" style="white-space:normal; word-wrap:break-word; min-width:0;">
+                                            {{ rip.preview }}
+                                        </div>
+                                    </a>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        </div>
+                        {% endif %}
+                    </div>
+                    <textarea class="form-control" id="image-prompt" rows="2"
+                              placeholder="Describe what to focus on, e.g. 'Write about the product shown' or leave blank to let AI decide..."></textarea>
+                </div>
+            </div>
+
             <!-- Saved Source Tab -->
             <div class="tab-pane fade {% if selected_source %}show active{% endif %}" id="saved-content" role="tabpanel">
                 {% if saved_sources %}
@@ -1701,6 +1775,7 @@ function getActiveSourceType() {
     if (activeTab.id === 'freeform-tab') return 'freeform';
     if (activeTab.id === 'url-tab') return 'url';
     if (activeTab.id === 'text-tab') return 'text';
+    if (activeTab.id === 'image-tab') return 'image';
     if (activeTab.id === 'saved-tab') return 'saved_source';
     return 'freeform';
 }
@@ -1710,12 +1785,154 @@ function getContent() {
     if (sourceType === 'freeform') return document.getElementById('freeform-input').value.trim();
     if (sourceType === 'url') return document.getElementById('url-input').value.trim();
     if (sourceType === 'text') return document.getElementById('text-input').value.trim();
+    if (sourceType === 'image') return document.getElementById('image-prompt').value.trim();
     if (sourceType === 'saved_source') {
         const select = document.getElementById('saved-source-select');
         return select ? select.value : '';
     }
     return '';
 }
+
+/* ── Image tab: file handling ────────────────────────────── */
+const _imageFiles = [];
+let _recalledImageUrls = [];
+const MAX_IMAGES = 4;
+
+const recentImagePrompts = {{ recent_image_prompts|default([])|tojson|safe }};
+
+function useRecentImagePrompt(index) {
+    const item = recentImagePrompts[index];
+    if (!item) return;
+    // Fill the prompt textarea
+    document.getElementById('image-prompt').value = item.prompt || '';
+    // Clear any fresh file uploads and set the recalled URL
+    _imageFiles.length = 0;
+    _recalledImageUrls = [item.image_url];
+    _renderImagePreviews();
+    // Close the dropdown
+    const btn = document.getElementById('recent-image-prompts-btn');
+    if (btn) { const dd = bootstrap.Dropdown.getInstance(btn); if (dd) dd.hide(); }
+}
+
+function _renderImagePreviews() {
+    const grid = document.getElementById('image-preview-grid');
+    grid.innerHTML = '';
+    const hasFiles = _imageFiles.length > 0;
+    const hasRecalled = _recalledImageUrls.length > 0;
+    if (!hasFiles && !hasRecalled) {
+        grid.classList.add('d-none');
+        return;
+    }
+    grid.classList.remove('d-none');
+
+    if (hasRecalled) {
+        _recalledImageUrls.forEach((url, idx) => {
+            const col = document.createElement('div');
+            col.className = 'col-3';
+            col.innerHTML = `
+                <div class="position-relative border rounded overflow-hidden" style="aspect-ratio:1;background:#f8f9fa;">
+                    <img src="${url}" class="w-100 h-100" style="object-fit:cover;">
+                    <button type="button" class="btn btn-sm btn-danger position-absolute top-0 end-0 m-1 rounded-circle p-0"
+                            style="width:22px;height:22px;line-height:1;" onclick="_removeRecalledImage(${idx})">&times;</button>
+                </div>`;
+            grid.appendChild(col);
+        });
+    }
+
+    _imageFiles.forEach((file, idx) => {
+        const col = document.createElement('div');
+        col.className = 'col-3';
+        const url = URL.createObjectURL(file);
+        col.innerHTML = `
+            <div class="position-relative border rounded overflow-hidden" style="aspect-ratio:1;background:#f8f9fa;">
+                <img src="${url}" class="w-100 h-100" style="object-fit:cover;">
+                <button type="button" class="btn btn-sm btn-danger position-absolute top-0 end-0 m-1 rounded-circle p-0"
+                        style="width:22px;height:22px;line-height:1;" onclick="_removeImage(${idx})">&times;</button>
+            </div>`;
+        grid.appendChild(col);
+    });
+}
+
+function _addImageFiles(fileList) {
+    _recalledImageUrls = [];
+    for (const f of fileList) {
+        if (_imageFiles.length >= MAX_IMAGES) {
+            showToast(`Maximum ${MAX_IMAGES} images allowed`, 'warning');
+            break;
+        }
+        const allowed = ['image/png','image/jpeg','image/gif','image/webp'];
+        if (!allowed.includes(f.type)) { showToast('Unsupported file type: ' + f.name, 'error'); continue; }
+        if (f.size > 16 * 1024 * 1024) { showToast('File too large: ' + f.name, 'error'); continue; }
+        _imageFiles.push(f);
+    }
+    _renderImagePreviews();
+}
+
+function _removeImage(idx) {
+    _imageFiles.splice(idx, 1);
+    _renderImagePreviews();
+}
+
+function _removeRecalledImage(idx) {
+    _recalledImageUrls.splice(idx, 1);
+    _renderImagePreviews();
+}
+
+(function initImageTab() {
+    const zone = document.getElementById('image-drop-zone');
+    const inp = document.getElementById('image-file-input');
+    if (!zone || !inp) return;
+
+    zone.addEventListener('click', () => inp.click());
+    inp.addEventListener('change', () => { _addImageFiles(inp.files); inp.value = ''; });
+
+    zone.addEventListener('dragover', e => { e.preventDefault(); zone.style.background = 'rgba(var(--bs-primary-rgb),.08)'; });
+    zone.addEventListener('dragleave', () => { zone.style.background = ''; });
+    zone.addEventListener('drop', e => {
+        e.preventDefault();
+        zone.style.background = '';
+        _addImageFiles(e.dataTransfer.files);
+    });
+})();
+
+/* ── Ollama status check ─────────────────────────────────── */
+let _ollamaAvailable = false;
+
+function checkOllamaStatus() {
+    const dot = document.getElementById('ollama-status-dot');
+    const txt = document.getElementById('ollama-status-text');
+    const localBtn = document.getElementById('provider-local');
+    const cloudBtn = document.getElementById('provider-cloud');
+
+    fetch('{{ url_for("compose_ollama_status") }}')
+        .then(r => r.json())
+        .then(data => {
+            _ollamaAvailable = data.available;
+            if (data.available) {
+                dot.style.color = '#198754';
+                const models = data.models.length ? data.models.join(', ') : data.configured_model;
+                txt.textContent = 'Running — ' + models;
+                localBtn.disabled = false;
+            } else {
+                dot.style.color = '#dc3545';
+                txt.innerHTML = 'Not detected — <a href="https://ollama.com" target="_blank" rel="noopener">Install Ollama</a>';
+                localBtn.disabled = true;
+                cloudBtn.checked = true;
+            }
+        })
+        .catch(() => {
+            dot.style.color = '#dc3545';
+            txt.textContent = 'Check failed';
+            localBtn.disabled = true;
+            cloudBtn.checked = true;
+        });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    checkOllamaStatus();
+    const imgTab = document.getElementById('image-tab');
+    if (imgTab) imgTab.addEventListener('shown.bs.tab', checkOllamaStatus);
+});
 
 function onSourceSelected() {
     const select = document.getElementById('saved-source-select');
@@ -1737,7 +1954,12 @@ function generatePosts() {
     const sourceType = getActiveSourceType();
     const content = getContent();
     
-    if (!content) {
+    if (sourceType === 'image') {
+        if (_imageFiles.length === 0 && _recalledImageUrls.length === 0) {
+            alert('Please add at least one image');
+            return;
+        }
+    } else if (!content) {
         if (sourceType === 'saved_source') {
             alert('Please select a saved source');
         } else {
@@ -1779,6 +2001,17 @@ function generatePosts() {
     if (sourceType === 'saved_source') {
         formData.append('source_id', content);
         endpoint = '{{ url_for("compose_generate_from_source") }}';
+    } else if (sourceType === 'image') {
+        formData.append('source_type', 'image');
+        if (content) formData.append('content', content);
+        if (_imageFiles.length > 0) {
+            _imageFiles.forEach(f => formData.append('images', f));
+        } else {
+            _recalledImageUrls.forEach(u => formData.append('recall_image_urls', u));
+        }
+        const useLocal = document.getElementById('provider-local')?.checked ? 'true' : 'false';
+        formData.append('use_local', useLocal);
+        endpoint = '{{ url_for("compose_generate") }}';
     } else {
         formData.append('source_type', sourceType);
         formData.append('content', content);

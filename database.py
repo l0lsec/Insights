@@ -2936,6 +2936,30 @@ def list_recent_prompts(limit: int = 20, db_path: str = DB_PATH) -> List[sqlite3
         return cur.fetchall()
 
 
+def list_recent_image_prompts(limit: int = 10, db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    """Get recent image generation sessions (prompt + image URL).
+
+    Returns distinct ``(source_content, image_url, created_at)`` combos
+    for ``source_type='image'``, ordered by most recently used.
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            """
+            SELECT source_content, image_url, MAX(created_at) as created_at
+            FROM standalone_posts
+            WHERE source_type = 'image'
+            AND image_url IS NOT NULL
+            AND image_url != ''
+            GROUP BY source_content, image_url
+            ORDER BY MAX(created_at) DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
+        return cur.fetchall()
+
+
 def clear_recent_prompts(db_path: str = DB_PATH) -> int:
     """Clear the prompt history by setting source_content to empty for freeform posts.
     
