@@ -3896,6 +3896,7 @@ def compose_generate():
     extra_context = request.form.get('extra_context', '').strip() or None
     topic = request.form.get('topic', '').strip() or None
     image_url = request.form.get('image_url', '').strip() or None
+    use_local = request.form.get('use_local', 'false').lower() in ('true', '1', 'yes')
     
     if source_type != 'image' and not content:
         return jsonify({"error": "Content is required"}), 400
@@ -3915,6 +3916,7 @@ def compose_generate():
                 tone=tone,
                 posts_per_platform=posts_per_platform,
                 extra_context=extra_context,
+                use_local=use_local,
             )
         elif source_type == 'url':
             result = generate_posts_from_url(
@@ -3923,6 +3925,7 @@ def compose_generate():
                 tone=tone,
                 posts_per_platform=posts_per_platform,
                 extra_context=extra_context,
+                use_local=use_local,
             )
             # New structure: {"posts": {...}, "source_data": {...}}
             generated = result.get("posts", result)
@@ -3946,13 +3949,12 @@ def compose_generate():
                 topic=topic,
                 posts_per_platform=posts_per_platform,
                 extra_context=extra_context,
+                use_local=use_local,
             )
         elif source_type == 'image':
             import base64 as b64module
             import urllib.request as _urlreq
             import mimetypes
-
-            use_local = request.form.get('use_local', 'false').lower() in ('true', '1', 'yes')
             files = request.files.getlist('images')
             recall_urls = request.form.getlist('recall_image_urls')
 
@@ -5103,6 +5105,7 @@ def compose_generate_from_source():
     posts_per_platform = request.form.get('posts_per_platform', 1, type=int)
     extra_context = request.form.get('extra_context', '').strip() or None
     image_url = request.form.get('image_url', '').strip() or None
+    use_local = request.form.get('use_local', 'false').lower() in ('true', '1', 'yes')
     
     if not source_id:
         return jsonify({"error": "Source ID is required"}), 400
@@ -5117,17 +5120,14 @@ def compose_generate_from_source():
     posts_per_platform = max(1, min(posts_per_platform, 10))
     
     try:
-        # Import here to avoid circular dependency
         from podinsights import generate_posts_from_text
         
-        # Build context from the saved source
         source_text = f"TITLE: {source['title']}\n\n"
         if source['description']:
             source_text += f"DESCRIPTION: {source['description']}\n\n"
         source_text += f"CONTENT: {source['content']}\n\n"
         source_text += f"ORIGINAL URL: {source['url']}"
         
-        # Generate posts using the saved content
         generated = generate_posts_from_text(
             text=source_text,
             platforms=platforms,
@@ -5135,29 +5135,38 @@ def compose_generate_from_source():
             topic=source['title'],
             posts_per_platform=posts_per_platform,
             extra_context=extra_context,
+            use_local=use_local,
         )
         
-        # Update last_used_at timestamp
         update_url_source_last_used(source_id)
         
-        # Save generated posts to database
+        # Normalize platform names and filter hallucinated platforms
+        requested_platforms = {p.lower() for p in platforms}
+        platform_aliases = {"x": "twitter"}
         saved_posts = {}
         for platform, post_data in generated.items():
             if platform == 'raw':
                 continue
             
+            norm_platform = platform.lower().strip()
+            norm_platform = platform_aliases.get(norm_platform, norm_platform)
+
+            if norm_platform not in requested_platforms:
+                continue
+
             posts_list = post_data if isinstance(post_data, list) else [post_data]
-            saved_posts[platform] = []
+            if norm_platform not in saved_posts:
+                saved_posts[norm_platform] = []
             
             for post_content in posts_list:
                 post_id = add_standalone_post(
                     source_type='saved_source',
                     source_content=source['url'][:1000],
-                    platform=platform,
+                    platform=norm_platform,
                     content=post_content,
                     image_url=image_url,
                 )
-                saved_posts[platform].append({
+                saved_posts[norm_platform].append({
                     'id': post_id,
                     'content': post_content,
                     'image_url': image_url,

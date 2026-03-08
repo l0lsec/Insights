@@ -10,25 +10,146 @@ from typing import List
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "llama3.2-vision")
+OLLAMA_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2")
 
 logger = logging.getLogger(__name__)
 
+# ── Shared constants used by all generation functions ──────────────────────
+
+TONE_GUIDES = {
+    "professional": "Professional and authoritative, suitable for business audiences",
+    "casual": "Casual and conversational, friendly and approachable",
+    "witty": "Witty and clever, with humor where appropriate",
+    "educational": "Educational and informative, focuses on teaching",
+    "promotional": "Promotional and persuasive, drives action",
+}
+
+PLATFORM_GUIDELINES = {
+    "twitter": "280 characters max, punchy and engaging, 3-5 relevant hashtags",
+    "linkedin": "Professional tone, 1-3 paragraphs, thought leadership angle, 3-5 professional hashtags",
+    "facebook": "Conversational, can be longer, engaging question or hook, 2-3 hashtags",
+    "threads": "Casual and authentic, similar to Twitter but can be slightly longer, 3-5 hashtags",
+    "bluesky": "Similar to Twitter, concise and engaging, 3-5 hashtags",
+    "instagram": "Visual-focused caption, emojis welcome, 10-15 relevant hashtags at the end",
+    "mastodon": "Thoughtful and community-focused, 3-5 hashtags",
+}
+
+# ── Shared LLM helpers ────────────────────────────────────────────────────
+
+def _get_llm_client(use_local: bool = False, vision: bool = False):
+    """Return ``(client, model_name)`` for either Ollama or OpenAI."""
+    from openai import OpenAI
+
+    if use_local:
+        model = OLLAMA_VISION_MODEL if vision else OLLAMA_TEXT_MODEL
+        return OpenAI(base_url=f"{OLLAMA_BASE_URL}/v1", api_key="ollama"), model
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    if not client.api_key:
+        raise RuntimeError("OPENAI_API_KEY is not configured")
+    return client, OPENAI_MODEL
+
+
+def _get_llm_params(use_local: bool, num_platforms: int = 1, posts_per_call: int = 1) -> dict:
+    """Return generation kwargs tuned for local vs cloud models."""
+    if use_local:
+        tokens = max(800, 400 * num_platforms * posts_per_call)
+        return {
+            "temperature": 0.3,
+            "max_tokens": min(tokens, 4000),
+            "extra_body": {"repeat_penalty": 1.3, "top_p": 0.9},
+        }
+    return {"temperature": 0.8, "max_tokens": 3000}
+
+
+_LOCAL_BATCH_SIZE = 1
+
+
+def _build_format_instruction(platforms: list[str], posts_per_platform: int) -> str:
+    """Build the JSON format instruction appended to every LLM prompt."""
+    platform_keys = ", ".join(f'"{p}"' for p in platforms)
+    if posts_per_platform > 1:
+        example_val = '["First post #hashtag", "Second post #hashtag"]'
+    else:
+        example_val = '"Your post text here #hashtag"'
+    json_example = "{" + ", ".join(f'"{p}": {example_val}' for p in platforms) + "}"
+
+    lines = (
+        f"\nReply with ONLY a JSON object. No other text.\n"
+        f"Use ONLY these keys: {platform_keys}\n"
+    )
+    if posts_per_platform > 1:
+        lines += f"Each key maps to an array of {posts_per_platform} post strings.\n"
+    else:
+        lines += "Each key maps to a single post string.\n"
+    lines += f"Example:\n{json_example}"
+    return lines
+
+
+def _batch_generate(client, model, messages_fn, platforms, posts_per_platform, use_local):
+    """Generate posts, batching into smaller calls for local models.
+
+    Tracks actual posts received per platform and keeps requesting until the
+    target is met or a safety cap of ``max_attempts`` is reached.
+    """
+    batch_size = _LOCAL_BATCH_SIZE if use_local else posts_per_platform
+
+    def _call(plats, n):
+        params = _get_llm_params(use_local, num_platforms=len(plats), posts_per_call=n)
+        msgs = messages_fn(plats, n)
+        resp = client.chat.completions.create(model=model, messages=msgs, **params)
+        return _extract_json_from_llm(resp.choices[0].message.content.strip())
+
+    if posts_per_platform <= batch_size:
+        return _call(platforms, posts_per_platform)
+
+    merged: dict[str, list] = {p: [] for p in platforms}
+    max_attempts = (posts_per_platform // batch_size) * 3
+    attempts = 0
+    while attempts < max_attempts:
+        shortest = min(len(merged[p]) for p in platforms)
+        if shortest >= posts_per_platform:
+            break
+        need = min(batch_size, posts_per_platform - shortest)
+        result = _call(platforms, need)
+        if result:
+            for p in platforms:
+                val = result.get(p, [])
+                if isinstance(val, str):
+                    val = [val]
+                merged[p].extend(val)
+        attempts += 1
+
+    for p in platforms:
+        merged[p] = merged[p][:posts_per_platform]
+    return merged
+
 
 def check_ollama_status() -> dict:
-    """Check if Ollama is running and list available vision-capable models."""
+    """Check if Ollama is running and list available models."""
     import urllib.request
     import urllib.error
 
-    result = {"available": False, "models": [], "configured_model": OLLAMA_VISION_MODEL}
+    _VISION_KW = ("vision", "llava", "moondream", "bakllava")
+
+    result = {
+        "available": False,
+        "models": [],
+        "text_models": [],
+        "configured_model": OLLAMA_VISION_MODEL,
+        "configured_text_model": OLLAMA_TEXT_MODEL,
+    }
     try:
         req = urllib.request.Request(f"{OLLAMA_BASE_URL}/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=3) as resp:
             data = json.loads(resp.read().decode())
         all_models = [m["name"] for m in data.get("models", [])]
-        vision_keywords = ("vision", "llava", "moondream", "bakllava")
         result["models"] = [
             m for m in all_models
-            if any(kw in m.lower() for kw in vision_keywords)
+            if any(kw in m.lower() for kw in _VISION_KW)
+        ]
+        result["text_models"] = [
+            m for m in all_models
+            if not any(kw in m.lower() for kw in _VISION_KW)
         ]
         result["available"] = True
     except Exception:
@@ -512,86 +633,31 @@ def generate_posts_from_prompt(
     tone: str = "professional",
     posts_per_platform: int = 1,
     extra_context: str | None = None,
+    use_local: bool = False,
 ) -> dict:
-    """Generate social media posts from a freeform prompt/topic.
-    
-    Parameters
-    ----------
-    prompt: str
-        The topic, idea, or prompt to generate posts about.
-    platforms: List[str] | None
-        List of platforms to generate posts for. Defaults to major platforms.
-    tone: str
-        The tone/style for the posts (professional, casual, witty, educational, promotional).
-    posts_per_platform: int
-        Number of unique posts to generate per platform. Defaults to 1.
-    extra_context: str | None
-        Optional additional context or instructions.
-        
-    Returns
-    -------
-    dict
-        Dictionary with platform names as keys and post content as values.
-    """
+    """Generate social media posts from a freeform prompt/topic."""
     if platforms is None:
         platforms = ["linkedin", "threads", "twitter"]
-    
+
     posts_per_platform = max(1, min(posts_per_platform, 10))
-    
+
     try:
-        from openai import OpenAI
-        
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        if not client.api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
-        
-        tone_guides = {
-            "professional": "Professional and authoritative, suitable for business audiences",
-            "casual": "Casual and conversational, friendly and approachable",
-            "witty": "Witty and clever, with humor where appropriate",
-            "educational": "Educational and informative, focuses on teaching",
-            "promotional": "Promotional and persuasive, drives action",
-        }
-        tone_instruction = tone_guides.get(tone, tone_guides["professional"])
-        
-        platform_guidelines = {
-            "twitter": "280 characters max, punchy and engaging, 3-5 relevant hashtags",
-            "linkedin": "Professional tone, 1-3 paragraphs, thought leadership angle, 3-5 professional hashtags",
-            "facebook": "Conversational, can be longer, engaging question or hook, 2-3 hashtags",
-            "threads": "Casual and authentic, similar to Twitter but can be slightly longer, 3-5 hashtags",
-            "bluesky": "Similar to Twitter, concise and engaging, 3-5 hashtags",
-            "instagram": "Visual-focused caption, emojis welcome, 10-15 relevant hashtags at the end",
-            "mastodon": "Thoughtful and community-focused, 3-5 hashtags",
-        }
-        
+        client, model = _get_llm_client(use_local)
+        tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
+
         platform_list = "\n".join([
-            f"- {p.upper()}: {platform_guidelines.get(p, 'Standard social media post with hashtags')}"
+            f"- {p.upper()}: {PLATFORM_GUIDELINES.get(p, 'Standard social media post with hashtags')}"
             for p in platforms
         ])
-        
-        if posts_per_platform > 1:
-            format_instruction = (
-                f"\nGenerate {posts_per_platform} UNIQUE posts for EACH platform with different angles.\n"
-                "Format as JSON with platform names as keys and ARRAYS of posts as values. Example:\n"
-                '{"twitter": ["First tweet #hashtag", "Second tweet #tech"], "linkedin": ["Post 1...", "Post 2..."]}'
-            )
-        else:
-            format_instruction = (
-                "\nFormat as JSON with platform names as keys. Example:\n"
-                '{"twitter": "Your tweet #hashtag", "linkedin": "Your LinkedIn post..."}'
-            )
-        
-        logger.debug("Generating posts from prompt: %s", prompt[:100])
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
+
+        def _messages(plats, n):
+            return [
                 {
                     "role": "system",
                     "content": (
                         "You are a social media content creator and marketing expert. "
                         "You create engaging, platform-optimized posts that resonate with audiences. "
-                        "You understand each platform's unique culture, character limits, and best practices."
+                        "You ALWAYS reply with valid JSON only."
                     ),
                 },
                 {
@@ -607,27 +673,21 @@ def generate_posts_from_prompt(
                         "2. Include relevant hashtags\n"
                         "3. Make it engaging and shareable\n"
                         "4. Stay on topic and provide value\n"
-                        f"{format_instruction}"
+                        + _build_format_instruction(plats, n)
                     ),
                 },
-            ],
-            temperature=0.8,
-            max_tokens=3000,
-        )
-        
-        content = response.choices[0].message.content.strip()
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-        
-        result = json.loads(content)
-        logger.debug("Generated posts for %d platforms from prompt", len(result))
-        return result
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse JSON response, returning raw content")
-        return {"raw": response.choices[0].message.content.strip()}
+            ]
+
+        logger.debug("Generating posts from prompt via %s: %s",
+                      "Ollama" if use_local else "OpenAI", prompt[:100])
+        result = _batch_generate(client, model, _messages, platforms,
+                                 posts_per_platform, use_local)
+        if result:
+            logger.debug("Generated posts for %d platforms from prompt", len(result))
+            return result
+
+        logger.warning("Could not extract JSON from prompt generation")
+        return {p: "" for p in platforms}
     except Exception as exc:
         logger.exception("Post generation from prompt failed")
         raise RuntimeError("Failed to generate posts from prompt") from exc
@@ -639,106 +699,77 @@ def generate_posts_from_url(
     tone: str = "professional",
     posts_per_platform: int = 1,
     extra_context: str | None = None,
+    use_local: bool = False,
 ) -> dict:
-    """Generate social media posts based on content from a URL.
-    
-    Parameters
-    ----------
-    url: str
-        The URL to fetch content from.
-    platforms: List[str] | None
-        List of platforms to generate posts for.
-    tone: str
-        The tone/style for the posts.
-    posts_per_platform: int
-        Number of unique posts per platform.
-    extra_context: str | None
-        Optional additional context.
-        
-    Returns
-    -------
-    dict
-        Dictionary with 'posts' (platform-keyed posts) and 'source_data' (extracted metadata).
-    """
-    import requests
+    """Generate social media posts based on content from a URL."""
     import re
     import trafilatura
-    
+
     if platforms is None:
         platforms = ["linkedin", "threads", "twitter"]
-    
-    # Fetch the URL content
+
+    # ── Fetch the URL content ──────────────────────────────────────────
     try:
-        # Use trafilatura for robust article extraction
         downloaded = trafilatura.fetch_url(url)
-        
+
         if not downloaded:
             raise RuntimeError(f"Failed to fetch content from URL: {url}")
-        
-        # Extract main article content using trafilatura
+
         body_content = trafilatura.extract(
             downloaded,
             include_comments=False,
             include_tables=True,
             favor_precision=True,
         ) or ""
-        
-        # Extract metadata using trafilatura's metadata extraction
+
         metadata = trafilatura.extract_metadata(downloaded)
-        
+
         title = ""
         description = ""
         og_image = None
-        
+
         if metadata:
             title = metadata.title or ""
             description = metadata.description or ""
             og_image = metadata.image
-        
-        # Fallback: extract metadata from HTML if trafilatura didn't get it
+
         if not title or not description:
-            # Extract title from HTML
             title_match = re.search(r'<title>([^<]+)</title>', downloaded, re.IGNORECASE)
             if not title and title_match:
                 title = title_match.group(1).strip()
-            
-            # Extract og:title if available
+
             og_title_match = re.search(
                 r'<meta[^>]*property=["\']og:title["\'][^>]*content=["\']([^"\']+)["\']',
-                downloaded, re.IGNORECASE
+                downloaded, re.IGNORECASE,
             )
             if og_title_match:
                 title = og_title_match.group(1)
-            
-            # Extract og:description
+
             if not description:
                 og_desc_match = re.search(
                     r'<meta[^>]*property=["\']og:description["\'][^>]*content=["\']([^"\']+)["\']',
-                    downloaded, re.IGNORECASE
+                    downloaded, re.IGNORECASE,
                 )
                 if og_desc_match:
                     description = og_desc_match.group(1)
                 else:
-                    # Fallback to meta description
                     meta_desc_match = re.search(
                         r'<meta[^>]*name=["\']description["\'][^>]*content=["\']([^"\']+)["\']',
-                        downloaded, re.IGNORECASE
+                        downloaded, re.IGNORECASE,
                     )
                     if meta_desc_match:
                         description = meta_desc_match.group(1)
-            
-            # Extract og:image if not already found
+
             if not og_image:
                 og_image_match = re.search(
                     r'<meta[^>]*property=["\']og:image["\'][^>]*content=["\']([^"\']+)["\']',
-                    downloaded, re.IGNORECASE
+                    downloaded, re.IGNORECASE,
                 )
                 if og_image_match:
                     og_image = og_image_match.group(1)
-        
+
         extracted_content = f"TITLE: {title}\n\nDESCRIPTION: {description}\n\nCONTENT: {body_content}"
-        
-        # Store source data for saving
+
         source_data = {
             "url": url,
             "title": title,
@@ -746,67 +777,32 @@ def generate_posts_from_url(
             "content": body_content,
             "og_image": og_image,
         }
-        
-    except (requests.RequestException, Exception) as e:
+
+    except Exception as e:
         logger.error("Failed to fetch URL %s: %s", url, e)
         raise RuntimeError(f"Failed to fetch content from URL: {e}") from e
-    
-    # Now generate posts using the extracted content
+
+    # ── Generate posts ─────────────────────────────────────────────────
     posts_per_platform = max(1, min(posts_per_platform, 10))
-    
+
     try:
-        from openai import OpenAI
-        
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        if not client.api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
-        
-        tone_guides = {
-            "professional": "Professional and authoritative, suitable for business audiences",
-            "casual": "Casual and conversational, friendly and approachable",
-            "witty": "Witty and clever, with humor where appropriate",
-            "educational": "Educational and informative, focuses on teaching",
-            "promotional": "Promotional and persuasive, drives action",
-        }
-        tone_instruction = tone_guides.get(tone, tone_guides["professional"])
-        
-        platform_guidelines = {
-            "twitter": "280 characters max, punchy and engaging, 3-5 relevant hashtags",
-            "linkedin": "Professional tone, 1-3 paragraphs, thought leadership angle, 3-5 professional hashtags",
-            "facebook": "Conversational, can be longer, engaging question or hook, 2-3 hashtags",
-            "threads": "Casual and authentic, similar to Twitter but can be slightly longer, 3-5 hashtags",
-            "bluesky": "Similar to Twitter, concise and engaging, 3-5 hashtags",
-            "instagram": "Visual-focused caption, emojis welcome, 10-15 relevant hashtags at the end",
-            "mastodon": "Thoughtful and community-focused, 3-5 hashtags",
-        }
-        
+        client, model = _get_llm_client(use_local)
+        tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
+
         platform_list = "\n".join([
-            f"- {p.upper()}: {platform_guidelines.get(p, 'Standard social media post with hashtags')}"
+            f"- {p.upper()}: {PLATFORM_GUIDELINES.get(p, 'Standard social media post with hashtags')}"
             for p in platforms
         ])
-        
-        if posts_per_platform > 1:
-            format_instruction = (
-                f"\nGenerate {posts_per_platform} UNIQUE posts for EACH platform with different angles.\n"
-                "Format as JSON with platform names as keys and ARRAYS of posts as values."
-            )
-        else:
-            format_instruction = (
-                "\nFormat as JSON with platform names as keys. Example:\n"
-                '{"twitter": "Your tweet #hashtag", "linkedin": "Your LinkedIn post..."}'
-            )
-        
-        logger.debug("Generating posts from URL: %s", url)
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
+
+        def _messages(plats, n):
+            return [
                 {
                     "role": "system",
                     "content": (
                         "You are a social media content creator specializing in sharing and promoting web content. "
                         "You create engaging posts that summarize, comment on, or promote articles and web pages. "
-                        "Include the URL in posts where appropriate (especially for LinkedIn)."
+                        "Include the URL in posts where appropriate (especially for LinkedIn). "
+                        "You ALWAYS reply with valid JSON only."
                     ),
                 },
                 {
@@ -823,30 +819,21 @@ def generate_posts_from_url(
                         "2. Include the URL where appropriate\n"
                         "3. Add relevant hashtags\n"
                         "4. Make it engaging and encourage clicks/engagement\n"
-                        f"{format_instruction}"
+                        + _build_format_instruction(plats, n)
                     ),
                 },
-            ],
-            temperature=0.8,
-            max_tokens=3000,
-        )
-        
-        content = response.choices[0].message.content.strip()
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-        
-        result = json.loads(content)
-        logger.debug("Generated posts for %d platforms from URL", len(result))
-        return {"posts": result, "source_data": source_data}
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse JSON response, returning raw content")
-        return {
-            "posts": {"raw": response.choices[0].message.content.strip()},
-            "source_data": source_data,
-        }
+            ]
+
+        logger.debug("Generating posts from URL via %s: %s",
+                      "Ollama" if use_local else "OpenAI", url)
+        result = _batch_generate(client, model, _messages, platforms,
+                                 posts_per_platform, use_local)
+        if result:
+            logger.debug("Generated posts for %d platforms from URL", len(result))
+            return {"posts": result, "source_data": source_data}
+
+        logger.warning("Could not extract JSON from URL generation")
+        return {"posts": {p: "" for p in platforms}, "source_data": source_data}
     except Exception as exc:
         logger.exception("Post generation from URL failed")
         raise RuntimeError("Failed to generate posts from URL") from exc
@@ -859,89 +846,33 @@ def generate_posts_from_text(
     topic: str | None = None,
     posts_per_platform: int = 1,
     extra_context: str | None = None,
+    use_local: bool = False,
 ) -> dict:
-    """Generate social media posts from user-provided text content.
-    
-    Parameters
-    ----------
-    text: str
-        The text content to generate posts from.
-    platforms: List[str] | None
-        List of platforms to generate posts for.
-    tone: str
-        The tone/style for the posts.
-    topic: str | None
-        Optional topic/title for the content.
-    posts_per_platform: int
-        Number of unique posts per platform.
-    extra_context: str | None
-        Optional additional context.
-        
-    Returns
-    -------
-    dict
-        Dictionary with platform names as keys and post content as values.
-    """
+    """Generate social media posts from user-provided text content."""
     if platforms is None:
         platforms = ["linkedin", "threads", "twitter"]
-    
+
     posts_per_platform = max(1, min(posts_per_platform, 10))
-    
+
     try:
-        from openai import OpenAI
-        
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        if not client.api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
-        
-        tone_guides = {
-            "professional": "Professional and authoritative, suitable for business audiences",
-            "casual": "Casual and conversational, friendly and approachable",
-            "witty": "Witty and clever, with humor where appropriate",
-            "educational": "Educational and informative, focuses on teaching",
-            "promotional": "Promotional and persuasive, drives action",
-        }
-        tone_instruction = tone_guides.get(tone, tone_guides["professional"])
-        
-        platform_guidelines = {
-            "twitter": "280 characters max, punchy and engaging, 3-5 relevant hashtags",
-            "linkedin": "Professional tone, 1-3 paragraphs, thought leadership angle, 3-5 professional hashtags",
-            "facebook": "Conversational, can be longer, engaging question or hook, 2-3 hashtags",
-            "threads": "Casual and authentic, similar to Twitter but can be slightly longer, 3-5 hashtags",
-            "bluesky": "Similar to Twitter, concise and engaging, 3-5 hashtags",
-            "instagram": "Visual-focused caption, emojis welcome, 10-15 relevant hashtags at the end",
-            "mastodon": "Thoughtful and community-focused, 3-5 hashtags",
-        }
-        
+        client, model = _get_llm_client(use_local)
+        tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
+
         platform_list = "\n".join([
-            f"- {p.upper()}: {platform_guidelines.get(p, 'Standard social media post with hashtags')}"
+            f"- {p.upper()}: {PLATFORM_GUIDELINES.get(p, 'Standard social media post with hashtags')}"
             for p in platforms
         ])
-        
-        if posts_per_platform > 1:
-            format_instruction = (
-                f"\nGenerate {posts_per_platform} UNIQUE posts for EACH platform with different angles.\n"
-                "Format as JSON with platform names as keys and ARRAYS of posts as values."
-            )
-        else:
-            format_instruction = (
-                "\nFormat as JSON with platform names as keys. Example:\n"
-                '{"twitter": "Your tweet #hashtag", "linkedin": "Your LinkedIn post..."}'
-            )
-        
+
         topic_section = f"TOPIC: {topic}\n\n" if topic else ""
-        
-        logger.debug("Generating posts from text content (length: %d)", len(text))
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[
+
+        def _messages(plats, n):
+            return [
                 {
                     "role": "system",
                     "content": (
                         "You are a social media content creator. You transform text content into engaging "
-                        "social media posts optimized for different platforms. You understand how to "
-                        "distill key points and make them compelling for social audiences."
+                        "social media posts optimized for different platforms. "
+                        "You ALWAYS reply with valid JSON only."
                     ),
                 },
                 {
@@ -958,27 +889,21 @@ def generate_posts_from_text(
                         "2. Optimize for the platform's format\n"
                         "3. Include relevant hashtags\n"
                         "4. Make it engaging and shareable\n"
-                        f"{format_instruction}"
+                        + _build_format_instruction(plats, n)
                     ),
                 },
-            ],
-            temperature=0.8,
-            max_tokens=3000,
-        )
-        
-        content = response.choices[0].message.content.strip()
-        if content.startswith("```"):
-            content = content.split("```")[1]
-            if content.startswith("json"):
-                content = content[4:]
-            content = content.strip()
-        
-        result = json.loads(content)
-        logger.debug("Generated posts for %d platforms from text", len(result))
-        return result
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse JSON response, returning raw content")
-        return {"raw": response.choices[0].message.content.strip()}
+            ]
+
+        logger.debug("Generating posts from text via %s (length: %d)",
+                      "Ollama" if use_local else "OpenAI", len(text))
+        result = _batch_generate(client, model, _messages, platforms,
+                                 posts_per_platform, use_local)
+        if result:
+            logger.debug("Generated posts for %d platforms from text", len(result))
+            return result
+
+        logger.warning("Could not extract JSON from text generation")
+        return {p: "" for p in platforms}
     except Exception as exc:
         logger.exception("Post generation from text failed")
         raise RuntimeError("Failed to generate posts from text") from exc
@@ -1029,11 +954,21 @@ def _extract_json_from_llm(text: str) -> dict | None:
     """
     import re
 
+    def _sanitize(s: str) -> str:
+        return s.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
+
     def _try_parse(s: str) -> dict | None:
         try:
             return _normalize_llm_posts(json.loads(s))
         except (json.JSONDecodeError, ValueError):
-            return None
+            pass
+        sanitized = _sanitize(s)
+        if sanitized != s:
+            try:
+                return _normalize_llm_posts(json.loads(sanitized))
+            except (json.JSONDecodeError, ValueError):
+                pass
+        return None
 
     # 1. Direct parse
     result = _try_parse(text)
@@ -1077,22 +1012,9 @@ def generate_posts_from_images(
 ) -> dict:
     """Generate social media posts by analysing one or more images.
 
-    Parameters
-    ----------
-    images:
-        List of dicts with ``base64`` (base64-encoded bytes) and ``mime_type``.
-    prompt:
-        Optional user guidance on what to focus on in the image(s).
-    platforms:
-        Platforms to generate for.
-    tone:
-        Desired tone/style.
-    posts_per_platform:
-        Number of unique posts per platform.
-    extra_context:
-        Optional additional instructions.
-    use_local:
-        If *True*, use Ollama locally instead of OpenAI.
+    Images uses vision=True so the vision model is selected for local.
+    Batch generation is NOT used here because image payloads are large
+    and re-sending them multiple times is wasteful -- a single call is made.
     """
     if platforms is None:
         platforms = ["linkedin", "threads", "twitter"]
@@ -1100,49 +1022,15 @@ def generate_posts_from_images(
     posts_per_platform = max(1, min(posts_per_platform, 10))
 
     try:
-        from openai import OpenAI
-
-        if use_local:
-            client = OpenAI(base_url=f"{OLLAMA_BASE_URL}/v1", api_key="ollama")
-            model = OLLAMA_VISION_MODEL
-        else:
-            client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-            if not client.api_key:
-                raise RuntimeError("OPENAI_API_KEY is not configured")
-            model = OPENAI_MODEL
-
-        tone_guides = {
-            "professional": "Professional and authoritative, suitable for business audiences",
-            "casual": "Casual and conversational, friendly and approachable",
-            "witty": "Witty and clever, with humor where appropriate",
-            "educational": "Educational and informative, focuses on teaching",
-            "promotional": "Promotional and persuasive, drives action",
-        }
-        tone_instruction = tone_guides.get(tone, tone_guides["professional"])
-
-        platform_guidelines = {
-            "twitter": "280 characters max, punchy and engaging, 3-5 relevant hashtags",
-            "linkedin": "Professional tone, 1-3 paragraphs, thought leadership angle, 3-5 professional hashtags",
-            "facebook": "Conversational, can be longer, engaging question or hook, 2-3 hashtags",
-            "threads": "Casual and authentic, similar to Twitter but can be slightly longer, 3-5 hashtags",
-            "bluesky": "Similar to Twitter, concise and engaging, 3-5 hashtags",
-            "instagram": "Visual-focused caption, emojis welcome, 10-15 relevant hashtags at the end",
-            "mastodon": "Thoughtful and community-focused, 3-5 hashtags",
-        }
+        client, model = _get_llm_client(use_local, vision=True)
+        params = _get_llm_params(use_local, num_platforms=len(platforms),
+                                 posts_per_call=posts_per_platform)
+        tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
 
         platform_list = "\n".join([
-            f"- {p.upper()}: {platform_guidelines.get(p, 'Standard social media post with hashtags')}"
+            f"- {p.upper()}: {PLATFORM_GUIDELINES.get(p, 'Standard social media post with hashtags')}"
             for p in platforms
         ])
-
-        platform_keys = ", ".join(f'"{p}"' for p in platforms)
-        if posts_per_platform > 1:
-            example_val = '["First post #hashtag", "Second post #hashtag"]'
-        else:
-            example_val = '"Your post text here #hashtag"'
-        json_example = "{" + ", ".join(
-            f'"{p}": {example_val}' for p in platforms
-        ) + "}"
 
         prompt_section = f"FOCUS: {prompt}\n" if prompt else ""
         extra_section = f"CONTEXT: {extra_context}\n" if extra_context else ""
@@ -1156,10 +1044,7 @@ def generate_posts_from_images(
                     f"{extra_section}"
                     f"Tone: {tone_instruction}\n"
                     f"Platforms: {platform_list}\n\n"
-                    f"Reply with ONLY a JSON object. No other text.\n"
-                    f"Use ONLY these keys: {platform_keys}\n"
-                    f"{'Each key maps to an array of ' + str(posts_per_platform) + ' post strings.' if posts_per_platform > 1 else 'Each key maps to a single post string.'}\n"
-                    f"Example:\n{json_example}"
+                    + _build_format_instruction(platforms, posts_per_platform)
                 ),
             }
         ]
@@ -1190,8 +1075,7 @@ def generate_posts_from_images(
                 },
                 {"role": "user", "content": user_content},
             ],
-            temperature=0.6 if use_local else 0.8,
-            max_tokens=1500 if use_local else 3000,
+            **params,
         )
 
         raw_text = response.choices[0].message.content.strip()

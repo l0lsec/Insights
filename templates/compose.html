@@ -313,6 +313,22 @@
                 </button>
             </li>
         </ul>
+
+        <!-- Shared Local / Cloud Toggle (applies to all generation modes) -->
+        <div class="d-flex align-items-center mb-3 gap-2 p-2 rounded" style="background: #f8f9fa;">
+            <span class="fw-bold small">AI Provider:</span>
+            <div class="btn-group btn-group-sm" role="group" id="ai-provider-toggle">
+                <input type="radio" class="btn-check" name="aiProvider" id="provider-local" value="local">
+                <label class="btn btn-outline-success" for="provider-local">
+                    <span id="ollama-status-dot" class="me-1">●</span> Local (Ollama)
+                </label>
+                <input type="radio" class="btn-check" name="aiProvider" id="provider-cloud" value="cloud" checked>
+                <label class="btn btn-outline-primary" for="provider-cloud">
+                    ☁️ Cloud (OpenAI)
+                </label>
+            </div>
+            <span id="ollama-status-text" class="small text-muted ms-1"></span>
+        </div>
         
         <!-- Tab Content -->
         <div class="tab-content" id="sourceTypeContent">
@@ -521,22 +537,6 @@
             
             <!-- Image Tab -->
             <div class="tab-pane fade" id="image-content" role="tabpanel">
-                <!-- Local / Cloud Toggle -->
-                <div class="d-flex align-items-center mb-3 gap-2">
-                    <span class="fw-bold small">AI Provider:</span>
-                    <div class="btn-group btn-group-sm" role="group" id="image-provider-toggle">
-                        <input type="radio" class="btn-check" name="imageProvider" id="provider-local" value="local">
-                        <label class="btn btn-outline-success" for="provider-local">
-                            <span id="ollama-status-dot" class="me-1">●</span> Local (Ollama)
-                        </label>
-                        <input type="radio" class="btn-check" name="imageProvider" id="provider-cloud" value="cloud" checked>
-                        <label class="btn btn-outline-primary" for="provider-cloud">
-                            ☁️ Cloud (OpenAI)
-                        </label>
-                    </div>
-                    <span id="ollama-status-text" class="small text-muted ms-1"></span>
-                </div>
-
                 <!-- Drop Zone -->
                 <div id="image-drop-zone" class="rounded-3 text-center p-4 mb-3"
                      style="cursor:pointer; transition: background .15s; border: 2px dashed #dee2e6;">
@@ -1910,12 +1910,18 @@ function checkOllamaStatus() {
             _ollamaAvailable = data.available;
             if (data.available) {
                 dot.style.color = '#198754';
-                const models = data.models.length ? data.models.join(', ') : data.configured_model;
-                txt.textContent = 'Running — ' + models;
+                const allModels = [
+                    ...(data.models || []),
+                    ...(data.text_models || [])
+                ];
+                const label = allModels.length
+                    ? allModels.join(', ')
+                    : [data.configured_model, data.configured_text_model].filter(Boolean).join(', ');
+                txt.textContent = 'Running \u2014 ' + label;
                 localBtn.disabled = false;
             } else {
                 dot.style.color = '#dc3545';
-                txt.innerHTML = 'Not detected — <a href="https://ollama.com" target="_blank" rel="noopener">Install Ollama</a>';
+                txt.innerHTML = 'Not detected \u2014 <a href="https://ollama.com" target="_blank" rel="noopener">Install Ollama</a>';
                 localBtn.disabled = true;
                 cloudBtn.checked = true;
             }
@@ -1930,8 +1936,9 @@ function checkOllamaStatus() {
 
 document.addEventListener('DOMContentLoaded', () => {
     checkOllamaStatus();
-    const imgTab = document.getElementById('image-tab');
-    if (imgTab) imgTab.addEventListener('shown.bs.tab', checkOllamaStatus);
+    document.querySelectorAll('#sourceTypeTabs .nav-link').forEach(tab => {
+        tab.addEventListener('shown.bs.tab', checkOllamaStatus);
+    });
 });
 
 function onSourceSelected() {
@@ -1996,6 +2003,10 @@ function generatePosts() {
         formData.append('image_url', finalImageUrl);
     }
     
+    // Always send local/cloud preference
+    const useLocal = document.getElementById('provider-local')?.checked ? 'true' : 'false';
+    formData.append('use_local', useLocal);
+
     // Use different endpoint for saved sources
     let endpoint;
     if (sourceType === 'saved_source') {
@@ -2009,8 +2020,6 @@ function generatePosts() {
         } else {
             _recalledImageUrls.forEach(u => formData.append('recall_image_urls', u));
         }
-        const useLocal = document.getElementById('provider-local')?.checked ? 'true' : 'false';
-        formData.append('use_local', useLocal);
         endpoint = '{{ url_for("compose_generate") }}';
     } else {
         formData.append('source_type', sourceType);
