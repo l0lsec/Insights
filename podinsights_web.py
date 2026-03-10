@@ -914,7 +914,7 @@ def view_feed(feed_id: int):
     if not feed:
         return redirect(url_for('index'))
 
-    is_youtube_feed = feed.get('feed_type') == 'youtube'
+    is_youtube_feed = feed['feed_type'] == 'youtube'
 
     # Pagination parameters
     page = request.args.get('page', 1, type=int)
@@ -4028,6 +4028,8 @@ def compose_generate():
                     og_image=source_data.get("og_image"),
                 )
                 source_data["source_id"] = source_id
+            if not image_url and source_data and source_data.get("og_image"):
+                image_url = source_data["og_image"]
         elif source_type == 'text':
             generated = generate_posts_from_text(
                 text=content,
@@ -5266,6 +5268,13 @@ def compose_generate_from_source():
     if not source:
         return jsonify({"error": "Source not found"}), 404
     
+    if not image_url and source['og_image']:
+        image_url = source['og_image']
+
+    if is_youtube_url(source['url']):
+        credit = f"IMPORTANT: Include this YouTube video URL as a reference/credit in every post: {source['url']}"
+        extra_context = f"{credit}\n{extra_context}" if extra_context else credit
+
     if not platforms:
         platforms = ['linkedin', 'threads', 'twitter']
     
