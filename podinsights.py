@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import glob
 import os
 import json
 import logging
+import re
 from typing import List
+from urllib.parse import urlparse, parse_qs
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
@@ -163,6 +166,178 @@ def configure_logging(verbose: bool = False) -> None:
     logging.basicConfig(level=level, format="%(asctime)s [%(levelname)s] %(message)s")
     # Write a debug message so callers know what level we're using
     logger.debug("Logging configured. Level=%s", logging.getLevelName(level))
+
+
+# ── YouTube helpers ──────────────────────────────────────────────────────
+
+_YT_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}
+
+
+def is_youtube_url(url: str) -> bool:
+    """Return *True* if *url* points to YouTube (video, channel, or playlist)."""
+    try:
+        host = urlparse(url).hostname or ""
+        return host.lower() in _YT_HOSTS
+    except Exception:
+        return False
+
+
+def classify_youtube_url(url: str) -> str:
+    """Classify a YouTube URL as ``'video'``, ``'channel'``, ``'playlist'``, or ``'unknown'``.
+
+    Handles formats like:
+    - ``https://www.youtube.com/watch?v=VIDEO_ID``
+    - ``https://youtu.be/VIDEO_ID``
+    - ``https://www.youtube.com/@handle``
+    - ``https://www.youtube.com/channel/UC...``
+    - ``https://www.youtube.com/c/ChannelName``
+    - ``https://www.youtube.com/playlist?list=PL...``
+    """
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    path = parsed.path.rstrip("/")
+    qs = parse_qs(parsed.query)
+
+    if host == "youtu.be":
+        return "video"
+
+    if "list" in qs and path in ("/playlist", ""):
+        return "playlist"
+    if "v" in qs or path.startswith("/shorts/"):
+        return "video"
+    if path.startswith("/@") or path.startswith("/channel/") or path.startswith("/c/"):
+        return "channel"
+    if "list" in qs:
+        return "playlist"
+
+    return "unknown"
+
+
+def _resolve_channel_id(url: str) -> str | None:
+    """Use yt-dlp to resolve a channel/handle URL to a channel ID."""
+    try:
+        import yt_dlp
+
+        opts = {
+            "quiet": True,
+            "no_warnings": True,
+            "extract_flat": True,
+            "playlist_items": "1",
+        }
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info.get("channel_id") or info.get("id")
+    except Exception as exc:
+        logger.warning("Could not resolve channel ID for %s: %s", url, exc)
+        return None
+
+
+def youtube_url_to_rss(url: str) -> str | None:
+    """Convert a YouTube channel or playlist URL to its Atom RSS feed URL.
+
+    Returns *None* when the URL cannot be converted (e.g. a single video).
+    """
+    kind = classify_youtube_url(url)
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+
+    if kind == "playlist":
+        playlist_id = qs.get("list", [None])[0]
+        if playlist_id:
+            return f"https://www.youtube.com/feeds/videos.xml?playlist_id={playlist_id}"
+        return None
+
+    if kind == "channel":
+        path = parsed.path.rstrip("/")
+        if path.startswith("/channel/"):
+            channel_id = path.split("/channel/")[1].split("/")[0]
+        else:
+            channel_id = _resolve_channel_id(url)
+        if channel_id:
+            return f"https://www.youtube.com/feeds/videos.xml?channel_id={channel_id}"
+        return None
+
+    return None
+
+
+def get_youtube_video_id(url: str) -> str | None:
+    """Extract the video ID from a YouTube video URL."""
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    qs = parse_qs(parsed.query)
+
+    if host == "youtu.be":
+        return parsed.path.lstrip("/").split("/")[0] or None
+
+    vid = qs.get("v", [None])[0]
+    if vid:
+        return vid
+
+    path = parsed.path
+    if path.startswith("/shorts/"):
+        return path.split("/shorts/")[1].split("/")[0] or None
+
+    return None
+
+
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+DOWNLOADS_DIR = os.path.join(_APP_DIR, "downloads")
+
+
+def download_youtube_audio(video_url: str, output_dir: str | None = None) -> str:
+    """Download audio from a YouTube video using yt-dlp.
+
+    Files are saved into *output_dir* (defaults to ``downloads/`` inside the
+    application directory).  Returns the path to the downloaded audio file.
+    """
+    try:
+        import yt_dlp
+    except ImportError:
+        raise RuntimeError(
+            "yt-dlp is required for YouTube support. Install with: pip install yt-dlp"
+        )
+
+    if output_dir is None:
+        output_dir = DOWNLOADS_DIR
+    os.makedirs(output_dir, exist_ok=True)
+
+    output_template = os.path.join(output_dir, "%(id)s.%(ext)s")
+    opts = {
+        "format": "bestaudio/best",
+        "postprocessors": [
+            {
+                "key": "FFmpegExtractAudio",
+                "preferredcodec": "mp3",
+                "preferredquality": "192",
+            }
+        ],
+        "outtmpl": output_template,
+        "quiet": True,
+        "no_warnings": True,
+    }
+
+    logger.info("Downloading audio from YouTube: %s", video_url)
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(video_url, download=True)
+
+    video_id = info.get("id", "audio")
+    expected_path = os.path.join(output_dir, f"{video_id}.mp3")
+    if os.path.exists(expected_path):
+        logger.info("YouTube audio saved to %s", expected_path)
+        return expected_path
+
+    mp3_files = glob.glob(os.path.join(output_dir, "*.mp3"))
+    if mp3_files:
+        return mp3_files[0]
+
+    audio_files = glob.glob(os.path.join(output_dir, f"{video_id}.*"))
+    audio_files = [f for f in audio_files if not f.endswith((".json", ".txt"))]
+    if audio_files:
+        return audio_files[0]
+
+    raise FileNotFoundError(
+        f"yt-dlp did not produce an audio file for {video_url}"
+    )
 
 
 def transcribe_audio(audio_path: str) -> str:

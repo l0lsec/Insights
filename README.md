@@ -10,17 +10,18 @@
 
 ---
 
-Insights is an AI-powered content platform that turns RSS feeds, podcasts, articles, and URLs into summaries, generated articles, and platform-ready social media posts. It combines state-of-the-art speech recognition with OpenAI to process audio and text content, then helps you publish and schedule posts across LinkedIn, Threads, and more — all from a single web interface or CLI.
+Insights is an AI-powered content platform that turns RSS feeds, podcasts, YouTube videos, articles, and URLs into summaries, generated articles, and platform-ready social media posts. It combines state-of-the-art speech recognition with OpenAI to process audio, video, and text content, then helps you publish and schedule posts across LinkedIn, Threads, and more — all from a single web interface or CLI.
 
-What started as a podcast transcription tool has grown into a complete content pipeline: ingest any source, let AI do the heavy lifting, and push polished posts out on your schedule.
+What started as a podcast transcription tool has grown into a complete content pipeline: ingest any source — RSS feeds, YouTube channels, individual videos, or raw text — let AI do the heavy lifting, and push polished posts out on your schedule.
 
 ### Features
 
 #### Content Ingestion
 - **RSS Feeds** - Subscribe to audio (podcast) and text (blog/news) feeds with automatic metadata parsing
+- **YouTube Videos** - Paste a YouTube video, channel, or playlist URL to transcribe and analyze video content via yt-dlp audio extraction
 - **URL Extraction** - Paste any URL and extract article content, metadata, and Open Graph images via trafilatura
 - **Direct Text Input** - Provide raw text for processing without a source URL
-- **Audio Transcription** - Transcribe podcast episodes using mlx-whisper (Apple Silicon), faster-whisper, or the OpenAI Whisper API
+- **Audio Transcription** - Transcribe podcast episodes and YouTube videos using mlx-whisper (Apple Silicon), faster-whisper, or the OpenAI Whisper API
 
 #### AI Processing
 - **Summarization** - Generate concise summaries of transcripts and articles using OpenAI
@@ -56,23 +57,26 @@ What started as a podcast transcription tool has grown into a complete content p
 
 ### Use Cases
 
-- Content creators repurposing podcast episodes into articles and social posts
+- Content creators repurposing podcast episodes and YouTube videos into articles and social posts
 - Marketing teams scheduling a consistent social media presence from any content source
-- Researchers extracting structured summaries and action items from interviews
+- Researchers extracting structured summaries and action items from interviews or video lectures
 - Social media managers generating and queuing posts from URLs, topics, or existing text
 - Business professionals converting recorded meetings into JIRA tickets
 - Thought leaders building content queues across LinkedIn, Threads, and other platforms
 - Podcast fans who want quick summaries before committing to a full episode
+- YouTube viewers who prefer reading transcripts and summaries over watching long-form videos
 
 *Insights - Transforming content into actionable intelligence and engaging social media posts.*
 
 
 ### Feeds Page
-Manage your podcast and text RSS feeds from a central dashboard. Add new feeds, open existing ones, or delete feeds you no longer need.
-
+Manage your podcast, text, and YouTube feeds from a central dashboard. Add new feeds by pasting an RSS URL or YouTube link, open existing ones, or delete feeds you no longer need.
 
 ### Podcast Feed View
 Browse episodes from audio podcast feeds with release dates, descriptions, and built-in audio players.
+
+### YouTube Feed View
+Browse videos from YouTube channels and playlists with embedded video players, thumbnails, and one-click transcription.
 
 ### Text Feed View
 Browse articles from text-based RSS feeds (like news sites and blogs) with thumbnail images and article previews.
@@ -112,7 +116,7 @@ View and manage your posting queue with drag-and-drop reordering, status/platfor
 
 | File | Description |
 |------|-------------|
-| `podinsights.py` | CLI entry point - transcribe, summarize, and extract action items from audio files |
+| `podinsights.py` | CLI entry point - transcribe, summarize, and extract action items from audio files and YouTube videos |
 | `podinsights_web.py` | Flask web application with all routes, background workers, and UI logic |
 | `database.py` | SQLite database operations for feeds, episodes, articles, posts, schedules, and more |
 | `linkedin_client.py` | LinkedIn API client - OAuth flow, token management, and post publishing |
@@ -125,6 +129,7 @@ View and manage your posting queue with drag-and-drop reordering, status/platfor
 
 - Python 3.11+
 - An [OpenAI API key](https://platform.openai.com/api-keys) for AI features
+- [FFmpeg](https://ffmpeg.org/) installed on your system (required by yt-dlp for YouTube audio extraction)
 - For audio transcription, one of:
   - [`mlx-whisper`](https://github.com/ml-explore/mlx-examples/tree/main/whisper) (recommended for Apple Silicon Macs)
   - [`faster-whisper`](https://github.com/guillaumekln/faster-whisper) (Linux, Windows, Intel Macs)
@@ -280,12 +285,22 @@ Navigate to `http://localhost:5001` to get started.
 
 ### Feeds & Content Processing
 
-1. **Add feeds** - Enter an RSS feed URL on the home page (supports audio podcasts and text/news feeds)
-2. **Browse content** - Select a feed to see its episodes or articles with descriptions, images, and audio players
-3. **Process content** - Click an episode to transcribe and analyze it, or process text articles to extract summaries and action items
+1. **Add feeds** - Enter an RSS feed URL or YouTube link on the home page (supports audio podcasts, text/news feeds, YouTube channels, playlists, and individual videos)
+2. **Browse content** - Select a feed to see its episodes, videos, or articles with descriptions, images, and embedded players
+3. **Process content** - Click an episode or video to transcribe and analyze it, or process text articles to extract summaries and action items
 4. **View results** - See AI-generated summaries, action items, and the full transcript on the results page
 
 Processed content is stored in a local SQLite database (`podinsights.db`) for quick access.
+
+### YouTube Videos
+
+YouTube videos are supported as a first-class content source. Paste any of these URL formats into the feed input:
+
+- **Single video** - `https://www.youtube.com/watch?v=VIDEO_ID` or `https://youtu.be/VIDEO_ID` — the video is added to a catch-all "YouTube Videos" feed and immediately queued for transcription
+- **Channel** - `https://www.youtube.com/@ChannelName` or `https://www.youtube.com/channel/UC...` — creates a feed from the channel's latest uploads
+- **Playlist** - `https://www.youtube.com/playlist?list=PL...` — creates a feed from all videos in the playlist
+
+YouTube feeds display embedded video players alongside Queue and Process buttons. Audio is extracted from each video using yt-dlp, then transcribed through the same Whisper pipeline used for podcasts. From there, all downstream features work identically: summaries, action items, article generation, and social media post creation.
 
 ### Generating Articles
 

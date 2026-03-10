@@ -167,6 +167,18 @@
                 <p class="source-description">{{ source.description }}</p>
                 {% endif %}
                 <div class="source-meta">
+                    {% if source.is_youtube %}
+                    <span class="badge" style="background-color: #ff0000; color: #fff;">▶ YouTube</span>
+                    {% endif %}
+                    {% if source.is_youtube and source.episode_status == 'complete' %}
+                    <span class="badge bg-success">Transcribed</span>
+                    {% elif source.is_youtube and source.episode_status == 'processing' %}
+                    <span class="badge bg-warning text-dark">Processing</span>
+                    {% elif source.is_youtube and source.episode_status == 'queued' %}
+                    <span class="badge bg-secondary">Queued</span>
+                    {% elif source.is_youtube and source.episode_status == 'error' %}
+                    <span class="badge bg-danger">Error</span>
+                    {% endif %}
                     <span title="Created">📅 Saved: {{ source.created_at[:10] if source.created_at else 'Unknown' }}</span>
                     {% if source.last_used_at %}
                     <span class="ms-3" title="Last used">🕐 Last used: {{ source.last_used_at[:10] }}</span>
@@ -174,10 +186,33 @@
                 </div>
             </div>
             <div class="source-actions align-self-center">
+                {% if source.is_youtube %}
+                    {% if source.episode_status == 'complete' %}
+                <a href="{{ url_for('process_episode', url=source.url, title=source.title) }}"
+                   class="btn btn-sm btn-success" title="View transcription results">
+                    View Results
+                </a>
                 <a href="{{ url_for('compose_page') }}?source_id={{ source.id }}" 
                    class="btn btn-sm btn-primary" title="Generate posts from this source">
                     ✨ Generate Posts
                 </a>
+                    {% elif source.episode_status in ('queued', 'processing') %}
+                <a href="{{ url_for('status_page') }}" class="btn btn-sm btn-warning" title="View processing status">
+                    ⏳ In Progress
+                </a>
+                    {% else %}
+                <form method="post" action="{{ url_for('transcribe_source', source_id=source.id) }}" class="d-inline">
+                    <button type="submit" class="btn btn-sm btn-primary" title="Transcribe this YouTube video">
+                        🎙️ Transcribe
+                    </button>
+                </form>
+                    {% endif %}
+                {% else %}
+                <a href="{{ url_for('compose_page') }}?source_id={{ source.id }}" 
+                   class="btn btn-sm btn-primary" title="Generate posts from this source">
+                    ✨ Generate Posts
+                </a>
+                {% endif %}
                 <button type="button" class="btn btn-sm btn-outline-secondary" 
                         onclick="viewSourceDetails({{ source.id }})" title="View full content">
                     👁️ View
@@ -194,7 +229,7 @@
 {% else %}
 <div class="empty-state">
     <h3>📭 No Saved Sources Yet</h3>
-    <p>Add URLs to extract and save content for generating posts, or use the Command Center.</p>
+    <p>Add article URLs or YouTube videos to extract and save content, or use the Command Center.</p>
     <div class="d-flex gap-2 justify-content-center">
         <button type="button" class="btn btn-primary" onclick="showAddUrlModal()">
             ➕ Add URL
@@ -249,8 +284,8 @@
                     <div class="mb-3">
                         <label for="urlInput" class="form-label">URL</label>
                         <input type="url" class="form-control" id="urlInput" 
-                               placeholder="https://example.com/article" required>
-                        <div class="form-text">Enter the URL of an article or webpage to extract content from.</div>
+                               placeholder="https://example.com/article or YouTube URL" required>
+                        <div class="form-text">Enter the URL of an article, webpage, or YouTube video to extract content from.</div>
                     </div>
                 </form>
             </div>
@@ -358,22 +393,24 @@ function submitAddUrl(event) {
             return;
         }
         
-        // Success - add the new source card to the page
+        // Success
         successDiv.innerHTML = `
-            <strong>Success!</strong> "${data.source.title}" has been extracted and saved.
+            <strong>Success!</strong> "${data.source.title}" has been saved.
         `;
         successDiv.classList.remove('d-none');
         document.getElementById('addUrlForm').classList.add('d-none');
         
-        // Add the new source card to the page
-        addSourceCardToPage(data.source);
-        
-        // Close modal after a short delay
-        setTimeout(() => {
-            if (addUrlModal) {
-                addUrlModal.hide();
-            }
-        }, 1500);
+        if (data.is_youtube) {
+            successDiv.innerHTML += ' <br><small>YouTube video ready for transcription.</small>';
+            setTimeout(() => location.reload(), 1200);
+        } else {
+            addSourceCardToPage(data.source);
+            setTimeout(() => {
+                if (addUrlModal) {
+                    addUrlModal.hide();
+                }
+            }, 1500);
+        }
     })
     .catch(err => {
         submitBtn.disabled = false;

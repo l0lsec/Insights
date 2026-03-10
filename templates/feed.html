@@ -43,6 +43,66 @@
     {% endfor %}
 </div>
 
+{% elif is_youtube_feed %}
+{# YouTube Video Feed Layout #}
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <h2 class="mb-0">Videos</h2>
+    {% if pagination %}<span class="text-muted">{{ pagination.total_items }} total</span>{% endif %}
+</div>
+<div class="row row-cols-1 row-cols-md-2 g-4">
+    {% for ep in episodes %}
+    <div class="col">
+        <div class="card h-100">
+            {% if ep.video_id %}
+            <div class="ratio ratio-16x9">
+                <iframe src="https://www.youtube.com/embed/{{ ep.video_id }}" 
+                        title="{{ ep.title }}" frameborder="0" 
+                        allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+                        allowfullscreen loading="lazy"></iframe>
+            </div>
+            {% elif ep.image %}
+            <img src="{{ ep.image }}" class="card-img-top" alt="{{ ep.title }}" style="max-height: 200px; object-fit: cover;">
+            {% endif %}
+            <div class="card-body">
+                <h5 class="card-title">{{ ep.title }}</h5>
+                {% if ep.author %}<p class="card-text text-muted small mb-1">{{ ep.author }}</p>{% endif %}
+                {% if ep.published %}<p class="card-text text-muted small mb-2">{{ ep.published[:10] }}</p>{% endif %}
+                {% if ep.short_description %}
+                <p class="card-text">{{ ep.short_description }}</p>
+                {% endif %}
+                <div class="d-flex gap-2 flex-wrap mb-2">
+                    {% if ep.status.transcribed %}<span class="badge bg-primary">Transcribed</span>{% endif %}
+                    {% if ep.status.summarized %}<span class="badge bg-success">Summarized</span>{% endif %}
+                    {% if ep.status.actions %}<span class="badge bg-info">Actions Extracted</span>{% endif %}
+                    {% if ep.status.state == 'processing' %}<span class="badge bg-warning">Processing</span>{% endif %}
+                    {% if ep.status.state == 'queued' %}<span class="badge bg-secondary">Queued</span>{% endif %}
+                    {% if ep.status.state == 'error' %}<span class="badge bg-danger">Error</span>{% endif %}
+                    {% if ep.status.state == 'new' %}<span class="badge bg-secondary">New</span>{% endif %}
+                </div>
+            </div>
+            <div class="card-footer bg-transparent">
+                <div class="d-flex justify-content-between align-items-center">
+                    <a href="{{ ep.link or ep.enclosure }}" target="_blank" class="btn btn-sm btn-outline-danger">
+                        ▶ Watch on YouTube
+                    </a>
+                    <div class="btn-group btn-group-sm">
+                        {% if ep.status.transcribed %}
+                        <a href="{{ url_for('process_episode', url=ep.enclosure, title=ep.title, feed_id=feed.id, published=ep.published) }}"
+                           class="btn btn-success" data-processing="true">View Results</a>
+                        {% else %}
+                        <a href="{{ url_for('enqueue_episode', url=ep.enclosure, title=ep.title, feed_id=feed.id, published=ep.published) }}"
+                           class="btn btn-primary">Queue</a>
+                        <a href="{{ url_for('process_episode', url=ep.enclosure, title=ep.title, feed_id=feed.id, published=ep.published) }}"
+                           class="btn btn-outline-primary" data-processing="true">Process</a>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
 {% else %}
 {# Audio Podcast Feed Layout #}
 <div class="d-flex justify-content-between align-items-center mb-3">

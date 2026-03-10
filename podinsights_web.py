@@ -147,6 +147,13 @@ from podinsights import (
     generate_posts_from_text,
     generate_posts_from_images,
     check_ollama_status,
+    # YouTube functions
+    is_youtube_url,
+    classify_youtube_url,
+    youtube_url_to_rss,
+    download_youtube_audio,
+    get_youtube_video_id,
+    DOWNLOADS_DIR,
 )
 from linkedin_client import (
     LinkedInClient,
@@ -399,6 +406,19 @@ init_db()
 task_queue: Queue = Queue()
 
 
+def _backfill_youtube_source(url: str, transcript: str, summary: str) -> None:
+    """Update the matching URL source with the transcript after transcription."""
+    source = get_url_source_by_url(url)
+    if source:
+        update_url_source_content(
+            source['id'],
+            title=source['title'],
+            description=summary,
+            content=transcript,
+            og_image=source['og_image'],
+        )
+
+
 def worker() -> None:
     """Background thread processing queued episodes."""
     while True:
@@ -412,19 +432,31 @@ def worker() -> None:
         published = item.get("published")
         try:
             update_episode_status(url, "processing")
-            with tempfile.TemporaryDirectory() as tmpdir:
-                audio_path = os.path.join(tmpdir, "episode.mp3")
-                with requests.get(url, stream=True) as r:
-                    r.raise_for_status()
-                    with open(audio_path, "wb") as f:
-                        for chunk in r.iter_content(chunk_size=8192):
-                            f.write(chunk)
-                transcript = transcribe_audio(audio_path)
-                summary = summarize_text(transcript)
-                actions = extract_action_items(transcript)
-                out_path = os.path.join(tmpdir, "results.json")
-                write_results_json(transcript, summary, actions, out_path)
-                save_episode(url, title, transcript, summary, actions, feed_id, published)
+            if is_youtube_url(url):
+                audio_path = download_youtube_audio(url)
+                try:
+                    transcript = transcribe_audio(audio_path)
+                    summary = summarize_text(transcript)
+                    actions = extract_action_items(transcript)
+                    save_episode(url, title, transcript, summary, actions, feed_id, published)
+                    _backfill_youtube_source(url, transcript, summary)
+                finally:
+                    if os.path.exists(audio_path):
+                        os.remove(audio_path)
+            else:
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    audio_path = os.path.join(tmpdir, "episode.mp3")
+                    with requests.get(url, stream=True) as r:
+                        r.raise_for_status()
+                        with open(audio_path, "wb") as f:
+                            for chunk in r.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                    transcript = transcribe_audio(audio_path)
+                    summary = summarize_text(transcript)
+                    actions = extract_action_items(transcript)
+                    out_path = os.path.join(tmpdir, "results.json")
+                    write_results_json(transcript, summary, actions, out_path)
+                    save_episode(url, title, transcript, summary, actions, feed_id, published)
         except Exception:
             app.logger.exception("Failed to process episode %s", url)
             update_episode_status(url, "error")
@@ -683,14 +715,16 @@ def refresh_feed_metadata(feed_id: int, feed_url: str) -> dict:
         if not feed_data.entries:
             return {'type': 'unknown', 'last_post': None, 'item_count': 0}
         
-        # Determine feed type from first entry with content
-        is_audio = False
-        for entry in feed_data.entries[:5]:  # Check first 5 entries
-            if entry.get('enclosures'):
-                is_audio = True
-                break
-        
-        feed_type = 'audio' if is_audio else 'text'
+        # Determine feed type from URL and entries
+        if 'youtube.com/feeds/videos.xml' in feed_url:
+            feed_type = 'youtube'
+        else:
+            is_audio = False
+            for entry in feed_data.entries[:5]:
+                if entry.get('enclosures'):
+                    is_audio = True
+                    break
+            feed_type = 'audio' if is_audio else 'text'
         
         # Get last post date from most recent entry
         last_post = None
@@ -717,16 +751,48 @@ def refresh_feed_metadata(feed_id: int, feed_url: str) -> dict:
         return {'type': 'unknown', 'last_post': None, 'item_count': 0}
 
 
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
     """List stored podcast feeds and allow new ones to be added."""
     if request.method == 'POST':
-        # User submitted a new feed URL
         feed_url = request.form['feed_url']
+
+        if is_youtube_url(feed_url):
+            yt_kind = classify_youtube_url(feed_url)
+
+            if yt_kind in ("channel", "playlist"):
+                rss_url = youtube_url_to_rss(feed_url)
+                if rss_url:
+                    feed = feedparser.parse(rss_url)
+                    title = feed.feed.get('title', feed_url)
+                    feed_id = add_feed(rss_url, title)
+                    update_feed_metadata(feed_id, 'youtube', None, len(feed.entries))
+                    return redirect(url_for('view_feed', feed_id=feed_id))
+
+            if yt_kind == "video":
+                video_id = get_youtube_video_id(feed_url)
+                title, description, og_image = feed_url, "", None
+                try:
+                    import yt_dlp
+                    with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+                        info = ydl.extract_info(feed_url, download=False)
+                        title = info.get("title", title)
+                        description = info.get("description", "")
+                        og_image = info.get("thumbnail")
+                except Exception:
+                    pass
+                if not og_image and video_id:
+                    og_image = f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"
+                add_url_source(
+                    url=feed_url, title=title,
+                    description=description, content="", og_image=og_image,
+                )
+                return redirect(url_for('sources_page'))
+
         feed = feedparser.parse(feed_url)
         title = feed.feed.get('title', feed_url)
         feed_id = add_feed(feed_url, title)
-        # Refresh metadata for the new feed
         refresh_feed_metadata(feed_id, feed_url)
         return redirect(url_for('view_feed', feed_id=feed_id))
     
@@ -847,37 +913,40 @@ def view_feed(feed_id: int):
     feed = get_feed_by_id(feed_id)
     if not feed:
         return redirect(url_for('index'))
-    
-    # Refresh metadata when viewing a feed (it's just one feed, so it's fast)
-    refresh_feed_metadata(feed_id, feed['url'])
-    
+
+    is_youtube_feed = feed.get('feed_type') == 'youtube'
+
     # Pagination parameters
     page = request.args.get('page', 1, type=int)
     per_page = request.args.get('per_page', 10, type=int)
-    per_page = min(per_page, 50)  # Cap at 50 items per page
-    
-    feed_data = feedparser.parse(feed['url'])
+    per_page = min(per_page, 50)
+
     all_episodes = []
-    is_text_feed = True  # Assume text feed, switch to audio if we find enclosures
-    
-    # Audio file extensions to detect
+    is_text_feed = True
+
+    refresh_feed_metadata(feed_id, feed['url'])
+    feed_data = feedparser.parse(feed['url'])
+
     audio_extensions = ('.mp3', '.m4a', '.wav', '.ogg', '.aac', '.flac')
-    
+
     for entry in feed_data.entries:
-        # Determine if this is an audio podcast or text feed
         has_audio = bool(entry.get('enclosures'))
         if has_audio:
             is_text_feed = False
             url = entry.enclosures[0].href
             item_type = 'audio'
+        elif is_youtube_feed:
+            url = entry.get('link', entry.get('id', ''))
+            item_type = 'youtube'
+            is_text_feed = False
+            if not url:
+                continue
         else:
-            # Text feed - use link as unique identifier
             url = entry.get('link', entry.get('id', ''))
             item_type = 'text'
             if not url:
                 continue
-            # Check if the link itself is an audio file (some feeds use link instead of enclosure)
-            url_check = url.lower().split('?')[0]  # Remove query params
+            url_check = url.lower().split('?')[0]
             if url_check.endswith(audio_extensions):
                 is_text_feed = False
                 item_type = 'audio'
@@ -888,34 +957,35 @@ def view_feed(feed_id: int):
             'actions': ep_db is not None and bool(ep_db['action_items']),
             'state': ep_db['status'] if ep_db else 'new',
         }
-        # Get full content for text feeds, description for podcasts
         content = ''
         if hasattr(entry, 'content') and entry.content:
             content = entry.content[0].get('value', '')
         if not content:
             content = entry.get('summary') or entry.get('description', '')
-        # Prefer the summary element but fall back to description
         desc = entry.get('summary') or entry.get('description', '')
         clean_desc = strip_html(desc)
-        # Try a few different locations for artwork
         img = None
-        if hasattr(entry, 'image') and getattr(entry.image, 'href', None):
-            img = entry.image.href
-        elif entry.get('itunes_image'):
-            img = entry.itunes_image.get('href') if isinstance(entry.itunes_image, dict) else entry.itunes_image
-        elif entry.get('media_thumbnail'):
-            img = entry.media_thumbnail[0].get('url')
-        elif entry.get('media_content'):
-            img = entry.media_content[0].get('url')
+        if is_youtube_feed:
+            vid = get_youtube_video_id(url)
+            if vid:
+                img = f"https://img.youtube.com/vi/{vid}/mqdefault.jpg"
+        if not img:
+            if hasattr(entry, 'image') and getattr(entry.image, 'href', None):
+                img = entry.image.href
+            elif entry.get('itunes_image'):
+                img = entry.itunes_image.get('href') if isinstance(entry.itunes_image, dict) else entry.itunes_image
+            elif entry.get('media_thumbnail'):
+                img = entry.media_thumbnail[0].get('url')
+            elif entry.get('media_content'):
+                img = entry.media_content[0].get('url')
         published_ts = None
         if getattr(entry, 'published_parsed', None):
             published_ts = datetime.fromtimestamp(time.mktime(entry.published_parsed))
         elif getattr(entry, 'updated_parsed', None):
             published_ts = datetime.fromtimestamp(time.mktime(entry.updated_parsed))
         published_iso = published_ts.isoformat() if published_ts else None
-        # Get author if available
         author = entry.get('author', '')
-        all_episodes.append({
+        ep_data = {
             'title': entry.title,
             'description': desc,
             'content': content,
@@ -928,15 +998,17 @@ def view_feed(feed_id: int):
             'type': item_type,
             'status': status,
             'published': published_iso,
-        })
-    
-    # Calculate pagination
+        }
+        if item_type == 'youtube':
+            ep_data['video_id'] = get_youtube_video_id(url)
+        all_episodes.append(ep_data)
+
     total_items = len(all_episodes)
-    total_pages = (total_items + per_page - 1) // per_page  # Ceiling division
+    total_pages = (total_items + per_page - 1) // per_page
     start_idx = (page - 1) * per_page
     end_idx = start_idx + per_page
     episodes = all_episodes[start_idx:end_idx]
-    
+
     pagination = {
         'page': page,
         'per_page': per_page,
@@ -947,8 +1019,15 @@ def view_feed(feed_id: int):
         'prev_page': page - 1 if page > 1 else None,
         'next_page': page + 1 if page < total_pages else None,
     }
-    
-    return render_template('feed.html', feed=feed, episodes=episodes, is_text_feed=is_text_feed, pagination=pagination)
+
+    return render_template(
+        'feed.html',
+        feed=feed,
+        episodes=episodes,
+        is_text_feed=is_text_feed,
+        is_youtube_feed=is_youtube_feed,
+        pagination=pagination,
+    )
 
 
 @app.route('/enqueue')
@@ -1088,7 +1167,9 @@ def process_episode():
         if feed:
             feed_data = feedparser.parse(feed['url'])
             for entry in feed_data.entries:
-                if entry.get('enclosures') and entry.enclosures[0].href == audio_url:
+                entry_url = entry.get('link', entry.get('id', ''))
+                enclosure_url = entry.enclosures[0].href if entry.get('enclosures') else None
+                if enclosure_url == audio_url or entry_url == audio_url:
                     desc = entry.get('summary') or entry.get('description', '')
                     description = strip_html(desc)
                     break
@@ -1118,14 +1199,17 @@ def process_episode():
             current_url=request.full_path,
         )
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    if is_youtube_url(audio_url):
+        audio_path = download_youtube_audio(audio_url)
+    else:
+        tmpdir = tempfile.mkdtemp()
         audio_path = os.path.join(tmpdir, 'episode.mp3')
         with requests.get(audio_url, stream=True) as r:
             r.raise_for_status()
             with open(audio_path, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=8192):
                     f.write(chunk)
-        # Run the same processing pipeline as the CLI
+    try:
         app.logger.info("Transcribing audio")
         transcript = transcribe_audio(audio_path)
         app.logger.info("Transcription complete")
@@ -1137,10 +1221,12 @@ def process_episode():
         app.logger.info("Extracting action items")
         actions = extract_action_items(transcript)
         app.logger.info("Action item extraction complete")
-        out_path = os.path.join(tmpdir, 'results.json')
-        write_results_json(transcript, summary, actions, out_path)
-        # Persist results so they can be reused later
         save_episode(audio_url, title, transcript, summary, actions, feed_id, published)
+        if is_youtube_url(audio_url):
+            _backfill_youtube_source(audio_url, transcript, summary)
+    finally:
+        if os.path.exists(audio_path):
+            os.remove(audio_path)
     return render_template(
         'result.html',
         title=title,
@@ -1349,11 +1435,12 @@ def reprocess_episode(episode_id: int):
     if not episode:
         return redirect(url_for('status_page'))
 
-    # Detect if this is audio or text
     audio_extensions = ('.mp3', '.m4a', '.wav', '.ogg', '.aac', '.flac')
-    is_audio = episode['url'].lower().split('?')[0].endswith(audio_extensions)
+    is_audio = (
+        episode['url'].lower().split('?')[0].endswith(audio_extensions)
+        or is_youtube_url(episode['url'])
+    )
 
-    # Reset episode data for reprocessing
     reset_episode_for_reprocess(episode_id)
 
     if is_audio:
@@ -4849,7 +4936,20 @@ def compose_clear_all():
 def sources_page():
     """Display saved URL sources."""
     sources = list_url_sources()
-    return render_template('sources.html', sources=sources)
+    sources_with_status = []
+    for s in sources:
+        s_dict = dict(s)
+        s_dict['is_youtube'] = is_youtube_url(s_dict.get('url', ''))
+        if s_dict['is_youtube']:
+            ep = get_episode(s_dict['url'])
+            if ep:
+                s_dict['episode_status'] = ep['status']
+                s_dict['episode_id'] = ep['id']
+            else:
+                s_dict['episode_status'] = None
+                s_dict['episode_id'] = None
+        sources_with_status.append(s_dict)
+    return render_template('sources.html', sources=sources_with_status)
 
 
 @app.route('/sources', methods=['POST'])
@@ -4879,6 +4979,37 @@ def add_source():
         }), 409
     
     try:
+        if is_youtube_url(url):
+            video_id = get_youtube_video_id(url)
+            title, description, og_image = url, "", None
+            try:
+                import yt_dlp
+                with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    title = info.get("title", title)
+                    description = info.get("description", "")
+                    og_image = info.get("thumbnail")
+            except Exception:
+                pass
+            if not og_image and video_id:
+                og_image = f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"
+            source_id = add_url_source(
+                url=url, title=title,
+                description=description, content="", og_image=og_image,
+            )
+            return jsonify({
+                "success": True,
+                "is_youtube": True,
+                "source": {
+                    "id": source_id,
+                    "url": url,
+                    "title": title,
+                    "description": description,
+                    "content": "",
+                    "og_image": og_image,
+                }
+            })
+
         # Fetch the URL content using trafilatura
         downloaded = trafilatura.fetch_url(url)
         
@@ -4994,6 +5125,27 @@ def delete_source(source_id: int):
     
     deleted = delete_url_source(source_id)
     return jsonify({"success": deleted})
+
+
+@app.route('/sources/<int:source_id>/transcribe', methods=['POST'])
+def transcribe_source(source_id: int):
+    """Queue a YouTube source for background audio transcription."""
+    source = get_url_source(source_id)
+    if not source:
+        return jsonify({"error": "Source not found"}), 404
+    if not is_youtube_url(source['url']):
+        return jsonify({"error": "Only YouTube sources can be transcribed"}), 400
+    existing = get_episode(source['url'])
+    if existing and existing['status'] in ('queued', 'processing'):
+        return redirect(url_for('status_page'))
+    queue_episode(source['url'], source['title'] or source['url'], None, None)
+    task_queue.put({
+        "url": source['url'],
+        "title": source['title'] or source['url'],
+        "feed_id": None,
+        "published": None,
+    })
+    return redirect(url_for('status_page'))
 
 
 @app.route('/sources/<int:source_id>/reextract', methods=['POST'])

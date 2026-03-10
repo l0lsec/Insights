@@ -12,6 +12,9 @@ cloudinary>=1.36.0
 trafilatura>=1.6.0
 flasgger>=0.9.7
 
+# YouTube video audio extraction
+yt-dlp>=2024.0.0
+
 # Audio transcription - install ONE of these based on your system:
 # Apple Silicon Mac (M1/M2/M3/M4) - recommended, free & fast:
 mlx-whisper>=0.4.0
