@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" fill="none">
+  <defs>
+    <linearGradient id="podGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#7C3AED"/>
+      <stop offset="50%" stop-color="#5B21B6"/>
+      <stop offset="100%" stop-color="#4C1D95"/>
+    </linearGradient>
+    <linearGradient id="sparkGradient" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#F59E0B"/>
+      <stop offset="100%" stop-color="#FBBF24"/>
+    </linearGradient>
+    <linearGradient id="waveGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#A78BFA"/>
+      <stop offset="100%" stop-color="#7C3AED"/>
+    </linearGradient>
+    <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge>
+        <feMergeNode in="coloredBlur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+  <circle cx="60" cy="60" r="56" fill="#0F0A1F"/>
+  <circle cx="60" cy="60" r="56" fill="url(#podGradient)" opacity="0.15"/>
+  <circle cx="60" cy="60" r="54" stroke="url(#podGradient)" stroke-width="2" fill="none" opacity="0.6"/>
+  <g transform="translate(60, 60)">
+    <path d="M-12 -20 C-12 -32, 12 -32, 12 -20 L12 8 C12 20, -12 20, -12 8 Z" fill="url(#podGradient)" filter="url(#glow)"/>
+    <line x1="-8" y1="-18" x2="8" y2="-18" stroke="#A78BFA" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+    <line x1="-8" y1="-12" x2="8" y2="-12" stroke="#A78BFA" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+    <line x1="-8" y1="-6" x2="8" y2="-6" stroke="#A78BFA" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+    <line x1="-8" y1="0" x2="8" y2="0" stroke="#A78BFA" stroke-width="1.5" stroke-linecap="round" opacity="0.7"/>
+    <path d="M0 20 L0 30" stroke="url(#podGradient)" stroke-width="4" stroke-linecap="round"/>
+    <path d="M-10 30 C-10 26, 10 26, 10 30" stroke="url(#podGradient)" stroke-width="3" fill="none" stroke-linecap="round"/>
+  </g>
+  <g opacity="0.9">
+    <path d="M28 45 C22 55, 22 65, 28 75" stroke="url(#waveGradient)" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <path d="M20 38 C10 55, 10 65, 20 82" stroke="url(#waveGradient)" stroke-width="2.5" fill="none" stroke-linecap="round" opacity="0.7"/>
+    <path d="M13 32 C0 52, 0 68, 13 88" stroke="url(#waveGradient)" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.4"/>
+  </g>
+  <g opacity="0.9">
+    <path d="M92 45 C98 55, 98 65, 92 75" stroke="url(#waveGradient)" stroke-width="3" fill="none" stroke-linecap="round"/>
+    <path d="M100 38 C110 55, 110 65, 100 82" stroke="url(#waveGradient)" stroke-width="2.5" fill="none" stroke-linecap="round" opacity="0.7"/>
+    <path d="M107 32 C120 52, 120 68, 107 88" stroke="url(#waveGradient)" stroke-width="2" fill="none" stroke-linecap="round" opacity="0.4"/>
+  </g>
+  <g transform="translate(82, 28)" filter="url(#glow)">
+    <path d="M0 -12 L2 -3 L10 0 L2 3 L0 12 L-2 3 L-10 0 L-2 -3 Z" fill="url(#sparkGradient)"/>
+    <circle cx="8" cy="-8" r="2" fill="#FBBF24" opacity="0.8"/>
+    <circle cx="-6" cy="-10" r="1.5" fill="#FBBF24" opacity="0.6"/>
+  </g>
+  <circle cx="25" cy="25" r="2" fill="#A78BFA" opacity="0.5"/>
+  <circle cx="95" cy="95" r="2" fill="#A78BFA" opacity="0.5"/>
+  <circle cx="30" cy="95" r="1.5" fill="#7C3AED" opacity="0.4"/>
+</svg>

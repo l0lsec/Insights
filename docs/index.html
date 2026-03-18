@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Insights – AI-Powered Content Platform</title>
+  <meta name="description" content="Turn RSS feeds, podcasts, YouTube videos, and articles into summaries, generated articles, and platform-ready social media posts. One pipeline from ingestion to publishing.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0f0a1f;
+      --surface: #1a1428;
+      --border: #2d2640;
+      --text: #e8e4f0;
+      --muted: #9b92b0;
+      --accent: #7c3aed;
+      --accent-light: #a78bfa;
+      --amber: #f59e0b;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "DM Sans", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 0 1.5rem; }
+    header {
+      padding: 4rem 0 3rem;
+      text-align: center;
+    }
+    .logo {
+      width: 100px;
+      height: 100px;
+      margin: 0 auto 1.5rem;
+      display: block;
+    }
+    h1 {
+      font-size: 2.25rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      margin: 0 0 0.5rem;
+    }
+    .tagline {
+      font-size: 1.125rem;
+      color: var(--muted);
+      margin: 0 0 2rem;
+    }
+    .lead {
+      font-size: 1.125rem;
+      color: var(--muted);
+      margin: 0 0 3rem;
+      line-height: 1.7;
+    }
+    .cta {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.75rem 1.5rem;
+      background: var(--accent);
+      color: #fff;
+      text-decoration: none;
+      font-weight: 600;
+      border-radius: 10px;
+      transition: background 0.2s, transform 0.1s;
+    }
+    .cta:hover { background: #6d28d9; transform: translateY(-1px); }
+    .cta.secondary {
+      background: transparent;
+      color: var(--accent-light);
+      border: 1px solid var(--border);
+    }
+    .cta.secondary:hover { border-color: var(--accent); background: rgba(124, 58, 237, 0.1); }
+    .buttons { display: flex; flex-wrap: wrap; gap: 0.75rem; justify-content: center; margin-bottom: 4rem; }
+    section {
+      padding: 2rem 0;
+      border-top: 1px solid var(--border);
+    }
+    section h2 {
+      font-size: 1.25rem;
+      font-weight: 600;
+      margin: 0 0 1rem;
+      color: var(--text);
+    }
+    ul { margin: 0; padding-left: 1.25rem; color: var(--muted); }
+    li { margin-bottom: 0.35rem; }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 1rem;
+      margin-top: 1rem;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 1rem 1.25rem;
+      font-size: 0.9375rem;
+    }
+    .card strong { color: var(--accent-light); }
+    footer {
+      margin-top: 4rem;
+      padding: 2rem 0;
+      border-top: 1px solid var(--border);
+      text-align: center;
+      font-size: 0.875rem;
+      color: var(--muted);
+    }
+    footer a { color: var(--accent-light); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <img src="logo.svg" alt="Insights" class="logo" width="100" height="100">
+      <h1>Insights</h1>
+      <p class="tagline">AI-Powered Content Platform for Ingestion, Analysis & Social Media Publishing</p>
+      <p class="lead">
+        Turn RSS feeds, podcasts, YouTube videos, and articles into summaries, generated articles, and platform-ready social posts. One pipeline from ingestion to publishing—with transcription, summarization, and scheduling built in.
+      </p>
+      <div class="buttons">
+        <a href=".." class="cta">View on GitHub</a>
+        <a href="../README.md" class="cta secondary">README</a>
+      </div>
+    </header>
+
+    <section>
+      <h2>Features</h2>
+      <div class="grid">
+        <div class="card"><strong>RSS &amp; YouTube</strong> – Subscribe to feeds or paste video URLs; transcribe and analyze.</div>
+        <div class="card"><strong>Summaries &amp; actions</strong> – AI summaries and extracted action items from any content.</div>
+        <div class="card"><strong>Article generation</strong> – Turn content into blog posts, news articles, or deep-dives.</div>
+        <div class="card"><strong>Social copy</strong> – Platform-optimized posts for LinkedIn, Threads, Twitter, Facebook, and more.</div>
+        <div class="card"><strong>Scheduling</strong> – Time slots, daily limits, and background publishing.</div>
+        <div class="card"><strong>JIRA</strong> – Create tickets from action items with full context.</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Use cases</h2>
+      <ul>
+        <li>Content creators repurposing podcasts and YouTube videos into articles and social posts</li>
+        <li>Marketing teams keeping a consistent social presence from any source</li>
+        <li>Researchers extracting summaries and action items from interviews or lectures</li>
+        <li>Social managers generating and queuing posts from URLs or saved sources</li>
+        <li>Converting meetings or long-form video into JIRA tickets and shareable content</li>
+      </ul>
+    </section>
+
+    <footer>
+      Developed by <a href="https://susos.co" target="_blank" rel="noopener">Show Up Show Out Security</a>. MIT License.
+    </footer>
+  </div>
+</body>
+</html>
