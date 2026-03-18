@@ -124,8 +124,8 @@
         Turn RSS feeds, podcasts, YouTube videos, and articles into summaries, generated articles, and platform-ready social posts. One pipeline from ingestion to publishing—with transcription, summarization, and scheduling built in.
       </p>
       <div class="buttons">
-        <a href=".." class="cta">View on GitHub</a>
-        <a href="../README.md" class="cta secondary">README</a>
+        <a href="#" id="github-repo" class="cta" target="_blank" rel="noopener">View on GitHub</a>
+        <a href="#" id="github-readme" class="cta secondary" target="_blank" rel="noopener">README</a>
       </div>
     </header>
 
@@ -156,5 +156,20 @@
       Developed by <a href="https://susos.co" target="_blank" rel="noopener">Show Up Show Out Security</a>. MIT License.
     </footer>
   </div>
+  <script>
+    (function() {
+      var host = window.location.hostname;
+      var path = window.location.pathname.replace(/^\//, '').split('/')[0];
+      if (host.endsWith('.github.io') && path) {
+        var user = host.split('.')[0];
+        var repoUrl = 'https://github.com/' + user + '/' + path;
+        document.getElementById('github-repo').href = repoUrl;
+        document.getElementById('github-readme').href = repoUrl + '#readme';
+      } else {
+        document.getElementById('github-repo').href = 'https://github.com';
+        document.getElementById('github-readme').href = 'https://github.com';
+      }
+    })();
+  </script>
 </body>
 </html>
