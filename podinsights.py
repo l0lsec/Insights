@@ -1419,6 +1419,90 @@ def _build_thumbnail_prompt(metadata: dict, aspect: str, style: str = "bold") ->
     return prompt
 
 
+def _overlay_text_on_thumbnail(image_path: str, title: str, channel: str = "") -> str:
+    """Overlay crisp, readable text on a thumbnail background image.
+
+    Uses Pillow to add a semi-transparent banner with bold title text and
+    optional channel name.  Returns the path to the composited image.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    img = Image.open(image_path).convert("RGBA")
+    width, height = img.size
+
+    # Create overlay layer for the banner
+    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    # -- Font sizing ----------------------------------------------------------
+    # Target: title uses ~5% of image height per line, up to 2 lines
+    target_font_size = max(28, int(height * 0.055))
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", target_font_size)
+        small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", max(18, int(target_font_size * 0.5)))
+    except (OSError, IOError):
+        font = ImageFont.load_default()
+        small_font = font
+
+    # -- Word-wrap title text -------------------------------------------------
+    max_text_width = int(width * 0.88)
+    words = title.split()
+    lines = []
+    current_line = ""
+    for word in words:
+        test = f"{current_line} {word}".strip()
+        bbox = draw.textbbox((0, 0), test, font=font)
+        if bbox[2] - bbox[0] <= max_text_width:
+            current_line = test
+        else:
+            if current_line:
+                lines.append(current_line)
+            current_line = word
+    if current_line:
+        lines.append(current_line)
+    # Limit to 3 lines max
+    if len(lines) > 3:
+        lines = lines[:3]
+        lines[-1] = lines[-1].rstrip() + "…"
+
+    # -- Compute banner geometry ----------------------------------------------
+    line_height = int(target_font_size * 1.35)
+    channel_height = int(line_height * 0.7) if channel else 0
+    padding_x = int(width * 0.06)
+    padding_y = int(height * 0.025)
+    total_text_height = len(lines) * line_height + channel_height
+    banner_height = total_text_height + padding_y * 2
+
+    # Position banner in the bottom third
+    banner_y = height - banner_height - int(height * 0.04)
+
+    # Draw semi-transparent dark banner
+    draw.rectangle(
+        [(0, banner_y), (width, banner_y + banner_height)],
+        fill=(0, 0, 0, 180),
+    )
+
+    # -- Draw title text ------------------------------------------------------
+    text_y = banner_y + padding_y
+    for line in lines:
+        # Draw text shadow for depth
+        draw.text((padding_x + 2, text_y + 2), line, font=font, fill=(0, 0, 0, 200))
+        # Draw main text
+        draw.text((padding_x, text_y), line, font=font, fill=(255, 255, 255, 255))
+        text_y += line_height
+
+    # -- Draw channel name ----------------------------------------------------
+    if channel:
+        draw.text((padding_x + 2, text_y + 2), channel, font=small_font, fill=(0, 0, 0, 180))
+        draw.text((padding_x, text_y), channel, font=small_font, fill=(200, 200, 200, 255))
+
+    # Composite and save
+    result = Image.alpha_composite(img, overlay).convert("RGB")
+    output_path = image_path.replace(".png", "_final.png")
+    result.save(output_path, "PNG")
+    return output_path
+
+
 def generate_youtube_thumbnail(
     url: str,
     aspect: str = "16:9",
@@ -1427,8 +1511,9 @@ def generate_youtube_thumbnail(
 ) -> dict:
     """Generate a thumbnail image for a YouTube video.
 
-    Uses OpenAI DALL-E 3 (or a local model endpoint) to create an image
-    based on the video's metadata.
+    Uses a two-stage process:
+      1. ``asi-generate-image`` CLI for a high-quality AI background
+      2. Pillow text overlay for crisp, readable title text
 
     Parameters
     ----------
@@ -1439,43 +1524,58 @@ def generate_youtube_thumbnail(
     style : str
         ``"bold"``, ``"minimal"``, or ``"cinematic"``.
     use_local : bool
-        If *True*, try the Ollama endpoint instead of OpenAI.
+        Unused (kept for API compatibility).
 
     Returns
     -------
     dict
-        ``{"image_url": ..., "prompt": ..., "metadata": ...}``
+        ``{"image_base64": ..., "prompt": ..., "metadata": ...}``
     """
+    import base64
+    import json
+    import subprocess
+    import tempfile
+
     metadata = fetch_youtube_metadata(url)
     prompt = _build_thumbnail_prompt(metadata, aspect, style)
 
-    size = "1792x1024" if aspect == "16:9" else "1024x1792"
-
-    from openai import OpenAI
-
-    if use_local:
-        client = OpenAI(base_url=f"{OLLAMA_BASE_URL}/v1", api_key="ollama")
-    else:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        if not client.api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
-
     logger.info("Generating thumbnail (%s, %s style) for: %s", aspect, style, url)
-    response = client.images.generate(
-        model="dall-e-3",
-        prompt=prompt,
-        n=1,
-        size=size,
-        quality="hd",
-    )
 
-    image_url = response.data[0].url
-    revised_prompt = getattr(response.data[0], "revised_prompt", prompt)
+    # Stage 1: Generate background image via asi-generate-image CLI
+    with tempfile.TemporaryDirectory() as tmpdir:
+        cmd_payload = json.dumps({
+            "prompt": prompt,
+            "filename": "thumbnail_bg",
+            "aspect_ratio": aspect,
+            "model": "gpt_image_1_5",
+        })
+        result = subprocess.run(
+            ["asi-generate-image", cmd_payload],
+            cwd=tmpdir,
+            env=os.environ,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            logger.error("asi-generate-image failed: %s", result.stderr)
+            raise RuntimeError(f"Image generation failed: {result.stderr.strip() or 'unknown error'}")
+
+        bg_path = os.path.join(tmpdir, "thumbnail_bg.png")
+        if not os.path.isfile(bg_path):
+            raise RuntimeError("Image generation did not produce expected output file")
+
+        # Stage 2: Overlay text with Pillow
+        title = metadata.get("title", "")
+        channel = metadata.get("channel", "")
+        final_path = _overlay_text_on_thumbnail(bg_path, title, channel)
+
+        with open(final_path, "rb") as f:
+            image_base64 = base64.b64encode(f.read()).decode("utf-8")
 
     return {
-        "image_url": image_url,
+        "image_base64": image_base64,
         "prompt": prompt,
-        "revised_prompt": revised_prompt,
         "metadata": metadata,
     }
 

@@ -383,15 +383,17 @@ document.addEventListener('DOMContentLoaded', function() {
                     img = document.createElement('img');
                     previewContainer.appendChild(img);
                 }
-                img.src = data.image_url;
+                const dataUri = 'data:image/png;base64,' + data.image_base64;
+                img.src = dataUri;
                 img.alt = 'Generated thumbnail for: ' + (data.metadata.title || 'video');
 
                 // Show download button
-                downloadBtn.href = data.image_url;
+                downloadBtn.href = dataUri;
+                downloadBtn.download = (data.metadata.title || 'thumbnail').replace(/[^a-z0-9]/gi, '_') + '.png';
                 downloadBtn.classList.remove('d-none');
 
                 // Show prompt
-                promptText.textContent = data.revised_prompt || data.prompt;
+                promptText.textContent = data.prompt;
                 promptSection.classList.remove('d-none');
 
                 // Update metadata if not already shown
