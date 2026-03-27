@@ -1532,8 +1532,6 @@ def generate_youtube_thumbnail(
         ``{"image_base64": ..., "prompt": ..., "metadata": ...}``
     """
     import base64
-    import json
-    import subprocess
     import tempfile
 
     metadata = fetch_youtube_metadata(url)
@@ -1541,31 +1539,24 @@ def generate_youtube_thumbnail(
 
     logger.info("Generating thumbnail (%s, %s style) for: %s", aspect, style, url)
 
-    # Stage 1: Generate background image via asi-generate-image CLI
+    # Stage 1: Generate background image via OpenAI gpt-image-1
+    size_str = "1536x1024" if aspect == "16:9" else "1024x1536"
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    response = client.images.generate(
+        model="gpt-image-1",
+        prompt=prompt,
+        size=size_str,
+        quality="high",
+        n=1,
+    )
+    image_data = base64.b64decode(response.data[0].b64_json)
+
+    # Stage 2: Overlay text with Pillow
     with tempfile.TemporaryDirectory() as tmpdir:
-        cmd_payload = json.dumps({
-            "prompt": prompt,
-            "filename": "thumbnail_bg",
-            "aspect_ratio": aspect,
-            "model": "gpt_image_1_5",
-        })
-        result = subprocess.run(
-            ["asi-generate-image", cmd_payload],
-            cwd=tmpdir,
-            env=os.environ,
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode != 0:
-            logger.error("asi-generate-image failed: %s", result.stderr)
-            raise RuntimeError(f"Image generation failed: {result.stderr.strip() or 'unknown error'}")
-
         bg_path = os.path.join(tmpdir, "thumbnail_bg.png")
-        if not os.path.isfile(bg_path):
-            raise RuntimeError("Image generation did not produce expected output file")
+        with open(bg_path, "wb") as f:
+            f.write(image_data)
 
-        # Stage 2: Overlay text with Pillow
         title = metadata.get("title", "")
         channel = metadata.get("channel", "")
         final_path = _overlay_text_on_thumbnail(bg_path, title, channel)
