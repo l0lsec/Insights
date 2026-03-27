@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import glob
-import os
 import json
 import logging
+import os
 import re
+import shlex
+import shutil
 from typing import List
 from urllib.parse import urlparse, parse_qs
 
@@ -1473,6 +1475,43 @@ def _build_thumbnail_prompt(metadata: dict, aspect: str, style: str = "bold") ->
     return prompt
 
 
+def _resolve_thumbnail_cli_argv(raw: str) -> List[str]:
+    """Turn ``ASI_GENERATE_IMAGE`` into argv for ``subprocess`` (executable on ``PATH`` or full path)."""
+    raw = raw.strip()
+    if not raw:
+        raise RuntimeError(
+            "ASI_GENERATE_IMAGE is set but empty. Remove it to use OpenAI, or set a valid command."
+        )
+    parts = shlex.split(raw, posix=os.name != "nt")
+    if not parts:
+        raise RuntimeError("ASI_GENERATE_IMAGE could not be parsed as a command.")
+    if len(parts) == 1:
+        exe = os.path.expanduser(parts[0])
+        if os.sep in exe or (os.altsep and exe and os.altsep in exe):
+            if not os.path.isfile(exe):
+                raise RuntimeError(
+                    f"ASI_GENERATE_IMAGE path does not exist or is not a file: {exe}"
+                )
+            return [exe]
+        resolved = shutil.which(exe)
+        if not resolved:
+            raise RuntimeError(
+                "ASI_GENERATE_IMAGE command not found on PATH. Use a full path, fix PATH, "
+                "or remove ASI_GENERATE_IMAGE to generate thumbnails via OpenAI instead."
+            )
+        return [resolved]
+    head = os.path.expanduser(parts[0])
+    if os.sep not in head and (not os.altsep or not head or os.altsep not in head):
+        resolved_head = shutil.which(head)
+        if not resolved_head:
+            raise RuntimeError(
+                f"ASI_GENERATE_IMAGE command not found on PATH: {parts[0]!r}"
+            )
+        head = resolved_head
+    parts[0] = head
+    return parts
+
+
 def generate_youtube_thumbnail(
     url: str,
     aspect: str = "16:9",
@@ -1481,9 +1520,9 @@ def generate_youtube_thumbnail(
 ) -> dict:
     """Generate a complete YouTube thumbnail in a single AI pass.
 
-    Uses ``gpt-image-1`` via the ``asi-generate-image`` CLI to produce
-    the full thumbnail — including bold text, visual effects, and
-    photorealistic elements — with no post-processing needed.
+    By default calls OpenAI's Images API with model ``gpt-image-1`` (requires
+    ``OPENAI_API_KEY``). If ``ASI_GENERATE_IMAGE`` is set to a non-empty command,
+    that CLI is invoked instead with a JSON payload (legacy integration).
 
     Parameters
     ----------
@@ -1506,6 +1545,8 @@ def generate_youtube_thumbnail(
     import subprocess
     import tempfile
 
+    from openai import OpenAI
+
     metadata = fetch_youtube_metadata(url)
     prompt = _build_thumbnail_prompt(metadata, aspect, style)
 
@@ -1514,34 +1555,56 @@ def generate_youtube_thumbnail(
     # Map aspect ratio to gpt-image-1 size parameter
     size = "1536x1024" if aspect == "16:9" else "1024x1536"
 
-    # Generate the complete thumbnail in one pass
-    with tempfile.TemporaryDirectory() as tmpdir:
-        cmd_payload = json.dumps({
-            "prompt": prompt,
-            "filename": "thumbnail",
-            "aspect_ratio": aspect,
-            "size": size,
-            "model": "gpt_image_1",
-            "quality": "high",
-        })
-        result = subprocess.run(
-            ["asi-generate-image", cmd_payload],
-            cwd=tmpdir,
-            env=os.environ,
-            capture_output=True,
-            text=True,
-            timeout=120,
+    cli_env = os.environ.get("ASI_GENERATE_IMAGE", "").strip()
+    if cli_env:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cmd_payload = json.dumps({
+                "prompt": prompt,
+                "filename": "thumbnail",
+                "aspect_ratio": aspect,
+                "size": size,
+                "model": "gpt_image_1",
+                "quality": "high",
+            })
+            result = subprocess.run(
+                _resolve_thumbnail_cli_argv(cli_env) + [cmd_payload],
+                cwd=tmpdir,
+                env=os.environ,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode != 0:
+                logger.error("thumbnail CLI failed: %s", result.stderr)
+                raise RuntimeError(
+                    f"Image generation failed: {result.stderr.strip() or 'unknown error'}"
+                )
+
+            img_path = os.path.join(tmpdir, "thumbnail.png")
+            if not os.path.isfile(img_path):
+                raise RuntimeError("Image generation did not produce expected output file")
+
+            with open(img_path, "rb") as f:
+                image_base64 = base64.b64encode(f.read()).decode("utf-8")
+    else:
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "Set OPENAI_API_KEY for thumbnail generation, or set ASI_GENERATE_IMAGE "
+                "to an external image CLI."
+            )
+        client = OpenAI(api_key=api_key, timeout=120.0)
+        # gpt-image-1 does not accept response_format (always returns base64); DALL·E uses url/b64_json.
+        response = client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size=size,
+            quality="high",
+            n=1,
         )
-        if result.returncode != 0:
-            logger.error("asi-generate-image failed: %s", result.stderr)
-            raise RuntimeError(f"Image generation failed: {result.stderr.strip() or 'unknown error'}")
-
-        img_path = os.path.join(tmpdir, "thumbnail.png")
-        if not os.path.isfile(img_path):
-            raise RuntimeError("Image generation did not produce expected output file")
-
-        with open(img_path, "rb") as f:
-            image_base64 = base64.b64encode(f.read()).decode("utf-8")
+        if not response.data or not response.data[0].b64_json:
+            raise RuntimeError("OpenAI image generation returned no image data")
+        image_base64 = response.data[0].b64_json
 
     return {
         "image_base64": image_base64,
