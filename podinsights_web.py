@@ -5407,9 +5407,8 @@ def thumbnails_generate():
         )
         return jsonify({
             "success": True,
-            "image_url": result["image_url"],
+            "image_base64": result["image_base64"],
             "prompt": result["prompt"],
-            "revised_prompt": result.get("revised_prompt", ""),
             "metadata": result["metadata"],
         })
     except Exception as e:
