@@ -1534,6 +1534,8 @@ def generate_youtube_thumbnail(
     import base64
     import tempfile
 
+    from openai import OpenAI
+
     metadata = fetch_youtube_metadata(url)
     prompt = _build_thumbnail_prompt(metadata, aspect, style)
 
