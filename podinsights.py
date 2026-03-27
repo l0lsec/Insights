@@ -1357,7 +1357,11 @@ def fetch_youtube_metadata(url: str) -> dict:
 
 
 def _build_thumbnail_prompt(metadata: dict, aspect: str, style: str = "bold") -> str:
-    """Build an image-generation prompt for a YouTube thumbnail.
+    """Build a single-stage image-generation prompt for a YouTube thumbnail.
+
+    The prompt instructs ``gpt-image-1`` to render the *complete* thumbnail
+    including bold text, visual effects, and photorealistic elements — no
+    post-processing or text overlay needed.
 
     Parameters
     ----------
@@ -1366,141 +1370,107 @@ def _build_thumbnail_prompt(metadata: dict, aspect: str, style: str = "bold") ->
     aspect : str
         ``"16:9"`` for landscape or ``"9:16"`` for portrait / Shorts.
     style : str
-        Visual style hint – ``"bold"``, ``"minimal"``, or ``"cinematic"``.
+        Visual style – ``"bold"``, ``"minimal"``, or ``"cinematic"``.
     """
     title = metadata.get("title", "Video")
     channel = metadata.get("channel", "")
+    description = (metadata.get("description") or "")[:400]
     tags = ", ".join(metadata.get("tags", [])[:8])
-    categories = ", ".join(metadata.get("categories", []))
-    description_snippet = (metadata.get("description") or "")[:400]
+
+    # Extract a short hook phrase from description (first sentence or clause)
+    hook = ""
+    if description:
+        for sep in [".", "!", "?", "\n", " - "]:
+            if sep in description[:200]:
+                hook = description[:200].split(sep)[0].strip()
+                break
+        if not hook:
+            hook = description[:80].strip()
+        # Keep it punchy — truncate long hooks
+        if len(hook) > 60:
+            hook = hook[:57].rstrip() + "..."
+
+    # Short title for the main text element (truncate if very long)
+    display_title = title.upper()
+    if len(display_title) > 50:
+        display_title = display_title[:47].rstrip() + "..."
 
     orientation = "landscape" if aspect == "16:9" else "portrait"
+    thumb_type = "YouTube thumbnail" if aspect == "16:9" else "YouTube Shorts thumbnail"
 
-    style_guides = {
-        "bold": (
-            "Eye-catching YouTube thumbnail with bold, vibrant colors and high contrast. "
-            "Dynamic composition with strong focal point. Modern graphic design style with "
-            "clean edges. Text-free, no words or letters."
-        ),
-        "minimal": (
-            "Clean, minimalist YouTube thumbnail with a muted color palette. Elegant composition "
-            "with plenty of negative space. Subtle lighting and soft shadows. Text-free, no words "
-            "or letters."
-        ),
-        "cinematic": (
-            "Cinematic YouTube thumbnail with dramatic lighting and film-like color grading. "
-            "Atmospheric depth of field. Rich, moody tones. Professional photography feel. "
-            "Text-free, no words or letters."
-        ),
-    }
-    style_instruction = style_guides.get(style, style_guides["bold"])
+    # --- Style-specific prompt templates ---
+    if style == "minimal":
+        prompt = (
+            f"Create a highly attractive {thumb_type} image. "
+            f"Clean, modern design with strong color blocking and bold sans-serif typography. "
+            f"A high-quality photographic background related to the topic: {title}. "
+            f"Large, bold white text reading '{display_title}' prominently placed with a "
+            f"subtle drop shadow for readability. "
+        )
+        if hook:
+            prompt += (
+                f"Below the main text, smaller clean text reading '{hook}' in a "
+                f"contrasting accent color. "
+            )
+        if channel:
+            prompt += f"Small text '{channel}' in the corner. "
+        prompt += (
+            f"Minimalist but eye-catching. Strong contrast between text and background. "
+            f"MKBHD / tech-review style thumbnail. Professional, sharp, high resolution. "
+            f"{orientation.capitalize()} ({aspect} aspect ratio)."
+        )
 
-    prompt = (
-        f"{style_instruction}\n\n"
-        f"The image should visually represent this video topic:\n"
-        f"Title: {title}\n"
-    )
-    if channel:
-        prompt += f"Channel: {channel}\n"
-    if categories:
-        prompt += f"Categories: {categories}\n"
+    elif style == "cinematic":
+        prompt = (
+            f"Create a highly attractive {thumb_type} image styled like a movie poster. "
+            f"Dramatic cinematic lighting with lens flares and volumetric light. "
+            f"A photorealistic epic scene related to the topic: {title}. "
+            f"The title text '{display_title}' rendered in large, bold cinematic movie-poster "
+            f"font with metallic or chrome effect, centered prominently. "
+        )
+        if hook:
+            prompt += (
+                f"A tagline below reading '{hook}' in elegant serif font with subtle glow. "
+            )
+        if channel:
+            prompt += f"Small text '{channel}' at the bottom in clean white font. "
+        prompt += (
+            f"Rich, moody color grading with teal and orange tones. Atmospheric depth of field. "
+            f"Epic scale and drama. High contrast. "
+            f"{orientation.capitalize()} ({aspect} aspect ratio)."
+        )
+
+    else:  # "bold" (default) — MrBeast-style maximum impact
+        prompt = (
+            f"Create a highly attractive {thumb_type}. "
+            f"Photorealistic style with graphic elements. "
+            f"A confident, expressive person pointing directly at the viewer or reacting with "
+            f"an amazed expression, related to the topic: {title}. "
+            f"Large bold 3D text reading '{display_title}' at the top in bright yellow with "
+            f"thick black outline and neon glow effect. "
+        )
+        if hook:
+            prompt += (
+                f"Below that, even larger impactful text reading '{hook.upper()}' in bold "
+                f"with red/orange glow and 3D depth effect. "
+            )
+        if channel:
+            prompt += (
+                f"Small text '{channel}' at the bottom in white with blue glow. "
+            )
+        prompt += (
+            f"A red 'WATCH NOW!' button with play arrow icon in the bottom right corner. "
+            f"Extremely vibrant, high contrast, saturated colors. "
+            f"Dynamic composition with arrows or graphic elements directing attention. "
+            f"Professional YouTube thumbnail style — loud, attention-grabbing, clickable. "
+            f"{orientation.capitalize()} ({aspect} aspect ratio)."
+        )
+
+    # Add topic context from tags if available
     if tags:
-        prompt += f"Key topics: {tags}\n"
-    if description_snippet:
-        prompt += f"Brief description: {description_snippet}\n"
+        prompt += f" The visual theme should relate to: {tags}."
 
-    prompt += (
-        f"\nThe image must be {orientation} ({aspect} aspect ratio), "
-        f"suitable as a YouTube {'thumbnail' if aspect == '16:9' else 'Shorts thumbnail'}. "
-        f"Include visual elements, icons, or scenes that clearly relate to the video topic. "
-        f"Make it professional, attention-grabbing, and immediately convey the subject matter. "
-        f"Do NOT include any text, titles, words, or letters in the image."
-    )
     return prompt
-
-
-def _overlay_text_on_thumbnail(image_path: str, title: str, channel: str = "") -> str:
-    """Overlay crisp, readable text on a thumbnail background image.
-
-    Uses Pillow to add a semi-transparent banner with bold title text and
-    optional channel name.  Returns the path to the composited image.
-    """
-    from PIL import Image, ImageDraw, ImageFont
-
-    img = Image.open(image_path).convert("RGBA")
-    width, height = img.size
-
-    # Create overlay layer for the banner
-    overlay = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay)
-
-    # -- Font sizing ----------------------------------------------------------
-    # Target: title uses ~5% of image height per line, up to 2 lines
-    target_font_size = max(28, int(height * 0.055))
-    try:
-        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", target_font_size)
-        small_font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", max(18, int(target_font_size * 0.5)))
-    except (OSError, IOError):
-        font = ImageFont.load_default()
-        small_font = font
-
-    # -- Word-wrap title text -------------------------------------------------
-    max_text_width = int(width * 0.88)
-    words = title.split()
-    lines = []
-    current_line = ""
-    for word in words:
-        test = f"{current_line} {word}".strip()
-        bbox = draw.textbbox((0, 0), test, font=font)
-        if bbox[2] - bbox[0] <= max_text_width:
-            current_line = test
-        else:
-            if current_line:
-                lines.append(current_line)
-            current_line = word
-    if current_line:
-        lines.append(current_line)
-    # Limit to 3 lines max
-    if len(lines) > 3:
-        lines = lines[:3]
-        lines[-1] = lines[-1].rstrip() + "…"
-
-    # -- Compute banner geometry ----------------------------------------------
-    line_height = int(target_font_size * 1.35)
-    channel_height = int(line_height * 0.7) if channel else 0
-    padding_x = int(width * 0.06)
-    padding_y = int(height * 0.025)
-    total_text_height = len(lines) * line_height + channel_height
-    banner_height = total_text_height + padding_y * 2
-
-    # Position banner in the bottom third
-    banner_y = height - banner_height - int(height * 0.04)
-
-    # Draw semi-transparent dark banner
-    draw.rectangle(
-        [(0, banner_y), (width, banner_y + banner_height)],
-        fill=(0, 0, 0, 180),
-    )
-
-    # -- Draw title text ------------------------------------------------------
-    text_y = banner_y + padding_y
-    for line in lines:
-        # Draw text shadow for depth
-        draw.text((padding_x + 2, text_y + 2), line, font=font, fill=(0, 0, 0, 200))
-        # Draw main text
-        draw.text((padding_x, text_y), line, font=font, fill=(255, 255, 255, 255))
-        text_y += line_height
-
-    # -- Draw channel name ----------------------------------------------------
-    if channel:
-        draw.text((padding_x + 2, text_y + 2), channel, font=small_font, fill=(0, 0, 0, 180))
-        draw.text((padding_x, text_y), channel, font=small_font, fill=(200, 200, 200, 255))
-
-    # Composite and save
-    result = Image.alpha_composite(img, overlay).convert("RGB")
-    output_path = image_path.replace(".png", "_final.png")
-    result.save(output_path, "PNG")
-    return output_path
 
 
 def generate_youtube_thumbnail(
@@ -1509,11 +1479,11 @@ def generate_youtube_thumbnail(
     style: str = "bold",
     use_local: bool = False,
 ) -> dict:
-    """Generate a thumbnail image for a YouTube video.
+    """Generate a complete YouTube thumbnail in a single AI pass.
 
-    Uses a two-stage process:
-      1. ``asi-generate-image`` CLI for a high-quality AI background
-      2. Pillow text overlay for crisp, readable title text
+    Uses ``gpt-image-1`` via the ``asi-generate-image`` CLI to produce
+    the full thumbnail — including bold text, visual effects, and
+    photorealistic elements — with no post-processing needed.
 
     Parameters
     ----------
@@ -1541,13 +1511,18 @@ def generate_youtube_thumbnail(
 
     logger.info("Generating thumbnail (%s, %s style) for: %s", aspect, style, url)
 
-    # Stage 1: Generate background image via asi-generate-image CLI
+    # Map aspect ratio to gpt-image-1 size parameter
+    size = "1536x1024" if aspect == "16:9" else "1024x1536"
+
+    # Generate the complete thumbnail in one pass
     with tempfile.TemporaryDirectory() as tmpdir:
         cmd_payload = json.dumps({
             "prompt": prompt,
-            "filename": "thumbnail_bg",
+            "filename": "thumbnail",
             "aspect_ratio": aspect,
-            "model": "gpt_image_1_5",
+            "size": size,
+            "model": "gpt_image_1",
+            "quality": "high",
         })
         result = subprocess.run(
             ["asi-generate-image", cmd_payload],
@@ -1561,16 +1536,11 @@ def generate_youtube_thumbnail(
             logger.error("asi-generate-image failed: %s", result.stderr)
             raise RuntimeError(f"Image generation failed: {result.stderr.strip() or 'unknown error'}")
 
-        bg_path = os.path.join(tmpdir, "thumbnail_bg.png")
-        if not os.path.isfile(bg_path):
+        img_path = os.path.join(tmpdir, "thumbnail.png")
+        if not os.path.isfile(img_path):
             raise RuntimeError("Image generation did not produce expected output file")
 
-        # Stage 2: Overlay text with Pillow
-        title = metadata.get("title", "")
-        channel = metadata.get("channel", "")
-        final_path = _overlay_text_on_thumbnail(bg_path, title, channel)
-
-        with open(final_path, "rb") as f:
+        with open(img_path, "rb") as f:
             image_base64 = base64.b64encode(f.read()).decode("utf-8")
 
     return {
