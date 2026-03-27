@@ -1,0 +1,415 @@
+{% extends "base.html" %}
+{% block title %}Thumbnail Generator | PodInsights{% endblock %}
+{% block header %}Thumbnail Generator{% endblock %}
+{% block content %}
+<style>
+    .thumb-header {
+        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+        color: white;
+        padding: 2rem;
+        border-radius: 12px;
+        margin-bottom: 2rem;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
+    }
+    .thumb-header h2 {
+        margin: 0;
+        font-weight: 700;
+        background: linear-gradient(135deg, #e94560 0%, #ff6b6b 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+    }
+    .thumb-header p {
+        margin: 0.5rem 0 0 0;
+        opacity: 0.8;
+    }
+    .aspect-option, .style-option {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.6rem 1.2rem;
+        border-radius: 10px;
+        font-weight: 500;
+        cursor: pointer;
+        transition: all 0.2s ease;
+        border: 3px solid #dee2e6;
+        background: #f8f9fa;
+        color: #495057;
+        user-select: none;
+    }
+    .aspect-option:hover, .style-option:hover {
+        border-color: #adb5bd;
+        background: #e9ecef;
+    }
+    .aspect-option.selected {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: white;
+        border-color: transparent;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        transform: translateY(-2px);
+    }
+    .style-option.selected {
+        background: linear-gradient(135deg, #e94560 0%, #ff6b6b 100%);
+        color: white;
+        border-color: transparent;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+        transform: translateY(-2px);
+    }
+    .thumb-preview-container {
+        background: #f8f9fa;
+        border-radius: 12px;
+        padding: 1.5rem;
+        border: 2px dashed #dee2e6;
+        text-align: center;
+        min-height: 300px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        transition: all 0.3s ease;
+    }
+    .thumb-preview-container.has-image {
+        border: 2px solid #667eea;
+        background: #fff;
+    }
+    .thumb-preview-container img {
+        max-width: 100%;
+        max-height: 500px;
+        border-radius: 8px;
+        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.15);
+    }
+    .metadata-card {
+        background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+        border-radius: 8px;
+        padding: 1rem;
+        border: 1px solid #dee2e6;
+    }
+    .metadata-card .meta-label {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        color: #6c757d;
+        font-weight: 600;
+    }
+    .spinner-overlay {
+        position: absolute;
+        top: 0; left: 0; right: 0; bottom: 0;
+        background: rgba(255, 255, 255, 0.85);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex-direction: column;
+        border-radius: 12px;
+        z-index: 10;
+    }
+    .prompt-display {
+        background: #1a1a2e;
+        color: #a0c4ff;
+        border-radius: 8px;
+        padding: 1rem;
+        font-family: monospace;
+        font-size: 0.8rem;
+        max-height: 200px;
+        overflow-y: auto;
+        white-space: pre-wrap;
+    }
+</style>
+
+<!-- Header -->
+<div class="thumb-header">
+    <h2>YouTube Thumbnail Generator</h2>
+    <p>Generate AI-powered thumbnails from any YouTube video. Paste a URL, choose your format, and let AI create eye-catching thumbnails.</p>
+</div>
+
+<div class="row g-4">
+    <!-- Left Column: Input Controls -->
+    <div class="col-lg-5">
+        <div class="card border-0 shadow-sm">
+            <div class="card-body p-4">
+                <!-- URL Input -->
+                <div class="mb-4">
+                    <label class="form-label fw-bold">YouTube URL</label>
+                    <div class="input-group">
+                        <span class="input-group-text bg-danger text-white" style="border: none;">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" fill="currentColor" viewBox="0 0 16 16">
+                                <path d="M8.051 1.999h.089c.822.003 4.987.033 6.11.335a2.01 2.01 0 0 1 1.415 1.42c.101.38.172.883.22 1.402l.01.104.022.26.008.104c.065.914.073 1.77.074 1.957v.075c-.001.194-.01 1.108-.082 2.06l-.008.105-.009.104c-.05.572-.124 1.14-.235 1.558a2.01 2.01 0 0 1-1.415 1.42c-1.16.312-5.569.334-6.18.335h-.142c-.309 0-1.587-.006-2.927-.052l-.17-.006-.087-.004-.171-.007-.171-.007c-1.11-.049-2.167-.128-2.654-.26a2.01 2.01 0 0 1-1.415-1.419c-.111-.417-.185-.986-.235-1.558L.09 9.82l-.008-.104A31 31 0 0 1 0 7.68v-.123c.002-.215.01-.958.064-1.778l.007-.103.003-.052.008-.104.022-.26.01-.104c.048-.519.119-1.023.22-1.402a2.01 2.01 0 0 1 1.415-1.42c.487-.13 1.544-.21 2.654-.26l.17-.007.172-.006.086-.003.171-.007A100 100 0 0 1 7.858 2zM6.4 5.209v4.818l4.157-2.408z"/>
+                            </svg>
+                        </span>
+                        <input type="url" class="form-control form-control-lg" id="youtubeUrl" placeholder="https://www.youtube.com/watch?v=..." autocomplete="off">
+                        <button class="btn btn-outline-secondary" type="button" id="fetchMetaBtn">Fetch</button>
+                    </div>
+                    <div class="form-text">Paste a YouTube video URL to get started.</div>
+                </div>
+
+                <!-- Video Metadata (shown after fetch) -->
+                <div id="metadataSection" class="mb-4 d-none">
+                    <div class="metadata-card">
+                        <div class="d-flex align-items-start gap-3">
+                            <img id="metaThumb" src="" alt="" style="width: 120px; border-radius: 6px; flex-shrink: 0;">
+                            <div style="min-width: 0;">
+                                <div class="meta-label">Video</div>
+                                <div class="fw-bold text-truncate" id="metaTitle" style="font-size: 0.95rem;"></div>
+                                <div class="meta-label mt-2">Channel</div>
+                                <div class="text-muted" id="metaChannel" style="font-size: 0.85rem;"></div>
+                                <div class="meta-label mt-2">Tags</div>
+                                <div id="metaTags" style="font-size: 0.8rem;"></div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Aspect Ratio -->
+                <div class="mb-4">
+                    <label class="form-label fw-bold">Aspect Ratio</label>
+                    <div class="d-flex flex-wrap gap-2">
+                        <label class="aspect-option selected" data-aspect="16:9">
+                            <input type="radio" name="aspect" value="16:9" class="d-none" checked>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="12" viewBox="0 0 20 12" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="0.75" y="0.75" width="18.5" height="10.5" rx="1.5"/></svg>
+                            16:9 Landscape
+                        </label>
+                        <label class="aspect-option" data-aspect="9:16">
+                            <input type="radio" name="aspect" value="9:16" class="d-none">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="20" viewBox="0 0 12 20" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="0.75" y="0.75" width="10.5" height="18.5" rx="1.5"/></svg>
+                            9:16 Shorts
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Style -->
+                <div class="mb-4">
+                    <label class="form-label fw-bold">Visual Style</label>
+                    <div class="d-flex flex-wrap gap-2">
+                        <label class="style-option selected" data-style="bold">
+                            <input type="radio" name="style" value="bold" class="d-none" checked>
+                            Bold
+                        </label>
+                        <label class="style-option" data-style="minimal">
+                            <input type="radio" name="style" value="minimal" class="d-none">
+                            Minimal
+                        </label>
+                        <label class="style-option" data-style="cinematic">
+                            <input type="radio" name="style" value="cinematic" class="d-none">
+                            Cinematic
+                        </label>
+                    </div>
+                </div>
+
+                <!-- Generate Button -->
+                <button class="btn btn-lg w-100 text-white fw-bold" id="generateBtn" disabled
+                    style="background: linear-gradient(135deg, #e94560 0%, #ff6b6b 100%); border: none; padding: 0.75rem;">
+                    Generate Thumbnail
+                </button>
+
+                <!-- Error Alert -->
+                <div id="errorAlert" class="alert alert-danger mt-3 d-none" role="alert"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Right Column: Preview -->
+    <div class="col-lg-7">
+        <div class="card border-0 shadow-sm">
+            <div class="card-body p-4">
+                <div class="d-flex justify-content-between align-items-center mb-3">
+                    <h5 class="mb-0 fw-bold">Preview</h5>
+                    <a id="downloadBtn" class="btn btn-sm btn-outline-primary d-none" href="#" download="thumbnail.png" target="_blank">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" fill="currentColor" viewBox="0 0 16 16" class="me-1">
+                            <path d="M.5 9.9a.5.5 0 0 1 .5.5v2.5a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-2.5a.5.5 0 0 1 1 0v2.5a2 2 0 0 1-2 2H2a2 2 0 0 1-2-2v-2.5a.5.5 0 0 1 .5-.5"/>
+                            <path d="M7.646 11.854a.5.5 0 0 0 .708 0l3-3a.5.5 0 0 0-.708-.708L8.5 10.293V1.5a.5.5 0 0 0-1 0v8.793L5.354 8.146a.5.5 0 1 0-.708.708z"/>
+                        </svg>
+                        Download
+                    </a>
+                </div>
+
+                <div class="position-relative">
+                    <div class="thumb-preview-container" id="previewContainer">
+                        <div id="placeholderContent">
+                            <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" fill="#adb5bd" viewBox="0 0 16 16">
+                                <path d="M6.002 5.5a1.5 1.5 0 1 1-3 0 1.5 1.5 0 0 1 3 0"/>
+                                <path d="M2.002 1a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V3a2 2 0 0 0-2-2zm12 1a1 1 0 0 1 1 1v6.5l-3.777-1.947a.5.5 0 0 0-.577.093l-3.71 3.71-2.66-1.772a.5.5 0 0 0-.63.062L1.002 12V3a1 1 0 0 1 1-1z"/>
+                            </svg>
+                            <p class="text-muted mt-2 mb-0">Your generated thumbnail will appear here</p>
+                        </div>
+                    </div>
+
+                    <!-- Loading spinner overlay -->
+                    <div id="loadingSpinner" class="spinner-overlay d-none">
+                        <div class="spinner-border text-primary mb-2" role="status" style="width: 3rem; height: 3rem;"></div>
+                        <div class="fw-bold">Generating thumbnail...</div>
+                        <div class="text-muted" style="font-size: 0.85rem;">This may take 15-30 seconds</div>
+                    </div>
+                </div>
+
+                <!-- Prompt Info (shown after generation) -->
+                <div id="promptSection" class="mt-3 d-none">
+                    <details>
+                        <summary class="text-muted" style="font-size: 0.85rem; cursor: pointer;">View generation prompt</summary>
+                        <div class="prompt-display mt-2" id="promptText"></div>
+                    </details>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const urlInput = document.getElementById('youtubeUrl');
+    const fetchBtn = document.getElementById('fetchMetaBtn');
+    const generateBtn = document.getElementById('generateBtn');
+    const downloadBtn = document.getElementById('downloadBtn');
+    const metadataSection = document.getElementById('metadataSection');
+    const previewContainer = document.getElementById('previewContainer');
+    const placeholderContent = document.getElementById('placeholderContent');
+    const loadingSpinner = document.getElementById('loadingSpinner');
+    const errorAlert = document.getElementById('errorAlert');
+    const promptSection = document.getElementById('promptSection');
+    const promptText = document.getElementById('promptText');
+
+    let currentMetadata = null;
+
+    function showError(msg) {
+        errorAlert.textContent = msg;
+        errorAlert.classList.remove('d-none');
+        setTimeout(() => errorAlert.classList.add('d-none'), 8000);
+    }
+
+    function hideError() {
+        errorAlert.classList.add('d-none');
+    }
+
+    // Aspect ratio toggle
+    document.querySelectorAll('.aspect-option').forEach(opt => {
+        opt.addEventListener('click', function() {
+            document.querySelectorAll('.aspect-option').forEach(o => o.classList.remove('selected'));
+            this.classList.add('selected');
+            this.querySelector('input').checked = true;
+        });
+    });
+
+    // Style toggle
+    document.querySelectorAll('.style-option').forEach(opt => {
+        opt.addEventListener('click', function() {
+            document.querySelectorAll('.style-option').forEach(o => o.classList.remove('selected'));
+            this.classList.add('selected');
+            this.querySelector('input').checked = true;
+        });
+    });
+
+    // Fetch metadata
+    fetchBtn.addEventListener('click', function() {
+        const url = urlInput.value.trim();
+        if (!url) { showError('Please enter a YouTube URL'); return; }
+        hideError();
+
+        fetchBtn.disabled = true;
+        fetchBtn.textContent = 'Fetching...';
+
+        const formData = new FormData();
+        formData.append('url', url);
+
+        fetch('/thumbnails/metadata', { method: 'POST', body: formData })
+            .then(r => r.json())
+            .then(data => {
+                fetchBtn.disabled = false;
+                fetchBtn.textContent = 'Fetch';
+
+                if (data.error) { showError(data.error); return; }
+
+                currentMetadata = data.metadata;
+                document.getElementById('metaThumb').src = data.metadata.thumbnail;
+                document.getElementById('metaTitle').textContent = data.metadata.title;
+                document.getElementById('metaChannel').textContent = data.metadata.channel;
+
+                const tagsContainer = document.getElementById('metaTags');
+                tagsContainer.innerHTML = '';
+                (data.metadata.tags || []).slice(0, 6).forEach(tag => {
+                    const badge = document.createElement('span');
+                    badge.className = 'badge bg-secondary me-1 mb-1';
+                    badge.textContent = tag;
+                    tagsContainer.appendChild(badge);
+                });
+
+                metadataSection.classList.remove('d-none');
+                generateBtn.disabled = false;
+            })
+            .catch(err => {
+                fetchBtn.disabled = false;
+                fetchBtn.textContent = 'Fetch';
+                showError('Failed to fetch metadata: ' + err.message);
+            });
+    });
+
+    // Allow Enter key in URL input to trigger fetch
+    urlInput.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); fetchBtn.click(); }
+    });
+
+    // Generate thumbnail
+    generateBtn.addEventListener('click', function() {
+        const url = urlInput.value.trim();
+        if (!url) { showError('Please enter a YouTube URL'); return; }
+        hideError();
+
+        const aspect = document.querySelector('input[name="aspect"]:checked').value;
+        const style = document.querySelector('input[name="style"]:checked').value;
+
+        generateBtn.disabled = true;
+        generateBtn.textContent = 'Generating...';
+        loadingSpinner.classList.remove('d-none');
+        downloadBtn.classList.add('d-none');
+        promptSection.classList.add('d-none');
+
+        const formData = new FormData();
+        formData.append('url', url);
+        formData.append('aspect', aspect);
+        formData.append('style', style);
+
+        fetch('/thumbnails/generate', { method: 'POST', body: formData })
+            .then(r => r.json())
+            .then(data => {
+                generateBtn.disabled = false;
+                generateBtn.textContent = 'Generate Thumbnail';
+                loadingSpinner.classList.add('d-none');
+
+                if (data.error) { showError(data.error); return; }
+
+                // Show image
+                placeholderContent.classList.add('d-none');
+                previewContainer.classList.add('has-image');
+
+                let img = previewContainer.querySelector('img');
+                if (!img) {
+                    img = document.createElement('img');
+                    previewContainer.appendChild(img);
+                }
+                img.src = data.image_url;
+                img.alt = 'Generated thumbnail for: ' + (data.metadata.title || 'video');
+
+                // Show download button
+                downloadBtn.href = data.image_url;
+                downloadBtn.classList.remove('d-none');
+
+                // Show prompt
+                promptText.textContent = data.revised_prompt || data.prompt;
+                promptSection.classList.remove('d-none');
+
+                // Update metadata if not already shown
+                if (metadataSection.classList.contains('d-none') && data.metadata) {
+                    currentMetadata = data.metadata;
+                    document.getElementById('metaThumb').src = data.metadata.thumbnail;
+                    document.getElementById('metaTitle').textContent = data.metadata.title;
+                    document.getElementById('metaChannel').textContent = data.metadata.channel;
+                    metadataSection.classList.remove('d-none');
+                }
+            })
+            .catch(err => {
+                generateBtn.disabled = false;
+                generateBtn.textContent = 'Generate Thumbnail';
+                loadingSpinner.classList.add('d-none');
+                showError('Generation failed: ' + err.message);
+            });
+    });
+});
+</script>
+{% endblock %}

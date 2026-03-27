@@ -154,6 +154,9 @@ from podinsights import (
     download_youtube_audio,
     get_youtube_video_id,
     DOWNLOADS_DIR,
+    # Thumbnail generation
+    fetch_youtube_metadata,
+    generate_youtube_thumbnail,
 )
 from linkedin_client import (
     LinkedInClient,
@@ -5342,6 +5345,75 @@ def compose_generate_from_source():
         
     except Exception as e:
         app.logger.exception("Failed to generate posts from source")
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
+# YouTube Thumbnail Generator
+# ============================================================================
+
+
+@app.route('/thumbnails')
+def thumbnails_page():
+    """YouTube Thumbnail Generator page."""
+    return render_template('thumbnails.html')
+
+
+@app.route('/thumbnails/metadata', methods=['POST'])
+def thumbnails_fetch_metadata():
+    """Fetch metadata for a YouTube video URL."""
+    url = (request.form.get('url') or '').strip()
+    if not url:
+        return jsonify({"error": "YouTube URL is required"}), 400
+
+    if not is_youtube_url(url):
+        return jsonify({"error": "Please enter a valid YouTube URL"}), 400
+
+    if classify_youtube_url(url) != 'video':
+        return jsonify({"error": "Please enter a single YouTube video URL (not a channel or playlist)"}), 400
+
+    try:
+        metadata = fetch_youtube_metadata(url)
+        return jsonify({"success": True, "metadata": metadata})
+    except Exception as e:
+        app.logger.exception("Failed to fetch YouTube metadata")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/thumbnails/generate', methods=['POST'])
+def thumbnails_generate():
+    """Generate a thumbnail for a YouTube video."""
+    url = (request.form.get('url') or '').strip()
+    aspect = request.form.get('aspect', '16:9')
+    style = request.form.get('style', 'bold')
+
+    if not url:
+        return jsonify({"error": "YouTube URL is required"}), 400
+
+    if not is_youtube_url(url):
+        return jsonify({"error": "Please enter a valid YouTube URL"}), 400
+
+    if aspect not in ('16:9', '9:16'):
+        return jsonify({"error": "Aspect ratio must be 16:9 or 9:16"}), 400
+
+    if style not in ('bold', 'minimal', 'cinematic'):
+        return jsonify({"error": "Style must be bold, minimal, or cinematic"}), 400
+
+    try:
+        result = generate_youtube_thumbnail(
+            url=url,
+            aspect=aspect,
+            style=style,
+        )
+        return jsonify({
+            "success": True,
+            "image_url": result["image_url"],
+            "prompt": result["prompt"],
+            "revised_prompt": result.get("revised_prompt", ""),
+            "metadata": result["metadata"],
+        })
+    except Exception as e:
+        app.logger.exception("Failed to generate thumbnail")
         return jsonify({"error": str(e)}), 500
 
 
