@@ -1321,6 +1321,165 @@ def main(audio_path: str, json_path: str | None = None, verbose: bool = False) -
         logger.exception("Processing failed")
 
 
+# ── YouTube Thumbnail Generation ─────────────────────────────────────────
+
+
+def fetch_youtube_metadata(url: str) -> dict:
+    """Fetch metadata for a YouTube video using yt-dlp.
+
+    Returns a dict with keys: title, description, channel, tags,
+    categories, thumbnail, video_id, duration.
+    """
+    video_id = get_youtube_video_id(url)
+    if not video_id:
+        raise ValueError(f"Could not extract video ID from: {url}")
+
+    try:
+        import yt_dlp
+    except ImportError:
+        raise RuntimeError("yt-dlp is required. Install with: pip install yt-dlp")
+
+    opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    return {
+        "video_id": video_id,
+        "title": info.get("title", ""),
+        "description": (info.get("description") or "")[:1500],
+        "channel": info.get("channel", info.get("uploader", "")),
+        "tags": info.get("tags") or [],
+        "categories": info.get("categories") or [],
+        "thumbnail": info.get("thumbnail")
+            or f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg",
+        "duration": info.get("duration", 0),
+    }
+
+
+def _build_thumbnail_prompt(metadata: dict, aspect: str, style: str = "bold") -> str:
+    """Build an image-generation prompt for a YouTube thumbnail.
+
+    Parameters
+    ----------
+    metadata : dict
+        Output of :func:`fetch_youtube_metadata`.
+    aspect : str
+        ``"16:9"`` for landscape or ``"9:16"`` for portrait / Shorts.
+    style : str
+        Visual style hint – ``"bold"``, ``"minimal"``, or ``"cinematic"``.
+    """
+    title = metadata.get("title", "Video")
+    channel = metadata.get("channel", "")
+    tags = ", ".join(metadata.get("tags", [])[:8])
+    categories = ", ".join(metadata.get("categories", []))
+    description_snippet = (metadata.get("description") or "")[:400]
+
+    orientation = "landscape" if aspect == "16:9" else "portrait"
+
+    style_guides = {
+        "bold": (
+            "Eye-catching YouTube thumbnail with bold, vibrant colors and high contrast. "
+            "Dynamic composition with strong focal point. Modern graphic design style with "
+            "clean edges. Text-free, no words or letters."
+        ),
+        "minimal": (
+            "Clean, minimalist YouTube thumbnail with a muted color palette. Elegant composition "
+            "with plenty of negative space. Subtle lighting and soft shadows. Text-free, no words "
+            "or letters."
+        ),
+        "cinematic": (
+            "Cinematic YouTube thumbnail with dramatic lighting and film-like color grading. "
+            "Atmospheric depth of field. Rich, moody tones. Professional photography feel. "
+            "Text-free, no words or letters."
+        ),
+    }
+    style_instruction = style_guides.get(style, style_guides["bold"])
+
+    prompt = (
+        f"{style_instruction}\n\n"
+        f"The image should visually represent this video topic:\n"
+        f"Title: {title}\n"
+    )
+    if channel:
+        prompt += f"Channel: {channel}\n"
+    if categories:
+        prompt += f"Categories: {categories}\n"
+    if tags:
+        prompt += f"Key topics: {tags}\n"
+    if description_snippet:
+        prompt += f"Brief description: {description_snippet}\n"
+
+    prompt += (
+        f"\nThe image must be {orientation} ({aspect} aspect ratio), "
+        f"suitable as a YouTube {'thumbnail' if aspect == '16:9' else 'Shorts thumbnail'}. "
+        f"Include visual elements, icons, or scenes that clearly relate to the video topic. "
+        f"Make it professional, attention-grabbing, and immediately convey the subject matter. "
+        f"Do NOT include any text, titles, words, or letters in the image."
+    )
+    return prompt
+
+
+def generate_youtube_thumbnail(
+    url: str,
+    aspect: str = "16:9",
+    style: str = "bold",
+    use_local: bool = False,
+) -> dict:
+    """Generate a thumbnail image for a YouTube video.
+
+    Uses OpenAI DALL-E 3 (or a local model endpoint) to create an image
+    based on the video's metadata.
+
+    Parameters
+    ----------
+    url : str
+        YouTube video URL.
+    aspect : str
+        ``"16:9"`` or ``"9:16"``.
+    style : str
+        ``"bold"``, ``"minimal"``, or ``"cinematic"``.
+    use_local : bool
+        If *True*, try the Ollama endpoint instead of OpenAI.
+
+    Returns
+    -------
+    dict
+        ``{"image_url": ..., "prompt": ..., "metadata": ...}``
+    """
+    metadata = fetch_youtube_metadata(url)
+    prompt = _build_thumbnail_prompt(metadata, aspect, style)
+
+    size = "1792x1024" if aspect == "16:9" else "1024x1792"
+
+    from openai import OpenAI
+
+    if use_local:
+        client = OpenAI(base_url=f"{OLLAMA_BASE_URL}/v1", api_key="ollama")
+    else:
+        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+        if not client.api_key:
+            raise RuntimeError("OPENAI_API_KEY is not configured")
+
+    logger.info("Generating thumbnail (%s, %s style) for: %s", aspect, style, url)
+    response = client.images.generate(
+        model="dall-e-3",
+        prompt=prompt,
+        n=1,
+        size=size,
+        quality="hd",
+    )
+
+    image_url = response.data[0].url
+    revised_prompt = getattr(response.data[0], "revised_prompt", prompt)
+
+    return {
+        "image_url": image_url,
+        "prompt": prompt,
+        "revised_prompt": revised_prompt,
+        "metadata": metadata,
+    }
+
+
 if __name__ == "__main__":
     import argparse
 
