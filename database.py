@@ -278,6 +278,23 @@ def init_db(db_path: str = DB_PATH) -> None:
             )
             """
         )
+        # Generated YouTube thumbnails
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS generated_thumbnails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                youtube_url TEXT,
+                video_id TEXT,
+                title TEXT,
+                channel TEXT,
+                aspect TEXT,
+                style TEXT,
+                prompt TEXT,
+                image_relpath TEXT,
+                created_at TEXT
+            )
+            """
+        )
         # Upgrade any existing DB with newer columns
         cur = conn.execute("PRAGMA table_info(episodes)")
         columns = [row[1] for row in cur.fetchall()]
@@ -3032,3 +3049,77 @@ def delete_prompts_bulk(prompt_contents: List[str], db_path: str = DB_PATH) -> i
         )
         conn.commit()
         return cur.rowcount
+
+
+# =============================================================================
+# Generated Thumbnails Functions
+# =============================================================================
+
+
+def add_generated_thumbnail(
+    youtube_url: str,
+    video_id: str | None,
+    title: str,
+    channel: str,
+    aspect: str,
+    style: str,
+    prompt: str,
+    image_relpath: str,
+    db_path: str = DB_PATH,
+) -> int:
+    """Insert a generated thumbnail record and return its ``id``."""
+    created_at = datetime.utcnow().isoformat()
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO generated_thumbnails
+                (youtube_url, video_id, title, channel, aspect, style, prompt, image_relpath, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (youtube_url, video_id, title, channel, aspect, style, prompt, image_relpath, created_at),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_generated_thumbnails(
+    limit: int = 50,
+    offset: int = 0,
+    db_path: str = DB_PATH,
+) -> List[sqlite3.Row]:
+    """Return saved thumbnails, newest first."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT * FROM generated_thumbnails ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
+        )
+        return cur.fetchall()
+
+
+def get_generated_thumbnail(
+    thumbnail_id: int,
+    db_path: str = DB_PATH,
+) -> Optional[sqlite3.Row]:
+    """Return a single generated thumbnail by ``id``, or ``None``."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT * FROM generated_thumbnails WHERE id = ?",
+            (thumbnail_id,),
+        )
+        return cur.fetchone()
+
+
+def delete_generated_thumbnail(
+    thumbnail_id: int,
+    db_path: str = DB_PATH,
+) -> bool:
+    """Delete a generated thumbnail row. Returns ``True`` if a row was removed."""
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM generated_thumbnails WHERE id = ?",
+            (thumbnail_id,),
+        )
+        conn.commit()
+        return cur.rowcount > 0

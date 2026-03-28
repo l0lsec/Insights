@@ -102,16 +102,52 @@
         border-radius: 12px;
         z-index: 10;
     }
-    .prompt-display {
-        background: #1a1a2e;
-        color: #a0c4ff;
-        border-radius: 8px;
-        padding: 1rem;
+    .prompt-textarea {
         font-family: monospace;
+        font-size: 0.82rem;
+        line-height: 1.5;
+        resize: vertical;
+    }
+    .saved-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 1rem;
+    }
+    .saved-thumb-card {
+        border-radius: 10px;
+        overflow: hidden;
+        border: 2px solid #dee2e6;
+        transition: all 0.2s ease;
+        cursor: pointer;
+        background: #fff;
+    }
+    .saved-thumb-card:hover {
+        border-color: #667eea;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.12);
+        transform: translateY(-2px);
+    }
+    .saved-thumb-card img {
+        width: 100%;
+        aspect-ratio: 16/9;
+        object-fit: cover;
+        display: block;
+    }
+    .saved-thumb-card.portrait img {
+        aspect-ratio: 9/16;
+    }
+    .saved-thumb-meta {
+        padding: 0.6rem 0.75rem;
+    }
+    .saved-thumb-meta .title {
         font-size: 0.8rem;
-        max-height: 200px;
-        overflow-y: auto;
-        white-space: pre-wrap;
+        font-weight: 600;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .saved-thumb-meta .sub {
+        font-size: 0.7rem;
+        color: #6c757d;
     }
 </style>
 
@@ -194,6 +230,22 @@
                     </div>
                 </div>
 
+                <!-- Prompt Editor -->
+                <div class="mb-4" id="promptEditorSection">
+                    <div class="d-flex align-items-center justify-content-between mb-1">
+                        <label class="form-label fw-bold mb-0">Generation Prompt</label>
+                        <button class="btn btn-sm btn-outline-secondary" id="refreshPromptBtn" disabled>
+                            <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16" class="me-1">
+                                <path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2z"/>
+                                <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466"/>
+                            </svg>
+                            Refresh suggestion
+                        </button>
+                    </div>
+                    <textarea class="form-control prompt-textarea" id="promptInput" rows="6" placeholder="Fetch a URL first to see the suggested prompt, or write your own..."></textarea>
+                    <div class="form-text">Edit this prompt to control exactly what the AI generates. Use "Refresh suggestion" to restore the default.</div>
+                </div>
+
                 <!-- Generate Button -->
                 <button class="btn btn-lg w-100 text-white fw-bold" id="generateBtn" disabled
                     style="background: linear-gradient(135deg, #e94560 0%, #ff6b6b 100%); border: none; padding: 0.75rem;">
@@ -240,14 +292,22 @@
                     </div>
                 </div>
 
-                <!-- Prompt Info (shown after generation) -->
-                <div id="promptSection" class="mt-3 d-none">
-                    <details>
-                        <summary class="text-muted" style="font-size: 0.85rem; cursor: pointer;">View generation prompt</summary>
-                        <div class="prompt-display mt-2" id="promptText"></div>
-                    </details>
+                <!-- Saved indicator -->
+                <div id="savedIndicator" class="mt-2 d-none">
+                    <span class="badge bg-success">Saved</span>
                 </div>
             </div>
+        </div>
+    </div>
+</div>
+
+<!-- Saved Thumbnails Library -->
+<div class="mt-4" id="savedLibrarySection">
+    <div class="card border-0 shadow-sm">
+        <div class="card-body p-4">
+            <h5 class="fw-bold mb-3">Saved Thumbnails</h5>
+            <div id="savedLibraryEmpty" class="text-muted text-center py-4">No saved thumbnails yet. Generate one above to get started.</div>
+            <div class="saved-grid" id="savedGrid"></div>
         </div>
     </div>
 </div>
@@ -263,8 +323,11 @@ document.addEventListener('DOMContentLoaded', function() {
     const placeholderContent = document.getElementById('placeholderContent');
     const loadingSpinner = document.getElementById('loadingSpinner');
     const errorAlert = document.getElementById('errorAlert');
-    const promptSection = document.getElementById('promptSection');
-    const promptText = document.getElementById('promptText');
+    const promptInput = document.getElementById('promptInput');
+    const refreshPromptBtn = document.getElementById('refreshPromptBtn');
+    const savedIndicator = document.getElementById('savedIndicator');
+    const savedGrid = document.getElementById('savedGrid');
+    const savedLibraryEmpty = document.getElementById('savedLibraryEmpty');
 
     let currentMetadata = null;
 
@@ -295,6 +358,37 @@ document.addEventListener('DOMContentLoaded', function() {
             this.querySelector('input').checked = true;
         });
     });
+
+    // --- Suggest prompt helper ---
+    function fetchSuggestedPrompt() {
+        const url = urlInput.value.trim();
+        if (!url) return;
+        const aspect = document.querySelector('input[name="aspect"]:checked').value;
+        const style = document.querySelector('input[name="style"]:checked').value;
+
+        refreshPromptBtn.disabled = true;
+        refreshPromptBtn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Loading...';
+
+        const fd = new FormData();
+        fd.append('url', url);
+        fd.append('aspect', aspect);
+        fd.append('style', style);
+
+        fetch('/thumbnails/suggest-prompt', { method: 'POST', body: fd })
+            .then(r => r.json())
+            .then(data => {
+                refreshPromptBtn.disabled = false;
+                refreshPromptBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16" class="me-1"><path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466"/></svg>Refresh suggestion';
+                if (data.error) { showError(data.error); return; }
+                promptInput.value = data.prompt;
+            })
+            .catch(() => {
+                refreshPromptBtn.disabled = false;
+                refreshPromptBtn.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" fill="currentColor" viewBox="0 0 16 16" class="me-1"><path fill-rule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2z"/><path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466"/></svg>Refresh suggestion';
+            });
+    }
+
+    refreshPromptBtn.addEventListener('click', fetchSuggestedPrompt);
 
     // Fetch metadata
     fetchBtn.addEventListener('click', function() {
@@ -332,6 +426,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
                 metadataSection.classList.remove('d-none');
                 generateBtn.disabled = false;
+                refreshPromptBtn.disabled = false;
+
+                // Auto-fill prompt suggestion on first fetch
+                fetchSuggestedPrompt();
             })
             .catch(err => {
                 fetchBtn.disabled = false;
@@ -358,12 +456,16 @@ document.addEventListener('DOMContentLoaded', function() {
         generateBtn.textContent = 'Generating...';
         loadingSpinner.classList.remove('d-none');
         downloadBtn.classList.add('d-none');
-        promptSection.classList.add('d-none');
+        savedIndicator.classList.add('d-none');
 
         const formData = new FormData();
         formData.append('url', url);
         formData.append('aspect', aspect);
         formData.append('style', style);
+        const customPrompt = promptInput.value.trim();
+        if (customPrompt) {
+            formData.append('prompt', customPrompt);
+        }
 
         fetch('/thumbnails/generate', { method: 'POST', body: formData })
             .then(r => r.json())
@@ -392,9 +494,11 @@ document.addEventListener('DOMContentLoaded', function() {
                 downloadBtn.download = (data.metadata.title || 'thumbnail').replace(/[^a-z0-9]/gi, '_') + '.png';
                 downloadBtn.classList.remove('d-none');
 
-                // Show prompt
-                promptText.textContent = data.prompt;
-                promptSection.classList.remove('d-none');
+                // Update prompt textarea with what the server actually used
+                promptInput.value = data.prompt;
+
+                // Show saved indicator
+                savedIndicator.classList.remove('d-none');
 
                 // Update metadata if not already shown
                 if (metadataSection.classList.contains('d-none') && data.metadata) {
@@ -403,7 +507,11 @@ document.addEventListener('DOMContentLoaded', function() {
                     document.getElementById('metaTitle').textContent = data.metadata.title;
                     document.getElementById('metaChannel').textContent = data.metadata.channel;
                     metadataSection.classList.remove('d-none');
+                    refreshPromptBtn.disabled = false;
                 }
+
+                // Refresh saved library
+                loadSavedThumbnails();
             })
             .catch(err => {
                 generateBtn.disabled = false;
@@ -412,6 +520,107 @@ document.addEventListener('DOMContentLoaded', function() {
                 showError('Generation failed: ' + err.message);
             });
     });
+
+    // --- Saved library ---
+    function loadSavedThumbnails() {
+        fetch('/thumbnails/saved')
+            .then(r => r.json())
+            .then(data => {
+                if (!data.success) return;
+                const items = data.thumbnails || [];
+                savedGrid.innerHTML = '';
+                if (items.length === 0) {
+                    savedLibraryEmpty.classList.remove('d-none');
+                    return;
+                }
+                savedLibraryEmpty.classList.add('d-none');
+                items.forEach(item => {
+                    const card = document.createElement('div');
+                    card.className = 'saved-thumb-card' + (item.aspect === '9:16' ? ' portrait' : '');
+                    const created = item.created_at ? new Date(item.created_at + 'Z').toLocaleDateString() : '';
+                    card.innerHTML =
+                        '<img src="' + (item.image_url || '') + '" alt="' + (item.title || 'Thumbnail').replace(/"/g, '&quot;') + '">' +
+                        '<div class="saved-thumb-meta">' +
+                            '<div class="title">' + (item.title || 'Untitled') + '</div>' +
+                            '<div class="sub">' + (item.channel || '') + (created ? ' &middot; ' + created : '') + '</div>' +
+                            '<div class="d-flex gap-1 mt-1">' +
+                                '<button class="btn btn-sm btn-outline-primary py-0 px-1 load-thumb-btn" style="font-size:.7rem;">Load</button>' +
+                                '<button class="btn btn-sm btn-outline-danger py-0 px-1 delete-thumb-btn" style="font-size:.7rem;">Delete</button>' +
+                            '</div>' +
+                        '</div>';
+
+                    card.querySelector('.load-thumb-btn').addEventListener('click', function(e) {
+                        e.stopPropagation();
+                        loadSavedItem(item);
+                    });
+                    card.querySelector('.delete-thumb-btn').addEventListener('click', function(e) {
+                        e.stopPropagation();
+                        deleteSavedItem(item.id);
+                    });
+
+                    savedGrid.appendChild(card);
+                });
+            });
+    }
+
+    function loadSavedItem(item) {
+        // Populate URL
+        if (item.youtube_url) urlInput.value = item.youtube_url;
+
+        // Set aspect radio
+        const aspectRadio = document.querySelector('input[name="aspect"][value="' + item.aspect + '"]');
+        if (aspectRadio) {
+            aspectRadio.checked = true;
+            document.querySelectorAll('.aspect-option').forEach(o => o.classList.remove('selected'));
+            aspectRadio.closest('.aspect-option').classList.add('selected');
+        }
+
+        // Set style radio
+        const styleRadio = document.querySelector('input[name="style"][value="' + item.style + '"]');
+        if (styleRadio) {
+            styleRadio.checked = true;
+            document.querySelectorAll('.style-option').forEach(o => o.classList.remove('selected'));
+            styleRadio.closest('.style-option').classList.add('selected');
+        }
+
+        // Set prompt
+        if (item.prompt) promptInput.value = item.prompt;
+
+        // Show image in preview
+        if (item.image_url) {
+            placeholderContent.classList.add('d-none');
+            previewContainer.classList.add('has-image');
+            let img = previewContainer.querySelector('img');
+            if (!img) {
+                img = document.createElement('img');
+                previewContainer.appendChild(img);
+            }
+            img.src = item.image_url;
+            img.alt = item.title || 'Saved thumbnail';
+
+            downloadBtn.href = item.image_url;
+            downloadBtn.download = (item.title || 'thumbnail').replace(/[^a-z0-9]/gi, '_') + '.png';
+            downloadBtn.classList.remove('d-none');
+        }
+
+        generateBtn.disabled = false;
+        refreshPromptBtn.disabled = false;
+
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+    }
+
+    function deleteSavedItem(id) {
+        if (!confirm('Delete this saved thumbnail?')) return;
+        fetch('/thumbnails/saved/' + id, { method: 'DELETE' })
+            .then(r => r.json())
+            .then(data => {
+                if (data.error) { showError(data.error); return; }
+                loadSavedThumbnails();
+            });
+    }
+
+    // Load saved thumbnails on page init
+    loadSavedThumbnails();
 });
 </script>
 {% endblock %}
