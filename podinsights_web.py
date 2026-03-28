@@ -131,6 +131,11 @@ from database import (
     clear_recent_prompts,
     delete_prompt_by_content,
     delete_prompts_bulk,
+    # Generated thumbnails
+    add_generated_thumbnail,
+    list_generated_thumbnails,
+    get_generated_thumbnail,
+    delete_generated_thumbnail,
 )
 from podinsights import (
     transcribe_audio,
@@ -157,6 +162,7 @@ from podinsights import (
     # Thumbnail generation
     fetch_youtube_metadata,
     generate_youtube_thumbnail,
+    suggested_thumbnail_prompt,
 )
 from linkedin_client import (
     LinkedInClient,
@@ -5353,6 +5359,10 @@ def compose_generate_from_source():
 # ============================================================================
 
 
+THUMBNAIL_UPLOAD_DIR = os.path.join(UPLOAD_FOLDER, 'youtube_thumbnails')
+os.makedirs(THUMBNAIL_UPLOAD_DIR, exist_ok=True)
+
+
 @app.route('/thumbnails')
 def thumbnails_page():
     """YouTube Thumbnail Generator page."""
@@ -5380,22 +5390,48 @@ def thumbnails_fetch_metadata():
         return jsonify({"error": str(e)}), 500
 
 
-@app.route('/thumbnails/generate', methods=['POST'])
-def thumbnails_generate():
-    """Generate a thumbnail for a YouTube video."""
+@app.route('/thumbnails/suggest-prompt', methods=['POST'])
+def thumbnails_suggest_prompt():
+    """Return the auto-generated prompt for given URL / aspect / style (no image cost)."""
     url = (request.form.get('url') or '').strip()
     aspect = request.form.get('aspect', '16:9')
     style = request.form.get('style', 'bold')
 
     if not url:
         return jsonify({"error": "YouTube URL is required"}), 400
-
     if not is_youtube_url(url):
         return jsonify({"error": "Please enter a valid YouTube URL"}), 400
-
     if aspect not in ('16:9', '9:16'):
         return jsonify({"error": "Aspect ratio must be 16:9 or 9:16"}), 400
+    if style not in ('bold', 'minimal', 'cinematic'):
+        return jsonify({"error": "Style must be bold, minimal, or cinematic"}), 400
 
+    try:
+        metadata = fetch_youtube_metadata(url)
+        prompt = suggested_thumbnail_prompt(metadata, aspect, style)
+        return jsonify({"success": True, "prompt": prompt})
+    except Exception as e:
+        app.logger.exception("Failed to build suggested prompt")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/thumbnails/generate', methods=['POST'])
+def thumbnails_generate():
+    """Generate a thumbnail for a YouTube video, persist it, and return the result."""
+    import base64 as b64module
+    import uuid as uuid_mod
+
+    url = (request.form.get('url') or '').strip()
+    aspect = request.form.get('aspect', '16:9')
+    style = request.form.get('style', 'bold')
+    custom_prompt = (request.form.get('prompt') or '').strip() or None
+
+    if not url:
+        return jsonify({"error": "YouTube URL is required"}), 400
+    if not is_youtube_url(url):
+        return jsonify({"error": "Please enter a valid YouTube URL"}), 400
+    if aspect not in ('16:9', '9:16'):
+        return jsonify({"error": "Aspect ratio must be 16:9 or 9:16"}), 400
     if style not in ('bold', 'minimal', 'cinematic'):
         return jsonify({"error": "Style must be bold, minimal, or cinematic"}), 400
 
@@ -5404,16 +5440,81 @@ def thumbnails_generate():
             url=url,
             aspect=aspect,
             style=style,
+            custom_prompt=custom_prompt,
         )
+
+        # Persist the PNG to disk
+        filename = f"{uuid_mod.uuid4().hex}.png"
+        filepath = os.path.join(THUMBNAIL_UPLOAD_DIR, filename)
+        with open(filepath, "wb") as f:
+            f.write(b64module.b64decode(result["image_base64"]))
+
+        image_relpath = f"static/uploads/youtube_thumbnails/{filename}"
+        image_url = f"/static/uploads/youtube_thumbnails/{filename}"
+
+        meta = result["metadata"]
+        saved_id = add_generated_thumbnail(
+            youtube_url=url,
+            video_id=meta.get("video_id"),
+            title=meta.get("title", ""),
+            channel=meta.get("channel", ""),
+            aspect=aspect,
+            style=style,
+            prompt=result["prompt"],
+            image_relpath=image_relpath,
+        )
+
         return jsonify({
             "success": True,
             "image_base64": result["image_base64"],
             "prompt": result["prompt"],
-            "metadata": result["metadata"],
+            "metadata": meta,
+            "saved_id": saved_id,
+            "image_url": image_url,
         })
     except Exception as e:
         app.logger.exception("Failed to generate thumbnail")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route('/thumbnails/saved')
+def thumbnails_saved_list():
+    """Return all saved thumbnails as JSON."""
+    rows = list_generated_thumbnails(limit=100)
+    items = []
+    for r in rows:
+        items.append({
+            "id": r["id"],
+            "youtube_url": r["youtube_url"],
+            "video_id": r["video_id"],
+            "title": r["title"],
+            "channel": r["channel"],
+            "aspect": r["aspect"],
+            "style": r["style"],
+            "prompt": r["prompt"],
+            "image_url": f"/{r['image_relpath']}" if r["image_relpath"] else None,
+            "created_at": r["created_at"],
+        })
+    return jsonify({"success": True, "thumbnails": items})
+
+
+@app.route('/thumbnails/saved/<int:thumb_id>', methods=['DELETE'])
+def thumbnails_saved_delete(thumb_id: int):
+    """Delete a saved thumbnail (DB row + file on disk)."""
+    row = get_generated_thumbnail(thumb_id)
+    if not row:
+        return jsonify({"error": "Thumbnail not found"}), 404
+
+    if row["image_relpath"]:
+        try:
+            filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), row["image_relpath"])
+            if os.path.isfile(filepath):
+                os.remove(filepath)
+        except OSError:
+            app.logger.warning("Could not delete thumbnail file: %s", row["image_relpath"])
+
+    delete_generated_thumbnail(thumb_id)
+    return jsonify({"success": True})
 
 
 # ============================================================================

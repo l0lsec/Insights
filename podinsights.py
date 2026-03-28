@@ -1512,11 +1512,23 @@ def _resolve_thumbnail_cli_argv(raw: str) -> List[str]:
     return parts
 
 
+def suggested_thumbnail_prompt(metadata: dict, aspect: str, style: str = "bold") -> str:
+    """Return the default image-generation prompt for a YouTube thumbnail.
+
+    Public wrapper around ``_build_thumbnail_prompt`` for use by the web layer.
+    """
+    return _build_thumbnail_prompt(metadata, aspect, style)
+
+
+MAX_CUSTOM_PROMPT_LEN = 16_000
+
+
 def generate_youtube_thumbnail(
     url: str,
     aspect: str = "16:9",
     style: str = "bold",
     use_local: bool = False,
+    custom_prompt: str | None = None,
 ) -> dict:
     """Generate a complete YouTube thumbnail in a single AI pass.
 
@@ -1534,6 +1546,8 @@ def generate_youtube_thumbnail(
         ``"bold"``, ``"minimal"``, or ``"cinematic"``.
     use_local : bool
         Unused (kept for API compatibility).
+    custom_prompt : str or None
+        If provided and non-empty, used instead of the auto-generated prompt.
 
     Returns
     -------
@@ -1548,7 +1562,11 @@ def generate_youtube_thumbnail(
     from openai import OpenAI
 
     metadata = fetch_youtube_metadata(url)
-    prompt = _build_thumbnail_prompt(metadata, aspect, style)
+
+    if custom_prompt and custom_prompt.strip():
+        prompt = custom_prompt.strip()[:MAX_CUSTOM_PROMPT_LEN]
+    else:
+        prompt = _build_thumbnail_prompt(metadata, aspect, style)
 
     logger.info("Generating thumbnail (%s, %s style) for: %s", aspect, style, url)
 
