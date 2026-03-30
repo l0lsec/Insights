@@ -104,6 +104,7 @@ from database import (
     increment_retry_count,
     # Standalone posts functions (Command Center)
     add_standalone_post,
+    get_existing_standalone_content,
     list_standalone_posts,
     get_standalone_post,
     update_standalone_post,
@@ -4332,6 +4333,8 @@ def compose_import_file():
     except Exception as e:
         return jsonify({"error": f"Failed to parse file: {str(e)}"}), 400
 
+    existing = get_existing_standalone_content()
+
     imported = 0
     skipped = 0
     skipped_details = []
@@ -4352,6 +4355,11 @@ def compose_import_file():
             skipped_details.append(f"Row {i}: unsupported platform '{row['platform']}'")
             continue
 
+        if (platform, content) in existing:
+            skipped += 1
+            skipped_details.append(f"Row {i}: duplicate post (already exists for {platform})")
+            continue
+
         source_content = original_filename
         if row.get('video'):
             source_content = f"{original_filename} | {row['video']}"
@@ -4362,6 +4370,7 @@ def compose_import_file():
             platform=platform,
             content=content,
         )
+        existing.add((platform, content))
         imported += 1
         by_platform[platform] = by_platform.get(platform, 0) + 1
 
