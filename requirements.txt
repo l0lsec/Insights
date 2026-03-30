@@ -11,6 +11,7 @@ Pillow>=10.0.0
 cloudinary>=1.36.0
 trafilatura>=1.6.0
 flasgger>=0.9.7
+openpyxl>=3.1.0
 
 # YouTube video audio extraction
 yt-dlp>=2024.0.0
