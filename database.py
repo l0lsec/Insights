@@ -2494,6 +2494,16 @@ def add_standalone_post(
         return cur.lastrowid
 
 
+def get_existing_standalone_content(db_path: str = DB_PATH) -> set:
+    """Return a set of (platform, content) tuples for all standalone posts.
+
+    Used by the import route to skip duplicates.
+    """
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute("SELECT platform, content FROM standalone_posts")
+        return {(row[0], row[1]) for row in cur.fetchall()}
+
+
 def list_standalone_posts(
     source_type: Optional[str] = None,
     platform: Optional[str] = None,
