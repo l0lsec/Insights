@@ -4345,32 +4345,57 @@ def compose_import_file():
         platform = row['platform'].lower()
         content = row['copy']
 
+        content_preview = (content[:80] + '...') if len(content) > 80 else content
+
         if not content:
             skipped += 1
-            skipped_details.append(f"Row {i}: empty content")
+            skipped_details.append({
+                "row": i,
+                "reason": "empty_content",
+                "message": "Content is empty",
+                "fix": "Add post text to the 'copy' column in this row.",
+                "platform": row['platform'] or "(blank)",
+                "preview": "",
+            })
             continue
 
         if platform not in IMPORT_PLATFORMS:
             skipped += 1
-            skipped_details.append(f"Row {i}: unsupported platform '{row['platform']}'")
+            skipped_details.append({
+                "row": i,
+                "reason": "unsupported_platform",
+                "message": f"Unsupported platform '{row['platform']}'",
+                "fix": f"Change the Platform value to one of: Threads, LinkedIn, Facebook.",
+                "platform": row['platform'] or "(blank)",
+                "preview": content_preview,
+            })
             continue
 
-        if (platform, content) in existing:
+        existing_id = existing.get((platform, content))
+        if existing_id is not None:
             skipped += 1
-            skipped_details.append(f"Row {i}: duplicate post (already exists for {platform})")
+            skipped_details.append({
+                "row": i,
+                "reason": "duplicate",
+                "message": f"Duplicate — identical {platform} post already exists (Post #{existing_id})",
+                "fix": "This post is already in the Command Center. Edit the copy in the file to make it unique, or delete the existing post first.",
+                "platform": platform,
+                "preview": content_preview,
+                "duplicate_post_id": existing_id,
+            })
             continue
 
         source_content = original_filename
         if row.get('video'):
             source_content = f"{original_filename} | {row['video']}"
 
-        add_standalone_post(
+        new_id = add_standalone_post(
             source_type='import',
             source_content=source_content,
             platform=platform,
             content=content,
         )
-        existing.add((platform, content))
+        existing[(platform, content)] = new_id
         imported += 1
         by_platform[platform] = by_platform.get(platform, 0) + 1
 
@@ -4378,7 +4403,7 @@ def compose_import_file():
         "success": True,
         "imported": imported,
         "skipped": skipped,
-        "skipped_details": skipped_details[:20],
+        "skipped_details": skipped_details,
         "by_platform": by_platform,
     })
 
