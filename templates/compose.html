@@ -312,6 +312,11 @@
                     {% if saved_sources %}<span class="badge bg-secondary ms-1">{{ saved_sources|length }}</span>{% endif %}
                 </button>
             </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="import-tab" data-bs-toggle="pill" data-bs-target="#import-content" type="button" role="tab">
+                    📥 Import File
+                </button>
+            </li>
         </ul>
 
         <!-- Shared Local / Cloud Toggle (applies to all generation modes) -->
@@ -635,6 +640,30 @@
                     <a href="{{ url_for('sources_page') }}" class="btn btn-sm btn-outline-primary">View Sources Page</a>
                 </div>
                 {% endif %}
+            </div>
+
+            <!-- Import File Tab -->
+            <div class="tab-pane fade" id="import-content" role="tabpanel">
+                <div class="mb-3">
+                    <label class="form-label fw-bold">Upload CSV or Excel File</label>
+                    <p class="text-muted small mb-2">Import posts from a file with <code>Platform</code> and <code>copy</code> columns. Supported platforms: Threads, LinkedIn, Facebook.</p>
+                    <input type="file" class="form-control" id="import-file-input" accept=".csv,.xlsx,.xls">
+                </div>
+                <div id="import-preview" class="d-none mb-3">
+                    <div class="card bg-light">
+                        <div class="card-body py-2">
+                            <small class="text-muted">Selected: <strong id="import-file-name"></strong></small>
+                        </div>
+                    </div>
+                </div>
+                <button class="btn btn-primary" id="import-btn" onclick="importFile()" disabled>
+                    📥 Import Posts
+                </button>
+                <div id="import-results" class="d-none mt-3">
+                    <div class="alert" id="import-results-alert">
+                        <div id="import-results-body"></div>
+                    </div>
+                </div>
             </div>
         </div>
         
@@ -1777,6 +1806,7 @@ function getActiveSourceType() {
     if (activeTab.id === 'text-tab') return 'text';
     if (activeTab.id === 'image-tab') return 'image';
     if (activeTab.id === 'saved-tab') return 'saved_source';
+    if (activeTab.id === 'import-tab') return 'import';
     return 'freeform';
 }
 
@@ -4680,6 +4710,98 @@ function createManualPost(platform) {
         alert('Error: ' + error.message);
         saveBtn.innerHTML = originalText;
         saveBtn.disabled = false;
+    });
+}
+
+/* ── Import File handling ────────────────────────────────── */
+document.getElementById('import-file-input').addEventListener('change', function() {
+    const file = this.files[0];
+    const btn = document.getElementById('import-btn');
+    const preview = document.getElementById('import-preview');
+    const nameEl = document.getElementById('import-file-name');
+    const results = document.getElementById('import-results');
+    results.classList.add('d-none');
+
+    if (file) {
+        nameEl.textContent = file.name;
+        preview.classList.remove('d-none');
+        btn.disabled = false;
+    } else {
+        preview.classList.add('d-none');
+        btn.disabled = true;
+    }
+});
+
+function importFile() {
+    const input = document.getElementById('import-file-input');
+    const file = input.files[0];
+    if (!file) return;
+
+    const btn = document.getElementById('import-btn');
+    const origText = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Importing...';
+    btn.disabled = true;
+
+    const resultsDiv = document.getElementById('import-results');
+    const alertDiv = document.getElementById('import-results-alert');
+    const bodyDiv = document.getElementById('import-results-body');
+    resultsDiv.classList.add('d-none');
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    fetch('{{ url_for("compose_import_file") }}', {
+        method: 'POST',
+        body: formData,
+    })
+    .then(r => r.json())
+    .then(data => {
+        resultsDiv.classList.remove('d-none');
+        if (data.error) {
+            alertDiv.className = 'alert alert-danger';
+            bodyDiv.innerHTML = '<strong>Import failed:</strong> ' + data.error;
+            btn.innerHTML = origText;
+            btn.disabled = false;
+            return;
+        }
+
+        let html = '<strong>Import complete!</strong><br>';
+        html += '✅ <strong>' + data.imported + '</strong> posts imported';
+        if (data.skipped > 0) {
+            html += ' &nbsp;|&nbsp; ⚠️ <strong>' + data.skipped + '</strong> rows skipped';
+        }
+
+        if (data.by_platform && Object.keys(data.by_platform).length > 0) {
+            html += '<div class="mt-2">';
+            const icons = {threads: '🧵', linkedin: '💼', facebook: '📘'};
+            for (const [plat, count] of Object.entries(data.by_platform)) {
+                html += '<span class="badge bg-primary me-1">' + (icons[plat] || '') + ' ' + plat + ': ' + count + '</span>';
+            }
+            html += '</div>';
+        }
+
+        if (data.skipped_details && data.skipped_details.length > 0) {
+            html += '<details class="mt-2 small"><summary class="text-muted">Skipped details</summary><ul class="mb-0 mt-1">';
+            data.skipped_details.forEach(d => { html += '<li>' + d + '</li>'; });
+            html += '</ul></details>';
+        }
+
+        alertDiv.className = 'alert alert-success';
+        bodyDiv.innerHTML = html;
+
+        if (data.imported > 0) {
+            setTimeout(() => location.reload(), 1500);
+        } else {
+            btn.innerHTML = origText;
+            btn.disabled = false;
+        }
+    })
+    .catch(error => {
+        resultsDiv.classList.remove('d-none');
+        alertDiv.className = 'alert alert-danger';
+        bodyDiv.innerHTML = '<strong>Import failed:</strong> ' + error.message;
+        btn.innerHTML = origText;
+        btn.disabled = false;
     });
 }
 </script>

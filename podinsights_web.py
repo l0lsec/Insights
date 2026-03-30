@@ -4232,6 +4232,110 @@ def compose_create_post():
     })
 
 
+@app.route('/compose/import', methods=['POST'])
+def compose_import_file():
+    """Import posts from a CSV or XLSX file into the Command Center."""
+    import csv as csv_mod
+
+    IMPORT_PLATFORMS = {'threads', 'linkedin', 'facebook'}
+
+    file = request.files.get('file')
+    if not file or not file.filename:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    filename = file.filename.lower()
+    if not (filename.endswith('.csv') or filename.endswith('.xlsx') or filename.endswith('.xls')):
+        return jsonify({"error": "Unsupported file type. Please upload a .csv or .xlsx file."}), 400
+
+    rows = []
+    try:
+        if filename.endswith('.csv'):
+            stream = io.StringIO(file.stream.read().decode('utf-8-sig'))
+            reader = csv_mod.DictReader(stream)
+            header_map = {k.strip().lower(): k for k in (reader.fieldnames or [])}
+            platform_col = header_map.get('platform')
+            copy_col = header_map.get('copy')
+            video_col = header_map.get('video')
+            if not platform_col or not copy_col:
+                return jsonify({"error": "CSV must have 'Platform' and 'copy' columns. "
+                                f"Found: {', '.join(reader.fieldnames or [])}"}), 400
+            for row in reader:
+                rows.append({
+                    'platform': (row.get(platform_col) or '').strip(),
+                    'copy': (row.get(copy_col) or '').strip(),
+                    'video': (row.get(video_col) or '').strip() if video_col else '',
+                })
+        else:
+            import openpyxl
+            wb = openpyxl.load_workbook(file.stream, read_only=True, data_only=True)
+            ws = wb.active
+            raw_rows = list(ws.iter_rows(values_only=True))
+            wb.close()
+            if not raw_rows:
+                return jsonify({"error": "The spreadsheet is empty."}), 400
+            headers = [str(h).strip().lower() if h else '' for h in raw_rows[0]]
+            try:
+                platform_idx = headers.index('platform')
+            except ValueError:
+                return jsonify({"error": "Spreadsheet must have a 'Platform' column. "
+                                f"Found: {', '.join(str(h) for h in raw_rows[0])}"}), 400
+            try:
+                copy_idx = headers.index('copy')
+            except ValueError:
+                return jsonify({"error": "Spreadsheet must have a 'copy' column. "
+                                f"Found: {', '.join(str(h) for h in raw_rows[0])}"}), 400
+            video_idx = headers.index('video') if 'video' in headers else None
+            for row in raw_rows[1:]:
+                rows.append({
+                    'platform': str(row[platform_idx]).strip() if row[platform_idx] else '',
+                    'copy': str(row[copy_idx]).strip() if row[copy_idx] else '',
+                    'video': str(row[video_idx]).strip() if video_idx is not None and row[video_idx] else '',
+                })
+    except Exception as e:
+        return jsonify({"error": f"Failed to parse file: {str(e)}"}), 400
+
+    imported = 0
+    skipped = 0
+    skipped_details = []
+    by_platform = {}
+    original_filename = file.filename
+
+    for i, row in enumerate(rows, start=2):
+        platform = row['platform'].lower()
+        content = row['copy']
+
+        if not content:
+            skipped += 1
+            skipped_details.append(f"Row {i}: empty content")
+            continue
+
+        if platform not in IMPORT_PLATFORMS:
+            skipped += 1
+            skipped_details.append(f"Row {i}: unsupported platform '{row['platform']}'")
+            continue
+
+        source_content = original_filename
+        if row.get('video'):
+            source_content = f"{original_filename} | {row['video']}"
+
+        add_standalone_post(
+            source_type='import',
+            source_content=source_content,
+            platform=platform,
+            content=content,
+        )
+        imported += 1
+        by_platform[platform] = by_platform.get(platform, 0) + 1
+
+    return jsonify({
+        "success": True,
+        "imported": imported,
+        "skipped": skipped,
+        "skipped_details": skipped_details[:20],
+        "by_platform": by_platform,
+    })
+
+
 @app.route('/compose/post/<int:post_id>/edit', methods=['POST'])
 def compose_edit_post(post_id: int):
     """Edit a standalone post's content."""
