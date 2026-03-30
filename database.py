@@ -305,6 +305,8 @@ def init_db(db_path: str = DB_PATH) -> None:
             conn.execute("ALTER TABLE episodes ADD COLUMN published TEXT")
         if "processed_at" not in columns:
             conn.execute("ALTER TABLE episodes ADD COLUMN processed_at TEXT")
+        if "channel" not in columns:
+            conn.execute("ALTER TABLE episodes ADD COLUMN channel TEXT")
         conn.commit()
 
 
@@ -454,21 +456,21 @@ def save_episode(
     action_items: Iterable[str],
     feed_id: int,
     published: str | None = None,
+    channel: str | None = None,
     db_path: str = DB_PATH,
 ) -> None:
     """Persist a fully processed episode."""
-    # Store the list of action items as newline separated text
     actions = "\n".join(action_items)
     processed_at = datetime.utcnow().isoformat(timespec="seconds")
     with sqlite3.connect(db_path) as conn:
         conn.execute(
             """
             INSERT OR REPLACE INTO episodes
-                (url, title, transcript, summary, action_items, feed_id, status, published, processed_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'complete', ?, ?)
+                (url, title, transcript, summary, action_items, feed_id, status, published, processed_at, channel)
+            VALUES (?, ?, ?, ?, ?, ?, 'complete', ?, ?, ?)
             """,
-            (url, title, transcript, summary, actions, feed_id, published, processed_at),
-        )  # episode is complete once saved
+            (url, title, transcript, summary, actions, feed_id, published, processed_at, channel),
+        )
         conn.commit()
 
 
@@ -582,6 +584,30 @@ def list_all_episodes(order_by: str = "id", db_path: str = DB_PATH) -> List[sqli
         conn.row_factory = sqlite3.Row
         cur = conn.execute(f"SELECT * FROM episodes ORDER BY {column} {direction}")
         return cur.fetchall()
+
+
+def get_youtube_episodes_missing_channel(db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    """Return YouTube episodes that have no channel value yet."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            """
+            SELECT id, url FROM episodes
+            WHERE channel IS NULL
+              AND (url LIKE '%youtube.com%' OR url LIKE '%youtu.be%')
+            """
+        )
+        return cur.fetchall()
+
+
+def set_episode_channel(episode_id: int, channel: str, db_path: str = DB_PATH) -> None:
+    """Set the channel name on an existing episode."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE episodes SET channel = ? WHERE id = ?",
+            (channel, episode_id),
+        )
+        conn.commit()
 
 
 def add_ticket(

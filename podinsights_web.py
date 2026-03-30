@@ -40,6 +40,8 @@ from database import (
     delete_ticket,
     delete_tickets_bulk,
     list_all_episodes,
+    get_youtube_episodes_missing_channel,
+    set_episode_channel,
     add_article,
     get_article,
     list_articles,
@@ -442,12 +444,18 @@ def worker() -> None:
         try:
             update_episode_status(url, "processing")
             if is_youtube_url(url):
+                channel = None
+                try:
+                    meta = fetch_youtube_metadata(url)
+                    channel = meta.get("channel") or None
+                except Exception:
+                    pass
                 audio_path = download_youtube_audio(url)
                 try:
                     transcript = transcribe_audio(audio_path)
                     summary = summarize_text(transcript)
                     actions = extract_action_items(transcript)
-                    save_episode(url, title, transcript, summary, actions, feed_id, published)
+                    save_episode(url, title, transcript, summary, actions, feed_id, published, channel=channel)
                     _backfill_youtube_source(url, transcript, summary)
                 finally:
                     if os.path.exists(audio_path):
@@ -1208,7 +1216,13 @@ def process_episode():
             current_url=request.full_path,
         )
 
+    channel = None
     if is_youtube_url(audio_url):
+        try:
+            meta = fetch_youtube_metadata(audio_url)
+            channel = meta.get("channel") or None
+        except Exception:
+            pass
         audio_path = download_youtube_audio(audio_url)
     else:
         tmpdir = tempfile.mkdtemp()
@@ -1230,7 +1244,7 @@ def process_episode():
         app.logger.info("Extracting action items")
         actions = extract_action_items(transcript)
         app.logger.info("Action item extraction complete")
-        save_episode(audio_url, title, transcript, summary, actions, feed_id, published)
+        save_episode(audio_url, title, transcript, summary, actions, feed_id, published, channel=channel)
         if is_youtube_url(audio_url):
             _backfill_youtube_source(audio_url, transcript, summary)
     finally:
@@ -1395,7 +1409,13 @@ def status_page():
     all_episodes = list_all_episodes(order_by=order_by)
     feeds_list = list_feeds()
     feeds = {f["id"]: f["title"] for f in feeds_list}
-    
+
+    ep_channels = {
+        ep["id"]: ep["channel"]
+        for ep in all_episodes
+        if not ep["feed_id"] and ep["channel"]
+    }
+
     # Filter episodes
     filtered_episodes = []
     for ep in all_episodes:
@@ -1428,6 +1448,7 @@ def status_page():
         episodes=filtered_episodes,
         feeds=feeds,
         feeds_list=feeds_list,
+        ep_channels=ep_channels,
         sort=sort,
         sort_order=sort_order,
         filter_status=filter_status,
@@ -1486,6 +1507,23 @@ def bulk_delete_episodes():
     if episode_ids:
         delete_episodes_bulk(episode_ids)
     return redirect(url_for('status_page'))
+
+
+@app.route('/episodes/backfill-channels', methods=['POST'])
+def backfill_youtube_channels():
+    """Populate channel names for existing YouTube episodes missing them."""
+    episodes = get_youtube_episodes_missing_channel()
+    updated = 0
+    for ep in episodes:
+        try:
+            meta = fetch_youtube_metadata(ep["url"])
+            channel = meta.get("channel") or None
+            if channel:
+                set_episode_channel(ep["id"], channel)
+                updated += 1
+        except Exception:
+            continue
+    return jsonify({"success": True, "updated": updated, "total": len(episodes)})
 
 
 @app.route('/tickets')
@@ -5996,6 +6034,23 @@ def scheduled_post_worker() -> None:
             app.logger.exception("Error in scheduled post worker")
 
 
+def _backfill_youtube_channels_bg():
+    """One-time background task to populate channel for existing YouTube episodes."""
+    episodes = get_youtube_episodes_missing_channel()
+    if not episodes:
+        return
+    app.logger.info("Backfilling channel for %d YouTube episodes", len(episodes))
+    for ep in episodes:
+        try:
+            meta = fetch_youtube_metadata(ep["url"])
+            channel = meta.get("channel") or None
+            if channel:
+                set_episode_channel(ep["id"], channel)
+        except Exception:
+            continue
+    app.logger.info("YouTube channel backfill complete")
+
+
 def start_workers():
     """Start all background worker threads."""
     # Episode processing worker
@@ -6007,6 +6062,10 @@ def start_workers():
     scheduled_worker = threading.Thread(target=scheduled_post_worker, daemon=True)
     scheduled_worker.start()
     app.logger.info("Scheduled post worker started")
+
+    # One-time backfill for YouTube channel names
+    backfill_thread = threading.Thread(target=_backfill_youtube_channels_bg, daemon=True)
+    backfill_thread.start()
 
 
 if __name__ == '__main__':
