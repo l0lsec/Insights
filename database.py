@@ -157,6 +157,22 @@ def init_db(db_path: str = DB_PATH) -> None:
             )
             """
         )
+        # X/Twitter OAuth tokens storage
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS twitter_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                access_token TEXT,
+                refresh_token TEXT,
+                expires_at TEXT,
+                user_id TEXT,
+                username TEXT,
+                display_name TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
         # Scheduled posts queue for LinkedIn and other platforms
         conn.execute(
             """
@@ -1483,6 +1499,121 @@ def update_facebook_group_ids(
         )
         conn.commit()
         return True
+
+
+# --- Twitter Token Functions ---
+
+
+def save_twitter_token(
+    access_token: str,
+    refresh_token: str,
+    expires_at: str,
+    user_id: str,
+    username: str,
+    display_name: str | None = None,
+    db_path: str = DB_PATH,
+) -> int:
+    """Save or update Twitter OAuth tokens. Returns the token record id."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute("SELECT id FROM twitter_tokens LIMIT 1")
+        existing = cur.fetchone()
+
+        if existing:
+            conn.execute(
+                """
+                UPDATE twitter_tokens SET
+                    access_token = ?,
+                    refresh_token = ?,
+                    expires_at = ?,
+                    user_id = ?,
+                    username = ?,
+                    display_name = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    access_token,
+                    refresh_token,
+                    expires_at,
+                    user_id,
+                    username,
+                    display_name,
+                    now,
+                    existing[0],
+                ),
+            )
+            conn.commit()
+            return existing[0]
+        else:
+            cur = conn.execute(
+                """
+                INSERT INTO twitter_tokens
+                    (access_token, refresh_token, expires_at, user_id, username,
+                     display_name, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    access_token,
+                    refresh_token,
+                    expires_at,
+                    user_id,
+                    username,
+                    display_name,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            return cur.lastrowid
+
+
+def get_twitter_token(db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
+    """Get the stored Twitter token (single user mode)."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM twitter_tokens LIMIT 1")
+        return cur.fetchone()
+
+
+def delete_twitter_token(db_path: str = DB_PATH) -> None:
+    """Delete all Twitter tokens (disconnect)."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM twitter_tokens")
+        conn.commit()
+
+
+def update_twitter_token(
+    access_token: str,
+    expires_at: str,
+    refresh_token: str | None = None,
+    db_path: str = DB_PATH,
+) -> None:
+    """Update the access token (and optionally refresh token) after a refresh."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        if refresh_token:
+            conn.execute(
+                """
+                UPDATE twitter_tokens SET
+                    access_token = ?,
+                    refresh_token = ?,
+                    expires_at = ?,
+                    updated_at = ?
+                """,
+                (access_token, refresh_token, expires_at, now),
+            )
+        else:
+            conn.execute(
+                """
+                UPDATE twitter_tokens SET
+                    access_token = ?,
+                    expires_at = ?,
+                    updated_at = ?
+                """,
+                (access_token, expires_at, now),
+            )
+        conn.commit()
 
 
 # --- Scheduled Posts Functions ---

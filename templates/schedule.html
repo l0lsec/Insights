@@ -55,7 +55,7 @@ th[onclick]:hover {
 <!-- Social Connections -->
 <div class="row mb-4">
     <!-- LinkedIn Connection Status -->
-    <div class="col-md-4 mb-3 mb-md-0">
+    <div class="col-md-3 mb-3 mb-md-0">
         <div class="card h-100">
             <div class="card-header d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #0077B5 0%, #005885 100%); color: white;">
                 <strong>💼 LinkedIn</strong>
@@ -73,7 +73,7 @@ th[onclick]:hover {
     </div>
     
     <!-- Threads Connection Status -->
-    <div class="col-md-4 mb-3 mb-md-0">
+    <div class="col-md-3 mb-3 mb-md-0">
         <div class="card h-100">
             <div class="card-header d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #000000 0%, #333333 100%); color: white;">
                 <strong>🧵 Threads</strong>
@@ -91,7 +91,7 @@ th[onclick]:hover {
     </div>
 
     <!-- Facebook Connection Status -->
-    <div class="col-md-4">
+    <div class="col-md-3 mb-3 mb-md-0">
         <div class="card h-100">
             <div class="card-header d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #1877F2 0%, #0d5bbf 100%); color: white;">
                 <strong>📘 Facebook</strong>
@@ -101,6 +101,24 @@ th[onclick]:hover {
                 <div id="facebook-status-content">
                     <div class="d-flex align-items-center">
                         <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
+                        <span>Checking connection...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Twitter/X Connection Status -->
+    <div class="col-md-3">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #1DA1F2 0%, #0d8ecf 100%); color: white;">
+                <strong>𝕏 Twitter</strong>
+                <span id="twitter-status-badge" class="badge bg-secondary">Checking...</span>
+            </div>
+            <div class="card-body">
+                <div id="twitter-status-content">
+                    <div class="d-flex align-items-center">
+                        <div class="spinner-border spinner-border-sm text-info me-2" role="status"></div>
                         <span>Checking connection...</span>
                     </div>
                 </div>
@@ -125,7 +143,7 @@ th[onclick]:hover {
                     </button>
                 </div>
                 <div class="row mt-2">
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <span class="badge" style="background-color: #0077B5;">💼 LinkedIn</span>
                         <span id="next-slot-linkedin">
                             {% if next_slots and next_slots.linkedin %}
@@ -135,7 +153,7 @@ th[onclick]:hover {
                             {% endif %}
                         </span>
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <span class="badge bg-dark">🧵 Threads</span>
                         <span id="next-slot-threads">
                             {% if next_slots and next_slots.threads %}
@@ -145,11 +163,21 @@ th[onclick]:hover {
                             {% endif %}
                         </span>
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <span class="badge" style="background-color: #1877F2;">📘 Facebook</span>
                         <span id="next-slot-facebook">
                             {% if next_slots and next_slots.facebook %}
                             {{ next_slots.facebook }}
+                            {% else %}
+                            <span class="text-muted">No slots available</span>
+                            {% endif %}
+                        </span>
+                    </div>
+                    <div class="col-md-3">
+                        <span class="badge" style="background-color: #1DA1F2;">𝕏 Twitter</span>
+                        <span id="next-slot-twitter">
+                            {% if next_slots and next_slots.twitter %}
+                            {{ next_slots.twitter }}
                             {% else %}
                             <span class="text-muted">No slots available</span>
                             {% endif %}
@@ -200,6 +228,10 @@ th[onclick]:hover {
                             <input class="form-check-input new-slot-platform-cb" type="checkbox" name="platforms" value="facebook" id="newSlotFacebook" onchange="updateNewSlotAllCheckbox()">
                             <label class="form-check-label small" for="newSlotFacebook">Facebook</label>
                         </div>
+                        <div class="form-check form-check-inline mb-0">
+                            <input class="form-check-input new-slot-platform-cb" type="checkbox" name="platforms" value="twitter" id="newSlotTwitter" onchange="updateNewSlotAllCheckbox()">
+                            <label class="form-check-label small" for="newSlotTwitter">Twitter</label>
+                        </div>
                     </div>
                 </div>
                 <div class="col-md-3">
@@ -240,6 +272,9 @@ th[onclick]:hover {
                                         {% endif %}
                                         {% if 'facebook' in slot.platforms %}
                                         <span class="badge" style="background-color: #1877F2;">Facebook</span>
+                                        {% endif %}
+                                        {% if 'twitter' in slot.platforms %}
+                                        <span class="badge" style="background-color: #1DA1F2;">Twitter</span>
                                         {% endif %}
                                     {% endif %}
                                 </td>
@@ -382,6 +417,7 @@ th[onclick]:hover {
                         <option value="linkedin" {% if platform_filter == 'linkedin' %}selected{% endif %}>💼 LinkedIn</option>
                         <option value="threads" {% if platform_filter == 'threads' %}selected{% endif %}>🧵 Threads</option>
                         <option value="facebook" {% if platform_filter == 'facebook' %}selected{% endif %}>📘 Facebook</option>
+                        <option value="twitter" {% if platform_filter == 'twitter' %}selected{% endif %}>𝕏 Twitter</option>
                     </select>
                     <div class="input-group input-group-sm" style="width: auto;">
                         <span class="input-group-text">From</span>
@@ -656,6 +692,14 @@ th[onclick]:hover {
                             <input class="form-check-input edit-slot-platform-cb" type="checkbox" value="threads" id="editSlotThreads" onchange="updateEditSlotAllCheckbox()">
                             <label class="form-check-label" for="editSlotThreads">Threads</label>
                         </div>
+                        <div class="form-check">
+                            <input class="form-check-input edit-slot-platform-cb" type="checkbox" value="facebook" id="editSlotFacebook" onchange="updateEditSlotAllCheckbox()">
+                            <label class="form-check-label" for="editSlotFacebook">Facebook</label>
+                        </div>
+                        <div class="form-check">
+                            <input class="form-check-input edit-slot-platform-cb" type="checkbox" value="twitter" id="editSlotTwitter" onchange="updateEditSlotAllCheckbox()">
+                            <label class="form-check-label" for="editSlotTwitter">Twitter</label>
+                        </div>
                     </div>
                     <small class="text-muted">Select specific platforms or leave "All Platforms" checked to use this slot for every platform.</small>
                 </div>
@@ -804,6 +848,7 @@ document.addEventListener('DOMContentLoaded', function() {
     checkLinkedInStatus();
     checkThreadsStatus();
     checkFacebookStatus();
+    checkTwitterStatus();
     // Auto-refresh next slots to ensure they're current
     refreshNextSlots();
     
@@ -878,11 +923,13 @@ function refreshNextSlots() {
     const linkedinSpan = document.getElementById('next-slot-linkedin');
     const threadsSpan = document.getElementById('next-slot-threads');
     const facebookSpan = document.getElementById('next-slot-facebook');
+    const twitterSpan = document.getElementById('next-slot-twitter');
     
     // Show loading state
     if (linkedinSpan) linkedinSpan.innerHTML = '<span class="text-muted">Loading...</span>';
     if (threadsSpan) threadsSpan.innerHTML = '<span class="text-muted">Loading...</span>';
     if (facebookSpan) facebookSpan.innerHTML = '<span class="text-muted">Loading...</span>';
+    if (twitterSpan) twitterSpan.innerHTML = '<span class="text-muted">Loading...</span>';
     
     // Fetch LinkedIn next slot
     fetch('/schedule/next-slot?platform=linkedin')
@@ -930,6 +977,22 @@ function refreshNextSlots() {
         })
         .catch(() => {
             if (facebookSpan) facebookSpan.innerHTML = '<span class="text-muted">Error loading</span>';
+        });
+
+    // Fetch Twitter next slot
+    fetch('/schedule/next-slot?platform=twitter')
+        .then(response => response.json())
+        .then(data => {
+            if (twitterSpan) {
+                if (data.available && data.display) {
+                    twitterSpan.textContent = data.display;
+                } else {
+                    twitterSpan.innerHTML = '<span class="text-muted">No slots available</span>';
+                }
+            }
+        })
+        .catch(() => {
+            if (twitterSpan) twitterSpan.innerHTML = '<span class="text-muted">Error loading</span>';
         });
 }
 
@@ -1363,6 +1426,74 @@ function disconnectFacebook() {
         });
 }
 
+// Check Twitter/X connection status
+function checkTwitterStatus() {
+    fetch('{{ url_for("twitter_status") }}')
+        .then(response => response.json())
+        .then(data => {
+            const badge = document.getElementById('twitter-status-badge');
+            const content = document.getElementById('twitter-status-content');
+
+            if (data.connected) {
+                badge.className = 'badge bg-success';
+                badge.textContent = 'Connected';
+                content.innerHTML = `
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div>
+                            <strong>@${data.username || data.display_name || 'X User'}</strong>
+                        </div>
+                        <div>
+                            <button class="btn btn-sm btn-outline-danger" onclick="disconnectTwitter()">
+                                Disconnect
+                            </button>
+                        </div>
+                    </div>
+                `;
+            } else if (data.configured) {
+                badge.className = 'badge bg-warning text-dark';
+                badge.textContent = 'Not Connected';
+                content.innerHTML = `
+                    <div class="d-flex justify-content-between align-items-center">
+                        <span>${data.message || 'Click to connect your X account'}</span>
+                        <a href="{{ url_for('twitter_auth') }}" class="btn btn-info" style="color: white;">
+                            Connect X
+                        </a>
+                    </div>
+                `;
+            } else {
+                badge.className = 'badge bg-secondary';
+                badge.textContent = 'Not Configured';
+                content.innerHTML = `
+                    <div class="alert alert-warning mb-0">
+                        <strong>Twitter Not Configured</strong><br>
+                        <small>${data.message || 'Set TWITTER_CLIENT_ID and TWITTER_CLIENT_SECRET environment variables.'}</small>
+                    </div>
+                `;
+            }
+        })
+        .catch(error => {
+            console.error('Error checking Twitter status:', error);
+            document.getElementById('twitter-status-badge').textContent = 'Error';
+            document.getElementById('twitter-status-content').innerHTML =
+                '<span class="text-danger">Failed to check Twitter status</span>';
+        });
+}
+
+function disconnectTwitter() {
+    if (!confirm('Are you sure you want to disconnect X/Twitter?')) return;
+
+    fetch('{{ url_for("twitter_disconnect") }}', { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                checkTwitterStatus();
+            }
+        })
+        .catch(error => {
+            alert('Error: ' + error.message);
+        });
+}
+
 function postNow(postId, platform, btn) {
     if (!confirm(`Post this ${platform} content immediately?`)) return;
     
@@ -1762,6 +1893,8 @@ function openEditSlotModal(slotId, dayOfWeek, timeSlot, platforms) {
     document.getElementById('editSlotAllPlatforms').checked = isAllPlatforms;
     document.getElementById('editSlotLinkedin').checked = !isAllPlatforms && platforms.includes('linkedin');
     document.getElementById('editSlotThreads').checked = !isAllPlatforms && platforms.includes('threads');
+    document.getElementById('editSlotFacebook').checked = !isAllPlatforms && platforms.includes('facebook');
+    document.getElementById('editSlotTwitter').checked = !isAllPlatforms && platforms.includes('twitter');
     
     const modal = new bootstrap.Modal(document.getElementById('editSlotModal'));
     modal.show();

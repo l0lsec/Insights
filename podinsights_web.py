@@ -74,6 +74,11 @@ from database import (
     update_facebook_token,
     update_facebook_page_selection,
     update_facebook_group_ids,
+    # Twitter token functions
+    save_twitter_token,
+    get_twitter_token,
+    delete_twitter_token,
+    update_twitter_token,
     # Scheduled posts functions
     add_scheduled_post,
     get_scheduled_post,
@@ -184,6 +189,12 @@ from facebook_client import (
     get_facebook_client,
     calculate_token_expiry as facebook_calculate_token_expiry,
     is_token_expired as facebook_is_token_expired,
+)
+from twitter_client import (
+    TwitterClient,
+    get_twitter_client,
+    calculate_token_expiry as twitter_calculate_token_expiry,
+    is_token_expired as twitter_is_token_expired,
 )
 from stock_images import (
     search_stock_images,
@@ -2973,6 +2984,322 @@ def compose_post_to_facebook(post_id: int):
 
 
 # ============================================================================
+# Twitter/X Integration Routes
+# ============================================================================
+
+
+@app.route('/twitter/status')
+def twitter_status():
+    """Check Twitter/X connection status."""
+    client = get_twitter_client()
+    token = get_twitter_token()
+
+    if not client.is_configured():
+        return jsonify({
+            "connected": False,
+            "configured": False,
+            "message": "Twitter credentials not configured. Set TWITTER_CLIENT_ID and TWITTER_CLIENT_SECRET.",
+        })
+
+    if not token:
+        return jsonify({
+            "connected": False,
+            "configured": True,
+            "message": "Not connected to X/Twitter",
+        })
+
+    if twitter_is_token_expired(token['expires_at']):
+        if token['refresh_token']:
+            try:
+                new_token = client.refresh_access_token(token['refresh_token'])
+                expires_at = twitter_calculate_token_expiry(new_token.get('expires_in', 7200))
+                update_twitter_token(
+                    access_token=new_token['access_token'],
+                    expires_at=expires_at,
+                    refresh_token=new_token.get('refresh_token'),
+                )
+                return jsonify({
+                    "connected": True,
+                    "configured": True,
+                    "username": token['username'],
+                    "display_name": token['display_name'],
+                    "user_id": token['user_id'],
+                    "message": "Connected (token refreshed)",
+                })
+            except Exception as e:
+                app.logger.warning("Failed to refresh Twitter token: %s", e)
+                return jsonify({
+                    "connected": False,
+                    "configured": True,
+                    "message": "Token expired. Please reconnect.",
+                })
+        else:
+            return jsonify({
+                "connected": False,
+                "configured": True,
+                "message": "Token expired and no refresh token. Please reconnect.",
+            })
+
+    return jsonify({
+        "connected": True,
+        "configured": True,
+        "username": token['username'],
+        "display_name": token['display_name'],
+        "user_id": token['user_id'],
+    })
+
+
+@app.route('/twitter/auth')
+def twitter_auth():
+    """Start Twitter OAuth 2.0 PKCE flow."""
+    client = get_twitter_client()
+
+    if not client.is_configured():
+        return jsonify({"error": "Twitter not configured"}), 400
+
+    auth_url, state, code_verifier = client.get_authorization_url()
+    session['twitter_oauth_state'] = state
+    session['twitter_code_verifier'] = code_verifier
+
+    return redirect(auth_url)
+
+
+@app.route('/twitter/callback')
+def twitter_callback():
+    """Handle Twitter OAuth 2.0 callback."""
+    error = request.args.get('error')
+    if error:
+        error_desc = request.args.get('error_description', 'Unknown error')
+        app.logger.error("Twitter OAuth error: %s - %s", error, error_desc)
+        return render_template(
+            'article_error.html',
+            error=f"Twitter authorization failed: {error_desc}",
+        )
+
+    code = request.args.get('code')
+    state = request.args.get('state')
+
+    stored_state = session.pop('twitter_oauth_state', None)
+    code_verifier = session.pop('twitter_code_verifier', None)
+
+    if not stored_state or stored_state != state:
+        app.logger.warning("Twitter OAuth state mismatch")
+        return render_template(
+            'article_error.html',
+            error="Security verification failed. Please try again.",
+        )
+
+    if not code or not code_verifier:
+        return render_template(
+            'article_error.html',
+            error="No authorization code or PKCE verifier. Please try again.",
+        )
+
+    client = get_twitter_client()
+
+    try:
+        token_data = client.exchange_code_for_token(code, code_verifier)
+        access_token = token_data['access_token']
+        refresh_token = token_data.get('refresh_token', '')
+        expires_in = token_data.get('expires_in', 7200)
+
+        expires_at = twitter_calculate_token_expiry(expires_in)
+
+        user_info = client.get_user_info(access_token)
+
+        if user_info:
+            user_id = user_info.get('id', '')
+            username = user_info.get('username', '')
+            display_name = user_info.get('name', username or 'X User')
+        else:
+            user_id = ''
+            username = ''
+            display_name = 'X User'
+
+        save_twitter_token(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            expires_at=expires_at,
+            user_id=user_id,
+            username=username,
+            display_name=display_name,
+        )
+
+        app.logger.info("Twitter connected for user: @%s", username)
+
+        return redirect(url_for('view_articles') + '?twitter=connected')
+
+    except Exception as e:
+        app.logger.exception("Twitter OAuth exchange failed")
+        return render_template(
+            'article_error.html',
+            error=f"Failed to connect to X/Twitter: {str(e)}",
+        )
+
+
+@app.route('/twitter/disconnect', methods=['POST'])
+def twitter_disconnect():
+    """Disconnect Twitter/X account."""
+    delete_twitter_token()
+    return jsonify({"success": True, "message": "Twitter disconnected"})
+
+
+@app.route('/twitter/post/<int:post_id>', methods=['POST'])
+def twitter_post_social(post_id: int):
+    """Post a social media post to Twitter/X immediately."""
+    post = get_social_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    token = get_twitter_token()
+    if not token:
+        return jsonify({"error": "Twitter not connected"}), 401
+
+    if twitter_is_token_expired(token['expires_at']):
+        if token['refresh_token']:
+            client = get_twitter_client()
+            try:
+                new_token = client.refresh_access_token(token['refresh_token'])
+                update_twitter_token(
+                    access_token=new_token['access_token'],
+                    expires_at=twitter_calculate_token_expiry(new_token.get('expires_in', 7200)),
+                    refresh_token=new_token.get('refresh_token'),
+                )
+                token = get_twitter_token()
+            except Exception as e:
+                app.logger.warning("Failed to refresh Twitter token: %s", e)
+                return jsonify({"error": "Twitter token expired. Please reconnect."}), 401
+        else:
+            return jsonify({"error": "Twitter token expired. Please reconnect."}), 401
+
+    client = get_twitter_client()
+
+    try:
+        image_url = post['image_url'] if 'image_url' in post.keys() else None
+
+        if image_url:
+            app.logger.info("Posting to Twitter with image: %s", image_url)
+            result = client.create_image_post(
+                access_token=token['access_token'],
+                text=post['content'],
+                image_url=image_url,
+            )
+        else:
+            result = client.create_post(
+                access_token=token['access_token'],
+                text=post['content'],
+            )
+
+        if result['success']:
+            mark_social_post_used(post_id, True)
+
+            now = datetime.now().isoformat(timespec='seconds')
+            add_scheduled_post(
+                social_post_id=post_id,
+                article_id=post['article_id'] if 'article_id' in post.keys() else None,
+                post_type='social',
+                platform='twitter',
+                scheduled_for=now,
+                status='posted',
+                linkedin_post_urn=result.get('permalink'),
+            )
+
+            return jsonify({
+                "success": True,
+                "tweet_id": result.get('tweet_id'),
+                "permalink": result.get('permalink'),
+                "message": "Posted to X/Twitter successfully!",
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": result.get('error', 'Unknown error'),
+            }), 400
+
+    except Exception as e:
+        app.logger.exception("Failed to post to Twitter")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/compose/post/<int:post_id>/twitter', methods=['POST'])
+def compose_post_to_twitter(post_id: int):
+    """Post a standalone post to Twitter/X immediately."""
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    token = get_twitter_token()
+    if not token:
+        return jsonify({"error": "Twitter not connected. Please connect your account first."}), 401
+
+    if twitter_is_token_expired(token['expires_at']):
+        if token['refresh_token']:
+            client = get_twitter_client()
+            try:
+                new_token = client.refresh_access_token(token['refresh_token'])
+                update_twitter_token(
+                    access_token=new_token['access_token'],
+                    expires_at=twitter_calculate_token_expiry(new_token.get('expires_in', 7200)),
+                    refresh_token=new_token.get('refresh_token'),
+                )
+                token = get_twitter_token()
+            except Exception as e:
+                app.logger.warning("Failed to refresh Twitter token: %s", e)
+                return jsonify({"error": "Twitter token expired. Please reconnect."}), 401
+        else:
+            return jsonify({"error": "Twitter token expired. Please reconnect."}), 401
+
+    client = get_twitter_client()
+
+    try:
+        image_url = post['image_url'] if 'image_url' in post.keys() else None
+
+        if image_url:
+            app.logger.info("Posting to Twitter with image: %s", image_url)
+            result = client.create_image_post(
+                access_token=token['access_token'],
+                text=post['content'],
+                image_url=image_url,
+            )
+        else:
+            result = client.create_post(
+                access_token=token['access_token'],
+                text=post['content'],
+            )
+
+        if result['success']:
+            mark_standalone_post_used(post_id, True)
+
+            now = datetime.now().isoformat(timespec='seconds')
+            add_scheduled_post(
+                social_post_id=None,
+                article_id=None,
+                standalone_post_id=post_id,
+                post_type='standalone',
+                platform='twitter',
+                scheduled_for=now,
+                status='posted',
+                linkedin_post_urn=result.get('permalink'),
+            )
+
+            return jsonify({
+                "success": True,
+                "tweet_id": result.get('tweet_id'),
+                "permalink": result.get('permalink'),
+                "message": "Posted to X/Twitter successfully!",
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": result.get('error', 'Unknown error'),
+            }), 400
+
+    except Exception as e:
+        app.logger.exception("Failed to post to Twitter")
+        return jsonify({"error": str(e)}), 500
+
+
+# ============================================================================
 # Scheduled Posts Routes
 # ============================================================================
 
@@ -5721,6 +6048,7 @@ def scheduled_post_worker() -> None:
             linkedin_token = None
             threads_token = None
             facebook_token = None
+            twitter_token = None
             redistributed_platforms = set()  # Track platforms we've redistributed
             
             for post in pending:
@@ -5949,6 +6277,85 @@ def scheduled_post_worker() -> None:
                                     error_message=f'{error_msg} (max retries exhausted)',
                                 )
                                 app.logger.error("Scheduled Facebook post %d failed permanently: %s", post['id'], error_msg)
+                    
+                    elif platform == 'twitter':
+                        if twitter_token is None:
+                            twitter_token = get_twitter_token()
+                        
+                        if not twitter_token:
+                            app.logger.warning("Scheduled Twitter post %d due but Twitter not connected", post['id'])
+                            update_scheduled_post_status(
+                                post['id'],
+                                status='failed',
+                                error_message='Twitter not connected',
+                            )
+                            continue
+                        
+                        if twitter_is_token_expired(twitter_token['expires_at']):
+                            tw_client = get_twitter_client()
+                            try:
+                                new_token = tw_client.refresh_access_token(twitter_token['refresh_token'])
+                                expires_at = twitter_calculate_token_expiry(new_token.get('expires_in', 7200))
+                                update_twitter_token(
+                                    access_token=new_token['access_token'],
+                                    expires_at=expires_at,
+                                    refresh_token=new_token.get('refresh_token'),
+                                )
+                                twitter_token = get_twitter_token()
+                            except Exception as e:
+                                app.logger.error("Failed to refresh Twitter token: %s", e)
+                                update_scheduled_post_status(
+                                    post['id'],
+                                    status='failed',
+                                    error_message='Twitter token expired',
+                                )
+                                continue
+                        
+                        tw_client = get_twitter_client()
+                        
+                        if image_url:
+                            app.logger.info("Posting Twitter with image: %s", image_url)
+                            result = tw_client.create_image_post(
+                                access_token=twitter_token['access_token'],
+                                text=content[:280],
+                                image_url=image_url,
+                            )
+                        else:
+                            result = tw_client.create_post(
+                                access_token=twitter_token['access_token'],
+                                text=content[:280],
+                            )
+                        
+                        if result['success']:
+                            update_scheduled_post_status(
+                                post['id'],
+                                status='posted',
+                                linkedin_post_urn=result.get('permalink'),
+                            )
+                            if post['social_post_id']:
+                                mark_social_post_used(post['social_post_id'], True)
+                            if post['standalone_post_id']:
+                                mark_standalone_post_used(post['standalone_post_id'], True)
+                            app.logger.info("Scheduled Twitter post %d published successfully", post['id'])
+                        else:
+                            error_msg = str(result.get('error', 'Unknown error'))[:500]
+                            retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
+                            if retry_count < MAX_RETRIES:
+                                increment_retry_count(post['id'])
+                                redistribute_scheduled_posts(platform)
+                                redistributed_platforms.add(platform)
+                                app.logger.warning(
+                                    "Twitter post %d failed (%s), rescheduled to next slot (retry %d/%d)",
+                                    post['id'], error_msg, retry_count + 1, MAX_RETRIES,
+                                )
+                                break
+                            else:
+                                update_scheduled_post_status(
+                                    post['id'],
+                                    status='failed',
+                                    error_message=f'{error_msg} (max retries exhausted)',
+                                )
+                                app.logger.error("Scheduled Twitter post %d failed permanently: %s", post['id'], error_msg)
                     
                     else:
                         # Handle LinkedIn posting (default)
