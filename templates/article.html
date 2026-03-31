@@ -249,6 +249,22 @@
                                     <button class="btn btn-outline-warning" onclick="openScheduleModal({{ post.id }}, 'social', 'facebook')" title="Schedule for Specific Time">
                                         📅
                                     </button>
+                                    {% elif platform == 'twitter' %}
+                                    <button class="btn btn-outline-info twitter-post-btn" onclick="postToTwitter({{ post.id }}, this)" title="Post to X Now" data-post-id="{{ post.id }}">
+                                        𝕏
+                                    </button>
+                                    {% if post.scheduled and post.scheduled.twitter %}
+                                    <button class="btn btn-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'social', 'twitter', this, true)" title="Click to remove from queue (Scheduled: {{ post.scheduled.twitter }})" data-post-id="{{ post.id }}" data-platform="twitter" data-queued="true">
+                                        ✅
+                                    </button>
+                                    {% else %}
+                                    <button class="btn btn-outline-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'social', 'twitter', this, false)" title="Add to Queue" data-post-id="{{ post.id }}" data-platform="twitter" data-queued="false">
+                                        ➕
+                                    </button>
+                                    {% endif %}
+                                    <button class="btn btn-outline-warning" onclick="openScheduleModal({{ post.id }}, 'social', 'twitter')" title="Schedule for Specific Time">
+                                        📅
+                                    </button>
                                     {% endif %}
                                     <button class="btn btn-outline-danger" onclick="deletePost({{ post.id }}, this)" title="Delete">
                                         🗑️
@@ -1487,6 +1503,86 @@ function postToFacebook(postId, btn) {
 
                 setTimeout(() => {
                     btn.innerHTML = '📘';
+                    btn.disabled = false;
+                }, 2000);
+            } else {
+                btn.innerHTML = '❌';
+                alert('Failed to post: ' + (data.error ? JSON.stringify(data.error) : 'Unknown error'));
+                setTimeout(() => {
+                    btn.innerHTML = originalHtml;
+                    btn.disabled = false;
+                }, 2000);
+            }
+        })
+        .catch(error => {
+            btn.innerHTML = '❌';
+            alert('Error: ' + error.message);
+            setTimeout(() => {
+                btn.innerHTML = originalHtml;
+                btn.disabled = false;
+            }, 2000);
+        });
+}
+
+// ============================================================================
+// Twitter/X Integration Functions
+// ============================================================================
+
+let twitterConnected = false;
+
+document.addEventListener('DOMContentLoaded', function() {
+    checkTwitterStatus();
+});
+
+function checkTwitterStatus() {
+    fetch('{{ url_for("twitter_status") }}')
+        .then(response => response.json())
+        .then(data => {
+            twitterConnected = data.connected;
+        })
+        .catch(error => {
+            console.error('Error checking Twitter status:', error);
+        });
+}
+
+function postToTwitter(postId, btn) {
+    if (!twitterConnected) {
+        alert('Please connect X/Twitter first. Go to Command Center to connect.');
+        return;
+    }
+
+    if (!confirm('Post this to X now?')) return;
+
+    const originalHtml = btn.innerHTML;
+    btn.innerHTML = '⏳';
+    btn.disabled = true;
+
+    fetch(`/twitter/post/${postId}`, { method: 'POST' })
+        .then(response => response.json().then(data => ({ ok: response.ok, data })))
+        .then(({ ok, data }) => {
+            if (data.success) {
+                btn.innerHTML = '✅';
+                btn.classList.remove('btn-outline-info');
+                btn.classList.add('btn-success');
+
+                const postItem = btn.closest('.post-item');
+                const usedBadge = postItem.querySelector('.used-badge');
+                if (!usedBadge) {
+                    const badgeContainer = postItem.querySelector('.d-flex.align-items-center.gap-2');
+                    const newBadge = document.createElement('span');
+                    newBadge.className = 'badge bg-success used-badge';
+                    newBadge.textContent = '✓ Used';
+                    badgeContainer.appendChild(newBadge);
+                }
+
+                const twBadge = document.createElement('span');
+                twBadge.className = 'badge ms-1';
+                twBadge.style.backgroundColor = '#1DA1F2';
+                twBadge.textContent = '𝕏 Posted';
+                btn.parentNode.insertBefore(twBadge, btn.nextSibling);
+
+                setTimeout(() => {
+                    btn.innerHTML = '𝕏';
                     btn.disabled = false;
                 }, 2000);
             } else {

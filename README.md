@@ -10,7 +10,7 @@
 
 ---
 
-Insights is an AI-powered content platform that turns RSS feeds, podcasts, YouTube videos, articles, and URLs into summaries, generated articles, and platform-ready social media posts. It combines state-of-the-art speech recognition with OpenAI to process audio, video, and text content, then helps you publish and schedule posts across LinkedIn, Threads, and more — all from a single web interface or CLI.
+Insights is an AI-powered content platform that turns RSS feeds, podcasts, YouTube videos, articles, and URLs into summaries, generated articles, and platform-ready social media posts. It combines state-of-the-art speech recognition with OpenAI to process audio, video, and text content, then helps you publish and schedule posts across LinkedIn, Threads, Facebook, and X/Twitter — all from a single web interface or CLI.
 
 What started as a podcast transcription tool has grown into a complete content pipeline: ingest any source — RSS feeds, YouTube channels, individual videos, or raw text — let AI do the heavy lifting, and push polished posts out on your schedule.
 
@@ -40,6 +40,8 @@ What started as a podcast transcription tool has grown into a complete content p
 #### Publishing & Scheduling
 - **LinkedIn Integration** - OAuth-based posting with rich link previews and image support
 - **Threads Integration** - OAuth-based posting with text and image support
+- **Facebook Integration** - OAuth-based posting to Facebook Pages with text and image support (In Development)
+- **X/Twitter Integration** - OAuth 2.0 with PKCE for posting text and images (pay-per-use media uploads)
 - **Time Slot Management** - Configure recurring posting times by day of week and platform
 - **Auto-Queue** - Posts automatically slot into the next available time
 - **Daily Limits** - Set per-platform daily posting caps
@@ -62,7 +64,7 @@ What started as a podcast transcription tool has grown into a complete content p
 - Researchers extracting structured summaries and action items from interviews or video lectures
 - Social media managers generating and queuing posts from URLs, topics, or existing text
 - Business professionals converting recorded meetings into JIRA tickets
-- Thought leaders building content queues across LinkedIn, Threads, and other platforms
+- Thought leaders building content queues across LinkedIn, Threads, Facebook, X/Twitter, and other platforms
 - Podcast fans who want quick summaries before committing to a full episode
 - YouTube viewers who prefer reading transcripts and summaries over watching long-form videos
 
@@ -121,6 +123,8 @@ View and manage your posting queue with drag-and-drop reordering, status/platfor
 | `database.py` | SQLite database operations for feeds, episodes, articles, posts, schedules, and more |
 | `linkedin_client.py` | LinkedIn API client - OAuth flow, token management, and post publishing |
 | `threads_client.py` | Threads (Meta) API client - OAuth flow, token management, and post publishing |
+| `facebook_client.py` | Facebook Pages API client - OAuth flow, page token management, and post publishing |
+| `twitter_client.py` | X/Twitter API v2 client - OAuth 2.0 PKCE flow, token management, text and image posting |
 | `stock_images.py` | Stock image search across Unsplash, Pexels, and Pixabay with keyword extraction |
 | `templates/` | Flask HTML templates for all pages (feeds, articles, compose, schedule, etc.) |
 | `static/` | Static assets (logo, favicon) |
@@ -238,6 +242,22 @@ All variables can be set in a `.env` file in the project root. See `.env.example
 | `THREADS_REDIRECT_URI` | OAuth callback URL (must be HTTPS, e.g., `https://your-domain.com/threads/callback`) |
 | `THREADS_SCOPES` | OAuth scopes (default: `threads_basic,threads_content_publish`) |
 
+### Facebook Integration
+
+| Variable | Description |
+|----------|-------------|
+| `FACEBOOK_APP_ID` | App ID from the [Meta Developer Portal](https://developers.facebook.com/) |
+| `FACEBOOK_APP_SECRET` | App Secret from your Meta app |
+| `FACEBOOK_REDIRECT_URI` | OAuth callback URL (default: `http://localhost:5001/facebook/callback`) |
+
+### X/Twitter Integration
+
+| Variable | Description |
+|----------|-------------|
+| `TWITTER_CLIENT_ID` | Client ID from the [X Developer Portal](https://developer.x.com/) |
+| `TWITTER_CLIENT_SECRET` | Client Secret from your X app |
+| `TWITTER_REDIRECT_URI` | OAuth callback URL (default: `http://localhost:5001/twitter/callback`) |
+
 ### Stock Images (all free)
 
 | Variable | Rate Limit | Sign Up |
@@ -254,7 +274,7 @@ All variables can be set in a `.env` file in the project root. See `.env.example
 | `CLOUDINARY_API_KEY` | Cloudinary API key |
 | `CLOUDINARY_API_SECRET` | Cloudinary API secret |
 
-> Cloudinary provides publicly accessible image URLs needed by Threads and other platforms. Sign up free at [cloudinary.com](https://cloudinary.com).
+> Cloudinary provides publicly accessible image URLs needed by Threads, Facebook, X/Twitter, and other platforms. Sign up free at [cloudinary.com](https://cloudinary.com).
 
 ## Usage (CLI)
 
@@ -351,7 +371,7 @@ The **Schedule** page provides full queue management for automated publishing:
 **Queue Features:**
 - **Drag-and-drop reordering** - Rearrange posts by dragging the grip handle
 - **Filter by status** - View pending, posted, failed, or cancelled posts
-- **Filter by platform** - Show only LinkedIn or Threads posts
+- **Filter by platform** - Show only LinkedIn, Threads, Facebook, or X/Twitter posts
 - **Post Now** - Immediately publish any pending post (remaining posts auto-redistribute)
 - **Edit time** - Change the scheduled time for any pending post
 - **Bulk actions** - Select and delete multiple posts at once
@@ -396,6 +416,30 @@ Posts containing URLs automatically include rich link previews with title, descr
 > ngrok http 5001
 > ```
 > Then set `THREADS_REDIRECT_URI` to the ngrok HTTPS URL and add it to your Meta app settings.
+
+### Posting to Facebook
+
+#### Setup
+
+1. Create a Meta App at the [Meta Developer Portal](https://developers.facebook.com/apps/) (or reuse your Threads app)
+2. Add the **Facebook Login** product and request `pages_manage_posts` and `pages_read_engagement` permissions
+3. Add `http://localhost:5001/facebook/callback` as an OAuth redirect URI
+4. Set `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, and `FACEBOOK_REDIRECT_URI` in your `.env`
+5. Click **Connect Facebook** in the web UI and authorize the Page you want to post to
+
+Posts are published to the selected Facebook Page with text and optional image attachments.
+
+### Posting to X/Twitter
+
+#### Setup
+
+1. Create a project and app at the [X Developer Portal](https://developer.x.com/)
+2. Enable **OAuth 2.0** with the **PKCE** type and set the callback URL to `http://localhost:5001/twitter/callback`
+3. Request at minimum the `tweet.read`, `tweet.write`, `users.read`, and `offline.access` scopes
+4. Set `TWITTER_CLIENT_ID`, `TWITTER_CLIENT_SECRET`, and `TWITTER_REDIRECT_URI` in your `.env`
+5. Click **Connect X** in the web UI
+
+X/Twitter uses the v2 API with pay-per-use pricing. Text posts cost $0.01 each. Image uploads use the chunked media upload endpoint (max 5 MB per image).
 
 ## Credits
 
