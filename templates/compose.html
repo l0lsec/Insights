@@ -96,9 +96,7 @@
     .platform-checkbox-box[data-platform="linkedin"] { --platform-color: #0077B5; --platform-bg: #0077B5; }
     .platform-checkbox-box[data-platform="threads"] { --platform-color: #000; --platform-bg: #000; }
     .platform-checkbox-box[data-platform="twitter"] { --platform-color: #1DA1F2; --platform-bg: #1DA1F2; }
-    .platform-checkbox-box[data-platform="bluesky"] { --platform-color: #0085ff; --platform-bg: #0085ff; }
     .platform-checkbox-box[data-platform="facebook"] { --platform-color: #1877F2; --platform-bg: #1877F2; }
-    .platform-checkbox-box[data-platform="mastodon"] { --platform-color: #6364ff; --platform-bg: #6364ff; }
     
     /* Tone selector */
     .tone-option {
@@ -202,8 +200,6 @@
         --platform-twitter-color: #1DA1F2;
         --platform-facebook-color: #1877F2;
         --platform-threads-color: #000000;
-        --platform-bluesky-color: #0085ff;
-        --platform-mastodon-color: #6364ff;
         --platform-instagram-color: #E4405F;
     }
     
@@ -705,20 +701,10 @@
                         <input type="checkbox" class="d-none" value="twitter" id="platform-twitter" checked>
                         𝕏 Twitter
                     </label>
-                    <label class="platform-checkbox-box" data-platform="bluesky">
-                        <span class="check-indicator"></span>
-                        <input type="checkbox" class="d-none" value="bluesky" id="platform-bluesky">
-                        🦋 Bluesky
-                    </label>
                     <label class="platform-checkbox-box" data-platform="facebook">
                         <span class="check-indicator"></span>
                         <input type="checkbox" class="d-none" value="facebook" id="platform-facebook">
                         📘 Facebook
-                    </label>
-                    <label class="platform-checkbox-box" data-platform="mastodon">
-                        <span class="check-indicator"></span>
-                        <input type="checkbox" class="d-none" value="mastodon" id="platform-mastodon">
-                        🐘 Mastodon
                     </label>
                 </div>
             </div>
@@ -958,7 +944,7 @@
                 <div class="social-copy-header d-flex justify-content-between align-items-center" style="background-color: var(--platform-{{ platform }}-color, #6c757d)">
                     <div>
                         <span class="social-icon">
-                            {% if platform == 'twitter' %}𝕏{% elif platform == 'linkedin' %}💼{% elif platform == 'facebook' %}📘{% elif platform == 'threads' %}🧵{% elif platform == 'bluesky' %}🦋{% elif platform == 'mastodon' %}🐘{% elif platform == 'instagram' %}📷{% else %}📱{% endif %}
+                            {% if platform == 'twitter' %}𝕏{% elif platform == 'linkedin' %}💼{% elif platform == 'facebook' %}📘{% elif platform == 'threads' %}🧵{% elif platform == 'instagram' %}📷{% else %}📱{% endif %}
                         </span>
                         <span class="social-platform">{{ platform|capitalize }}</span>
                         <span class="badge bg-light text-dark ms-2">{{ posts|length }} post{% if posts|length != 1 %}s{% endif %}</span>
@@ -1271,12 +1257,12 @@
     <div class="card-body">
         <p class="text-muted mb-3">No posts yet. Generate posts above or write one manually for a platform:</p>
         <div id="saved-posts-container">
-            {% for platform in ['linkedin', 'threads', 'twitter', 'bluesky', 'facebook', 'mastodon'] %}
+            {% for platform in ['linkedin', 'threads', 'twitter', 'facebook'] %}
             <div class="social-copy-card mb-3" data-platform="{{ platform }}">
                 <div class="social-copy-header d-flex justify-content-between align-items-center" style="background-color: var(--platform-{{ platform }}-color, #6c757d)">
                     <div>
                         <span class="social-icon">
-                            {% if platform == 'twitter' %}𝕏{% elif platform == 'linkedin' %}💼{% elif platform == 'facebook' %}📘{% elif platform == 'threads' %}🧵{% elif platform == 'bluesky' %}🦋{% elif platform == 'mastodon' %}🐘{% else %}📱{% endif %}
+                            {% if platform == 'twitter' %}𝕏{% elif platform == 'linkedin' %}💼{% elif platform == 'facebook' %}📘{% elif platform == 'threads' %}🧵{% elif platform == 'instagram' %}📷{% else %}📱{% endif %}
                         </span>
                         <span class="social-platform">{{ platform|capitalize }}</span>
                     </div>
@@ -4804,9 +4790,7 @@ const platformCharLimits = {
     twitter: 280,
     threads: 500,
     linkedin: 3000,
-    bluesky: 300,
     facebook: 5000,
-    mastodon: 500,
 };
 
 function showAddPostForm(platform) {

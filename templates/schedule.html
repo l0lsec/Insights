@@ -44,6 +44,16 @@ th[onclick]:hover {
     margin-left: 4px;
     opacity: 0.7;
 }
+/* Social connection cards */
+.social-card-body {
+    overflow: hidden;
+}
+.social-card-body .truncated-text {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 </style>
 <nav aria-label="breadcrumb" class="mb-3">
     <ol class="breadcrumb">
@@ -61,7 +71,7 @@ th[onclick]:hover {
                 <strong>💼 LinkedIn</strong>
                 <span id="linkedin-status-badge" class="badge bg-secondary">Checking...</span>
             </div>
-            <div class="card-body">
+            <div class="card-body social-card-body">
                 <div id="linkedin-status-content">
                     <div class="d-flex align-items-center">
                         <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
@@ -79,7 +89,7 @@ th[onclick]:hover {
                 <strong>🧵 Threads</strong>
                 <span id="threads-status-badge" class="badge bg-secondary">Checking...</span>
             </div>
-            <div class="card-body">
+            <div class="card-body social-card-body">
                 <div id="threads-status-content">
                     <div class="d-flex align-items-center">
                         <div class="spinner-border spinner-border-sm text-dark me-2" role="status"></div>
@@ -97,7 +107,7 @@ th[onclick]:hover {
                 <strong>📘 Facebook</strong>
                 <span id="facebook-status-badge" class="badge bg-secondary">Checking...</span>
             </div>
-            <div class="card-body">
+            <div class="card-body social-card-body">
                 <div id="facebook-status-content">
                     <div class="d-flex align-items-center">
                         <div class="spinner-border spinner-border-sm text-primary me-2" role="status"></div>
@@ -115,7 +125,7 @@ th[onclick]:hover {
                 <strong>𝕏 Twitter</strong>
                 <span id="twitter-status-badge" class="badge bg-secondary">Checking...</span>
             </div>
-            <div class="card-body">
+            <div class="card-body social-card-body">
                 <div id="twitter-status-content">
                     <div class="d-flex align-items-center">
                         <div class="spinner-border spinner-border-sm text-info me-2" role="status"></div>
@@ -286,7 +296,7 @@ th[onclick]:hover {
                                     {% endif %}
                                 </td>
                                 <td>
-                                    <button class="btn btn-xs btn-outline-primary edit-slot-btn" data-slot-id="{{ slot.id }}" data-day="{{ slot.day_of_week }}" data-time="{{ slot.time_slot }}" data-platforms="{{ slot.platforms | tojson | e }}" title="Edit">
+                                    <button class="btn btn-xs btn-outline-primary edit-slot-btn" data-slot-id="{{ slot.id }}" data-day="{{ slot.day_of_week }}" data-time="{{ slot.time_slot }}" data-platforms='{{ slot.platforms | tojson }}' title="Edit">
                                         ✏️
                                     </button>
                                     <button class="btn btn-xs btn-outline-secondary toggle-slot-btn" data-slot-id="{{ slot.id }}" title="Toggle">
@@ -405,14 +415,14 @@ th[onclick]:hover {
             <div class="d-flex align-items-center gap-2 flex-wrap">
                 <!-- Filters -->
                 <form method="get" class="d-flex align-items-center gap-2 flex-wrap" id="filter-form">
-                    <select name="status" class="form-select form-select-sm" style="width: auto;" onchange="this.form.submit()">
+                    <select name="status" class="form-select form-select-sm" style="width: auto;" onchange="refreshQueue()">
                         <option value="">All Statuses</option>
                         <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>⏳ Pending</option>
                         <option value="posted" {% if status_filter == 'posted' %}selected{% endif %}>✅ Posted</option>
                         <option value="failed" {% if status_filter == 'failed' %}selected{% endif %}>❌ Failed</option>
                         <option value="cancelled" {% if status_filter == 'cancelled' %}selected{% endif %}>🚫 Cancelled</option>
                     </select>
-                    <select name="platform" class="form-select form-select-sm" style="width: auto;" onchange="this.form.submit()">
+                    <select name="platform" class="form-select form-select-sm" style="width: auto;" onchange="refreshQueue()">
                         <option value="">All Platforms</option>
                         <option value="linkedin" {% if platform_filter == 'linkedin' %}selected{% endif %}>💼 LinkedIn</option>
                         <option value="threads" {% if platform_filter == 'threads' %}selected{% endif %}>🧵 Threads</option>
@@ -422,12 +432,12 @@ th[onclick]:hover {
                     <div class="input-group input-group-sm" style="width: auto;">
                         <span class="input-group-text">From</span>
                         <input type="date" name="date_from" class="form-control form-control-sm" 
-                               value="{{ date_from }}" onchange="this.form.submit()" style="width: 140px;">
+                               value="{{ date_from }}" onchange="refreshQueue()" style="width: 140px;">
                     </div>
                     <div class="input-group input-group-sm" style="width: auto;">
                         <span class="input-group-text">To</span>
                         <input type="date" name="date_to" class="form-control form-control-sm" 
-                               value="{{ date_to }}" onchange="this.form.submit()" style="width: 140px;">
+                               value="{{ date_to }}" onchange="refreshQueue()" style="width: 140px;">
                     </div>
                     <input type="hidden" name="sort" value="{{ sort_order }}">
                     {% if status_filter or platform_filter or date_from or date_to %}
@@ -1007,8 +1017,7 @@ function toggleSort() {
         sortInput.value = newSort;
     }
     
-    // Submit the form to apply the new sort
-    document.getElementById('filter-form').submit();
+    refreshQueue();
 }
 
 // Refresh the scheduled posts queue without full page reload
@@ -1039,7 +1048,11 @@ function refreshQueue() {
     if (dateTo) params.append('date_to', dateTo);
     if (sortOrder) params.append('sort', sortOrder);
     
-    fetch(`/schedule/list-json?${params.toString()}`)
+    // Keep URL in sync so a manual page refresh preserves filters
+    const qs = params.toString();
+    history.replaceState(null, '', qs ? `/schedule?${qs}` : '/schedule');
+    
+    fetch(`/schedule/list-json?${qs}`)
         .then(response => response.json())
         .then(data => {
             btn.innerHTML = originalBtnText;
@@ -1077,8 +1090,7 @@ function rebuildQueueTable(posts) {
     if (!tbody) return;
     
     if (posts.length === 0) {
-        // Show empty state - redirect to reload for proper template rendering
-        location.reload();
+        tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-4">No scheduled posts match the current filters.</td></tr>`;
         return;
     }
     
@@ -1217,14 +1229,14 @@ function checkLinkedInStatus() {
                 badge.className = 'badge bg-success';
                 badge.textContent = 'Connected';
                 content.innerHTML = `
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div>
-                            <strong>${data.display_name || 'LinkedIn User'}</strong>
-                            ${data.email ? '<br><small class="text-muted">' + data.email + '</small>' : ''}
-                            ${data.user_urn ? '<br><small class="text-muted font-monospace">' + data.user_urn + '</small>' : ''}
+                    <div>
+                        <div style="overflow:hidden;">
+                            <strong class="truncated-text">${data.display_name || 'LinkedIn User'}</strong>
+                            ${data.email ? '<small class="text-muted truncated-text">' + data.email + '</small>' : ''}
+                            ${data.user_urn ? '<small class="text-muted font-monospace truncated-text">' + data.user_urn + '</small>' : ''}
                         </div>
-                        <div>
-                            <a href="{{ url_for('linkedin_configure') }}" class="btn btn-sm btn-outline-secondary me-2">
+                        <div class="mt-2 d-flex flex-wrap gap-1">
+                            <a href="{{ url_for('linkedin_configure') }}" class="btn btn-sm btn-outline-secondary">
                                 Configure
                             </a>
                             <button class="btn btn-sm btn-outline-danger" onclick="disconnectLinkedIn()">
@@ -1290,16 +1302,16 @@ function checkThreadsStatus() {
                 badge.className = 'badge bg-success';
                 badge.textContent = 'Connected';
                 content.innerHTML = `
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div class="d-flex align-items-center">
-                            ${data.profile_picture_url ? '<img src="' + data.profile_picture_url + '" class="rounded-circle me-2" width="40" height="40" alt="">' : ''}
-                            <div>
-                                <strong>@${data.username || 'Threads User'}</strong>
-                                ${data.display_name && data.display_name !== data.username ? '<br><small class="text-muted">' + data.display_name + '</small>' : ''}
+                    <div>
+                        <div class="d-flex align-items-center" style="overflow:hidden;">
+                            ${data.profile_picture_url ? '<img src="' + data.profile_picture_url + '" class="rounded-circle me-2 flex-shrink-0" width="40" height="40" alt="">' : ''}
+                            <div style="overflow:hidden; min-width:0;">
+                                <strong class="truncated-text">@${data.username || 'Threads User'}</strong>
+                                ${data.display_name && data.display_name !== data.username ? '<small class="text-muted truncated-text">' + data.display_name + '</small>' : ''}
                             </div>
                         </div>
-                        <div>
-                            <a href="{{ url_for('threads_configure') }}" class="btn btn-sm btn-outline-secondary me-2">
+                        <div class="mt-2 d-flex flex-wrap gap-1">
+                            <a href="{{ url_for('threads_configure') }}" class="btn btn-sm btn-outline-secondary">
                                 Configure
                             </a>
                             <button class="btn btn-sm btn-outline-danger" onclick="disconnectThreads()">
@@ -1366,13 +1378,13 @@ function checkFacebookStatus() {
                 badge.textContent = 'Connected';
                 const pageName = data.page_name || 'No page selected';
                 content.innerHTML = `
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div>
-                            <strong>${data.user_name}</strong>
-                            <br><small class="text-muted">Page: ${pageName}</small>
+                    <div>
+                        <div style="overflow:hidden;">
+                            <strong class="truncated-text">${data.user_name}</strong>
+                            <small class="text-muted truncated-text">Page: ${pageName}</small>
                         </div>
-                        <div>
-                            <a href="{{ url_for('facebook_configure') }}" class="btn btn-sm btn-outline-secondary me-2">
+                        <div class="mt-2 d-flex flex-wrap gap-1">
+                            <a href="{{ url_for('facebook_configure') }}" class="btn btn-sm btn-outline-secondary">
                                 Configure
                             </a>
                             <button class="btn btn-sm btn-outline-danger" onclick="disconnectFacebook()">
@@ -1438,11 +1450,11 @@ function checkTwitterStatus() {
                 badge.className = 'badge bg-success';
                 badge.textContent = 'Connected';
                 content.innerHTML = `
-                    <div class="d-flex justify-content-between align-items-center">
-                        <div>
-                            <strong>@${data.username || data.display_name || 'X User'}</strong>
+                    <div>
+                        <div style="overflow:hidden;">
+                            <strong class="truncated-text">@${data.username || data.display_name || 'X User'}</strong>
                         </div>
-                        <div>
+                        <div class="mt-2 d-flex flex-wrap gap-1">
                             <button class="btn btn-sm btn-outline-danger" onclick="disconnectTwitter()">
                                 Disconnect
                             </button>
