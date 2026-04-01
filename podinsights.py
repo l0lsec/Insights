@@ -34,9 +34,7 @@ PLATFORM_GUIDELINES = {
     "linkedin": "Professional tone, 1-3 paragraphs, thought leadership angle, 3-5 professional hashtags",
     "facebook": "Conversational, can be longer, engaging question or hook, 2-3 hashtags",
     "threads": "Casual and authentic, similar to Twitter but can be slightly longer, 3-5 hashtags",
-    "bluesky": "Similar to Twitter, concise and engaging, 3-5 hashtags",
     "instagram": "Visual-focused caption, emojis welcome, 10-15 relevant hashtags at the end",
-    "mastodon": "Thoughtful and community-focused, 3-5 hashtags",
 }
 
 # ── Shared LLM helpers ────────────────────────────────────────────────────
@@ -638,7 +636,7 @@ def generate_social_copy(
         posts_per_platform > 1, otherwise single strings for backward compatibility.
     """
     if platforms is None:
-        platforms = ["twitter", "linkedin", "facebook", "threads", "bluesky"]
+        platforms = ["twitter", "linkedin", "facebook", "threads"]
     
     # Clamp posts_per_platform to reasonable range
     posts_per_platform = max(1, min(posts_per_platform, 21))
@@ -656,9 +654,7 @@ def generate_social_copy(
             "linkedin": "Professional tone, 1-3 paragraphs, thought leadership angle, 3-5 professional hashtags",
             "facebook": "Conversational, can be longer, engaging question or hook, 2-3 hashtags",
             "threads": "Casual and authentic, similar to Twitter but can be slightly longer, 3-5 hashtags",
-            "bluesky": "Similar to Twitter, concise and engaging, 3-5 hashtags",
             "instagram": "Visual-focused caption, emojis welcome, 10-15 relevant hashtags at the end",
-            "mastodon": "Thoughtful and community-focused, 3-5 hashtags, can use content warnings if needed",
         }
 
         platform_list = "\n".join([

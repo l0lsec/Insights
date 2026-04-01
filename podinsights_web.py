@@ -1718,7 +1718,7 @@ def generate_article_social(article_id: int):
     
     platforms = request.form.getlist('platforms')
     if not platforms:
-        platforms = ["twitter", "linkedin", "facebook", "threads", "bluesky"]
+        platforms = ["twitter", "linkedin", "facebook", "threads"]
     
     # Get number of posts per platform (default to 1, max 21)
     posts_per_platform = request.form.get('posts_per_platform', 1, type=int)
@@ -3958,7 +3958,7 @@ def schedule_slot_add():
         return jsonify({"error": "Invalid day of week"}), 400
     
     # Validate platforms (empty list = all platforms)
-    valid_platforms = {'linkedin', 'threads'}
+    valid_platforms = {'linkedin', 'threads', 'facebook', 'twitter'}
     platforms = [p for p in platforms if p in valid_platforms]
     
     slot_id = add_time_slot(
@@ -3969,8 +3969,9 @@ def schedule_slot_add():
     )
     
     # Redistribute all pending posts to use the new optimal slots
-    linkedin_redistributed = redistribute_scheduled_posts('linkedin')
-    threads_redistributed = redistribute_scheduled_posts('threads')
+    redistributed = {}
+    for p in valid_platforms:
+        redistributed[p] = redistribute_scheduled_posts(p)
     
     day_names = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
     day_display = 'Every day' if day_of_week == -1 else day_names[day_of_week]
@@ -3985,10 +3986,7 @@ def schedule_slot_add():
             "enabled": True,
             "platforms": platforms,
         },
-        "redistributed": {
-            "linkedin": linkedin_redistributed,
-            "threads": threads_redistributed,
-        }
+        "redistributed": redistributed,
     })
 
 
@@ -4041,7 +4039,7 @@ def schedule_slot_edit(slot_id: int):
         return jsonify({"error": "Invalid day of week"}), 400
     
     # Validate platforms (empty list = all platforms)
-    valid_platforms = {'linkedin', 'threads'}
+    valid_platforms = {'linkedin', 'threads', 'facebook', 'twitter'}
     platforms = [p for p in platforms if p in valid_platforms]
     
     # Update the slot (pass empty list to clear platform restrictions)
@@ -4053,16 +4051,14 @@ def schedule_slot_edit(slot_id: int):
     )
     
     # Redistribute all pending posts to use the new optimal slots
-    linkedin_redistributed = redistribute_scheduled_posts('linkedin')
-    threads_redistributed = redistribute_scheduled_posts('threads')
+    redistributed = {}
+    for p in valid_platforms:
+        redistributed[p] = redistribute_scheduled_posts(p)
     
     return jsonify({
         "success": True,
         "platforms": platforms,
-        "redistributed": {
-            "linkedin": linkedin_redistributed,
-            "threads": threads_redistributed,
-        }
+        "redistributed": redistributed,
     })
 
 
@@ -4575,7 +4571,7 @@ def compose_create_post():
     if not content:
         return jsonify({"error": "Content is required"}), 400
 
-    valid_platforms = ['linkedin', 'threads', 'twitter', 'bluesky', 'facebook', 'mastodon']
+    valid_platforms = ['linkedin', 'threads', 'twitter', 'facebook']
     if platform not in valid_platforms:
         return jsonify({"error": f"Invalid platform. Must be one of: {', '.join(valid_platforms)}"}), 400
 
@@ -5358,7 +5354,7 @@ def compose_add_to_queue(post_id: int):
     scheduled_for = request.form.get('scheduled_for', '').strip()
     
     # Validate platform
-    if platform not in ['linkedin', 'threads']:
+    if platform not in ['linkedin', 'threads', 'facebook', 'twitter']:
         return jsonify({"error": f"Platform {platform} does not support scheduling yet"}), 400
     
     # Use provided scheduled_for or get next available slot
