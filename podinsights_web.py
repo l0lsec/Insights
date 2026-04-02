@@ -4599,7 +4599,7 @@ def compose_import_file():
     """Import posts from a CSV or XLSX file into the Command Center."""
     import csv as csv_mod
 
-    IMPORT_PLATFORMS = {'threads', 'linkedin', 'facebook'}
+    IMPORT_PLATFORMS = {'threads', 'linkedin', 'facebook', 'twitter'}
 
     file = request.files.get('file')
     if not file or not file.filename:
@@ -4666,6 +4666,8 @@ def compose_import_file():
 
     for i, row in enumerate(rows, start=2):
         platform = row['platform'].lower()
+        if platform == 'x':
+            platform = 'twitter'
         content = row['copy']
 
         content_preview = (content[:80] + '...') if len(content) > 80 else content
@@ -4688,7 +4690,7 @@ def compose_import_file():
                 "row": i,
                 "reason": "unsupported_platform",
                 "message": f"Unsupported platform '{row['platform']}'",
-                "fix": f"Change the Platform value to one of: Threads, LinkedIn, Facebook.",
+                "fix": f"Change the Platform value to one of: Threads, LinkedIn, Facebook, Twitter/X.",
                 "platform": row['platform'] or "(blank)",
                 "preview": content_preview,
             })
