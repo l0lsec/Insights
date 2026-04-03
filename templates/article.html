@@ -1375,6 +1375,26 @@ function checkThreadsStatus() {
         });
 }
 
+function addPostedBadge(postItem, platform, url) {
+    if (!postItem || !url) return;
+    const header = postItem.querySelector('.post-header .d-flex.align-items-center.gap-2');
+    if (!header) return;
+    const badgeClasses = {
+        'linkedin': 'bg-primary',
+        'threads': 'bg-dark',
+        'twitter': 'bg-success',
+        'facebook': 'bg-info',
+    };
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.className = `badge text-decoration-none ${badgeClasses[platform] || 'bg-success'}`;
+    link.title = 'Click to view';
+    link.textContent = `🔗 ${platform.charAt(0).toUpperCase() + platform.slice(1)}`;
+    header.appendChild(link);
+}
+
 function postToThreads(postId, btn) {
     if (!threadsConnected) {
         alert('Please connect Threads first. Go to Schedule page to connect.');
@@ -1395,7 +1415,6 @@ function postToThreads(postId, btn) {
                 btn.classList.remove('btn-outline-dark');
                 btn.classList.add('btn-success');
                 
-                // Update the "used" badge
                 const postItem = btn.closest('.post-item');
                 const usedBadge = postItem.querySelector('.used-badge');
                 if (!usedBadge) {
@@ -1406,12 +1425,9 @@ function postToThreads(postId, btn) {
                     badgeContainer.appendChild(newBadge);
                 }
                 
-                // Add Threads posted badge
-                const threadsBadge = document.createElement('span');
-                threadsBadge.className = 'badge ms-1';
-                threadsBadge.style.backgroundColor = '#000000';
-                threadsBadge.textContent = '🧵 Posted';
-                btn.parentNode.insertBefore(threadsBadge, btn.nextSibling);
+                if (data.permalink) {
+                    addPostedBadge(postItem, 'threads', data.permalink);
+                }
                 
                 setTimeout(() => {
                     btn.innerHTML = '🧵';
@@ -1487,11 +1503,9 @@ function postToFacebook(postId, btn) {
                     badgeContainer.appendChild(newBadge);
                 }
 
-                const fbBadge = document.createElement('span');
-                fbBadge.className = 'badge ms-1';
-                fbBadge.style.backgroundColor = '#1877F2';
-                fbBadge.textContent = '📘 Posted';
-                btn.parentNode.insertBefore(fbBadge, btn.nextSibling);
+                if (data.permalink) {
+                    addPostedBadge(postItem, 'facebook', data.permalink);
+                }
 
                 setTimeout(() => {
                     btn.innerHTML = '📘';
@@ -1567,11 +1581,9 @@ function postToTwitter(postId, btn) {
                     badgeContainer.appendChild(newBadge);
                 }
 
-                const twBadge = document.createElement('span');
-                twBadge.className = 'badge ms-1';
-                twBadge.style.backgroundColor = '#1DA1F2';
-                twBadge.textContent = '𝕏 Posted';
-                btn.parentNode.insertBefore(twBadge, btn.nextSibling);
+                if (data.permalink) {
+                    addPostedBadge(postItem, 'twitter', data.permalink);
+                }
 
                 setTimeout(() => {
                     btn.innerHTML = '𝕏';
@@ -1704,7 +1716,6 @@ function postToLinkedIn(postId, btn) {
                 btn.classList.remove('btn-outline-info');
                 btn.classList.add('btn-success');
                 
-                // Update the "used" badge
                 const postItem = btn.closest('.post-item');
                 const usedBadge = postItem.querySelector('.used-badge');
                 if (!usedBadge) {
@@ -1715,12 +1726,11 @@ function postToLinkedIn(postId, btn) {
                     badgeContainer.appendChild(newBadge);
                 }
                 
-                // Add LinkedIn posted badge
-                const linkedinBadge = document.createElement('span');
-                linkedinBadge.className = 'badge ms-1';
-                linkedinBadge.style.backgroundColor = '#0077B5';
-                linkedinBadge.textContent = '💼 Posted';
-                btn.parentNode.insertBefore(linkedinBadge, btn.nextSibling);
+                const urn = data.post_urn;
+                if (urn) {
+                    const url = urn.startsWith('http') ? urn : `https://www.linkedin.com/feed/update/${urn}`;
+                    addPostedBadge(postItem, 'linkedin', url);
+                }
                 
                 setTimeout(() => {
                     btn.innerHTML = '💼';

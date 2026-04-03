@@ -547,6 +547,8 @@ th[onclick]:hover {
                             <span class="badge" style="background-color: #0077B5;">💼 LinkedIn</span>
                             {% elif post.platform == 'threads' %}
                             <span class="badge" style="background-color: #000000;">🧵 Threads</span>
+                            {% elif post.platform == 'twitter' %}
+                            <span class="badge" style="background-color: #000000;">𝕏 twitter</span>
                             {% else %}
                             <span class="badge bg-secondary">{{ post.platform }}</span>
                             {% endif %}
@@ -572,6 +574,15 @@ th[onclick]:hover {
                                     {% if post.linkedin_post_urn.startswith('http') %}
                                     <a href="{{ post.linkedin_post_urn }}" 
                                        target="_blank" class="btn btn-sm btn-outline-dark" title="View on Threads">
+                                        🔗 View
+                                    </a>
+                                    {% else %}
+                                    <span class="text-muted small">No view link</span>
+                                    {% endif %}
+                                {% elif post.platform == 'twitter' %}
+                                    {% if post.linkedin_post_urn.startswith('http') %}
+                                    <a href="{{ post.linkedin_post_urn }}" 
+                                       target="_blank" class="btn btn-sm btn-outline-dark" title="View on X">
                                         🔗 View
                                     </a>
                                     {% else %}
@@ -1144,6 +1155,7 @@ function getPlatformBadge(platform) {
     switch(platform) {
         case 'linkedin': return '<span class="badge" style="background-color: #0077B5;">💼 LinkedIn</span>';
         case 'threads': return '<span class="badge" style="background-color: #000000;">🧵 Threads</span>';
+        case 'twitter': return '<span class="badge" style="background-color: #000000;">𝕏 twitter</span>';
         case 'facebook': return '<span class="badge" style="background-color: #1877F2;">📘 Facebook</span>';
         default: return `<span class="badge bg-secondary">${platform}</span>`;
     }
@@ -1173,6 +1185,8 @@ function getActionButtons(post) {
     } else if (post.status === 'posted' && post.linkedin_post_urn) {
         if (post.platform === 'threads' && post.linkedin_post_urn.startsWith('http')) {
             return `<a href="${post.linkedin_post_urn}" target="_blank" class="btn btn-sm btn-outline-dark" title="View on Threads">🔗 View</a>`;
+        } else if (post.platform === 'twitter' && post.linkedin_post_urn.startsWith('http')) {
+            return `<a href="${post.linkedin_post_urn}" target="_blank" class="btn btn-sm btn-outline-dark" title="View on X">🔗 View</a>`;
         } else if (post.platform === 'linkedin') {
             return `<a href="https://www.linkedin.com/feed/update/${post.linkedin_post_urn}" target="_blank" class="btn btn-sm btn-outline-primary" title="View on LinkedIn">🔗 View</a>`;
         }

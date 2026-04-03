@@ -2771,6 +2771,26 @@ function toggleShowMore(btn, platform) {
     }
 }
 
+function addPostedBadge(postItem, platform, url) {
+    if (!postItem || !url) return;
+    const header = postItem.querySelector('.post-header .d-flex.align-items-center.gap-2');
+    if (!header) return;
+    const badgeClasses = {
+        'linkedin': 'bg-primary',
+        'threads': 'bg-dark',
+        'twitter': 'bg-success',
+        'facebook': 'bg-info',
+    };
+    const link = document.createElement('a');
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.className = `badge text-decoration-none ${badgeClasses[platform] || 'bg-success'}`;
+    link.title = 'Click to view';
+    link.textContent = `🔗 ${platform.charAt(0).toUpperCase() + platform.slice(1)}`;
+    header.appendChild(link);
+}
+
 function postToLinkedIn(postId, btn) {
     if (!linkedinConnected) {
         alert('Please connect LinkedIn first');
@@ -2790,8 +2810,12 @@ function postToLinkedIn(postId, btn) {
                 btn.classList.remove('btn-outline-info');
                 btn.classList.add('btn-success');
                 showToast('Posted to LinkedIn!', 'success');
-                // Mark as used
                 const postItem = btn.closest('.post-item');
+                const urn = data.post_urn;
+                if (urn) {
+                    const url = urn.startsWith('http') ? urn : `https://www.linkedin.com/feed/update/${urn}`;
+                    addPostedBadge(postItem, 'linkedin', url);
+                }
                 const usedBtn = postItem.querySelector('button[title="Mark as used"]');
                 if (usedBtn && !usedBtn.classList.contains('btn-outline-success')) {
                     toggleUsed(postId, usedBtn);
@@ -2828,8 +2852,10 @@ function postToThreads(postId, btn) {
                 btn.classList.remove('btn-outline-dark');
                 btn.classList.add('btn-success');
                 showToast('Posted to Threads!', 'success');
-                // Mark as used
                 const postItem = btn.closest('.post-item');
+                if (data.permalink) {
+                    addPostedBadge(postItem, 'threads', data.permalink);
+                }
                 const usedBtn = postItem.querySelector('button[title="Mark as used"]');
                 if (usedBtn && !usedBtn.classList.contains('btn-outline-success')) {
                     toggleUsed(postId, usedBtn);
@@ -2867,6 +2893,9 @@ function postToFacebook(postId, btn) {
                 btn.classList.add('btn-success');
                 showToast('Posted to Facebook!', 'success');
                 const postItem = btn.closest('.post-item');
+                if (data.permalink) {
+                    addPostedBadge(postItem, 'facebook', data.permalink);
+                }
                 const usedBtn = postItem.querySelector('button[title="Mark as used"]');
                 if (usedBtn && !usedBtn.classList.contains('btn-outline-success')) {
                     toggleUsed(postId, usedBtn);
@@ -2904,6 +2933,9 @@ function postToTwitter(postId, btn) {
                 btn.classList.add('btn-success');
                 showToast('Posted to X!', 'success');
                 const postItem = btn.closest('.post-item');
+                if (data.permalink) {
+                    addPostedBadge(postItem, 'twitter', data.permalink);
+                }
                 const usedBtn = postItem.querySelector('button[title="Mark as used"]');
                 if (usedBtn && !usedBtn.classList.contains('btn-outline-success')) {
                     toggleUsed(postId, usedBtn);
