@@ -1762,14 +1762,18 @@ def get_posted_info_for_standalone_posts(standalone_post_ids: List[int], db_path
         )
         
         result = {}
-        for row in cur.fetchall():
+        rows = cur.fetchall()
+        for row in rows:
             post_id = row['standalone_post_id']
             if post_id not in result:
                 result[post_id] = {}
             # Store the most recent posted info per platform
             if row['platform'] not in result[post_id]:
+                url = row['linkedin_post_urn']
+                if row['platform'] == 'linkedin' and url and not url.startswith('http'):
+                    url = f"https://www.linkedin.com/feed/update/{url}"
                 result[post_id][row['platform']] = {
-                    'url': row['linkedin_post_urn'],  # This stores URL/URN for all platforms
+                    'url': url,
                     'posted_at': row['posted_at'],
                 }
         return result
