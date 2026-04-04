@@ -40,7 +40,7 @@ What started as a podcast transcription tool has grown into a complete content p
 #### Publishing & Scheduling
 - **LinkedIn Integration** - OAuth-based posting with rich link previews and image support
 - **Threads Integration** - OAuth-based posting with text and image support
-- **Facebook Integration** - OAuth-based posting to Facebook Pages with text and image support (In Development)
+- **Facebook Integration** - OAuth-based posting to Facebook Pages with text and image support
 - **X/Twitter Integration** - OAuth 2.0 with PKCE for posting text and images (pay-per-use media uploads)
 - **Time Slot Management** - Configure recurring posting times by day of week and platform
 - **Auto-Queue** - Posts automatically slot into the next available time

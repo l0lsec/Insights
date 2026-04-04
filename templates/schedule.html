@@ -570,25 +570,22 @@ th[onclick]:hover {
                                 🚫 Cancel
                             </button>
                             {% elif post.status == 'posted' and post.linkedin_post_urn %}
-                                {% if post.platform == 'threads' %}
-                                    {% if post.linkedin_post_urn.startswith('http') %}
+                                {% if post.platform == 'threads' and post.linkedin_post_urn.startswith('http') %}
                                     <a href="{{ post.linkedin_post_urn }}" 
                                        target="_blank" class="btn btn-sm btn-outline-dark" title="View on Threads">
                                         🔗 View
                                     </a>
-                                    {% else %}
-                                    <span class="text-muted small">No view link</span>
-                                    {% endif %}
-                                {% elif post.platform == 'twitter' %}
-                                    {% if post.linkedin_post_urn.startswith('http') %}
+                                {% elif post.platform == 'twitter' and post.linkedin_post_urn.startswith('http') %}
                                     <a href="{{ post.linkedin_post_urn }}" 
                                        target="_blank" class="btn btn-sm btn-outline-dark" title="View on X">
                                         🔗 View
                                     </a>
-                                    {% else %}
-                                    <span class="text-muted small">No view link</span>
-                                    {% endif %}
-                                {% else %}
+                                {% elif post.platform == 'facebook' and post.linkedin_post_urn.startswith('http') %}
+                                    <a href="{{ post.linkedin_post_urn }}" 
+                                       target="_blank" class="btn btn-sm btn-outline-info" title="View on Facebook">
+                                        🔗 View
+                                    </a>
+                                {% elif post.platform == 'linkedin' %}
                                 <a href="https://www.linkedin.com/feed/update/{{ post.linkedin_post_urn }}" 
                                    target="_blank" class="btn btn-sm btn-outline-primary" title="View on LinkedIn">
                                     🔗 View
@@ -1187,6 +1184,8 @@ function getActionButtons(post) {
             return `<a href="${post.linkedin_post_urn}" target="_blank" class="btn btn-sm btn-outline-dark" title="View on Threads">🔗 View</a>`;
         } else if (post.platform === 'twitter' && post.linkedin_post_urn.startsWith('http')) {
             return `<a href="${post.linkedin_post_urn}" target="_blank" class="btn btn-sm btn-outline-dark" title="View on X">🔗 View</a>`;
+        } else if (post.platform === 'facebook' && post.linkedin_post_urn.startsWith('http')) {
+            return `<a href="${post.linkedin_post_urn}" target="_blank" class="btn btn-sm btn-outline-info" title="View on Facebook">🔗 View</a>`;
         } else if (post.platform === 'linkedin') {
             return `<a href="https://www.linkedin.com/feed/update/${post.linkedin_post_urn}" target="_blank" class="btn btn-sm btn-outline-primary" title="View on LinkedIn">🔗 View</a>`;
         }
