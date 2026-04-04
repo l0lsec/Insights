@@ -3644,15 +3644,101 @@ def schedule_post_now(scheduled_id: int):
             else:
                 error_msg = result.get('error', 'Unknown error') if result else 'No response'
                 return jsonify({"error": f"Failed: {error_msg}"}), 400
+        elif platform == 'twitter':
+            twitter_token = get_twitter_token()
+            if not twitter_token:
+                return jsonify({"error": "Twitter/X not connected"}), 400
+            
+            if twitter_is_token_expired(twitter_token['expires_at']):
+                tw_client = get_twitter_client()
+                try:
+                    new_token = tw_client.refresh_access_token(twitter_token['refresh_token'])
+                    expires_at = twitter_calculate_token_expiry(new_token.get('expires_in', 7200))
+                    update_twitter_token(
+                        access_token=new_token['access_token'],
+                        expires_at=expires_at,
+                        refresh_token=new_token.get('refresh_token'),
+                    )
+                    twitter_token = get_twitter_token()
+                except Exception as e:
+                    return jsonify({"error": f"Twitter token expired: {e}"}), 400
+            
+            tw_client = get_twitter_client()
+            
+            if image_url:
+                result = tw_client.create_image_post(
+                    access_token=twitter_token['access_token'],
+                    text=content[:280],
+                    image_url=image_url,
+                )
+            else:
+                result = tw_client.create_post(
+                    access_token=twitter_token['access_token'],
+                    text=content[:280],
+                )
+            
+            if result and result.get('success'):
+                update_scheduled_post_status(
+                    scheduled_id,
+                    status='posted',
+                    linkedin_post_urn=result.get('permalink'),
+                )
+                if post['social_post_id']:
+                    mark_social_post_used(post['social_post_id'], True)
+                if post['standalone_post_id']:
+                    mark_standalone_post_used(post['standalone_post_id'], True)
+                
+                scheduled_time = datetime.fromisoformat(post['scheduled_for'])
+                if datetime.now() < scheduled_time:
+                    redistribute_scheduled_posts(platform)
+                
+                return jsonify({"success": True, "message": "Posted to X/Twitter!"})
+            else:
+                error_msg = result.get('error', 'Unknown error') if result else 'No response'
+                return jsonify({"error": f"Failed: {error_msg}"}), 400
+
+        elif platform == 'facebook':
+            fb_token = get_facebook_token()
+            if not fb_token:
+                return jsonify({"error": "Facebook not connected"}), 400
+            
+            fb_client = get_facebook_client()
+            
+            result = fb_client.publish_smart_post(
+                page_access_token=fb_token['page_access_token'],
+                page_id=fb_token['page_id'],
+                text=content[:5000],
+                image_url=image_url,
+            )
+            
+            if result and result.get('success'):
+                update_scheduled_post_status(
+                    scheduled_id,
+                    status='posted',
+                    linkedin_post_urn=result.get('permalink'),
+                )
+                if post['social_post_id']:
+                    mark_social_post_used(post['social_post_id'], True)
+                if post['standalone_post_id']:
+                    mark_standalone_post_used(post['standalone_post_id'], True)
+                
+                scheduled_time = datetime.fromisoformat(post['scheduled_for'])
+                if datetime.now() < scheduled_time:
+                    redistribute_scheduled_posts(platform)
+                
+                return jsonify({"success": True, "message": "Posted to Facebook!"})
+            else:
+                error_msg = result.get('error', 'Unknown error') if result else 'No response'
+                return jsonify({"error": f"Failed: {error_msg}"}), 400
+
         else:
-            # Handle LinkedIn posting
+            # Handle LinkedIn posting (default)
             token = get_linkedin_token()
             if not token:
                 return jsonify({"error": "LinkedIn not connected"}), 400
             
             client = get_linkedin_client()
             
-            # Use image post if image URL is available and no URL in content
             if image_url and not client.extract_first_url(content):
                 app.logger.info("Posting to LinkedIn with image: %s", image_url)
                 result = client.create_image_post(
@@ -3680,7 +3766,6 @@ def schedule_post_now(scheduled_id: int):
                 if post['standalone_post_id']:
                     mark_standalone_post_used(post['standalone_post_id'], True)
                 
-                # If posted before scheduled time, redistribute remaining posts to fill the gap
                 scheduled_time = datetime.fromisoformat(post['scheduled_for'])
                 if datetime.now() < scheduled_time:
                     redistribute_scheduled_posts(platform)
@@ -3708,33 +3793,92 @@ def schedule_retry(scheduled_id: int):
     
     platform = post['platform'] if 'platform' in post.keys() else 'linkedin'
     
-    # Get content
+    # Get content and image URL
+    image_url = None
     if post['post_type'] == 'social' and post['social_content']:
         content = post['social_content']
+        image_url = post['social_image_url'] if 'social_image_url' in post.keys() else None
+    elif post['post_type'] == 'standalone' and post['standalone_content']:
+        content = post['standalone_content']
+        image_url = post['standalone_image_url'] if 'standalone_image_url' in post.keys() else None
     elif post['post_type'] == 'article' and post['article_content']:
         content = f"{post['article_topic']}\n\n{post['article_content'][:2800]}"
     else:
         return jsonify({"error": "No content found"}), 400
     
-    # Get article topic for title
     article_topic = post['article_topic'] if 'article_topic' in post.keys() else None
     
     try:
+        result = None
+        urn_key = 'post_urn'
+
         if platform == 'threads':
-            # Handle Threads posting
             threads_token = get_threads_token()
             if not threads_token:
                 return jsonify({"error": "Threads not connected"}), 400
             
-            from threads_client import ThreadsClient
-            threads_client = ThreadsClient()
-            result = threads_client.create_text_post(
-                threads_token['access_token'],
-                threads_token['user_id'],
-                content,
+            threads_client = get_threads_client()
+            if image_url:
+                result = threads_client.publish_image_post(
+                    threads_token['access_token'],
+                    content[:500],
+                    image_url,
+                )
+            else:
+                result = threads_client.publish_text_post(
+                    threads_token['access_token'],
+                    content[:500],
+                )
+            urn_key = 'permalink'
+
+        elif platform == 'twitter':
+            twitter_token = get_twitter_token()
+            if not twitter_token:
+                return jsonify({"error": "Twitter/X not connected"}), 400
+            
+            if twitter_is_token_expired(twitter_token['expires_at']):
+                tw_client = get_twitter_client()
+                try:
+                    new_token = tw_client.refresh_access_token(twitter_token['refresh_token'])
+                    expires_at = twitter_calculate_token_expiry(new_token.get('expires_in', 7200))
+                    update_twitter_token(
+                        access_token=new_token['access_token'],
+                        expires_at=expires_at,
+                        refresh_token=new_token.get('refresh_token'),
+                    )
+                    twitter_token = get_twitter_token()
+                except Exception as e:
+                    return jsonify({"error": f"Twitter token expired: {e}"}), 400
+            
+            tw_client = get_twitter_client()
+            if image_url:
+                result = tw_client.create_image_post(
+                    access_token=twitter_token['access_token'],
+                    text=content[:280],
+                    image_url=image_url,
+                )
+            else:
+                result = tw_client.create_post(
+                    access_token=twitter_token['access_token'],
+                    text=content[:280],
+                )
+            urn_key = 'permalink'
+
+        elif platform == 'facebook':
+            fb_token = get_facebook_token()
+            if not fb_token:
+                return jsonify({"error": "Facebook not connected"}), 400
+            
+            fb_client = get_facebook_client()
+            result = fb_client.publish_smart_post(
+                page_access_token=fb_token['page_access_token'],
+                page_id=fb_token['page_id'],
+                text=content[:5000],
+                image_url=image_url,
             )
+            urn_key = 'permalink'
+
         else:
-            # Handle LinkedIn posting
             token = get_linkedin_token()
             if not token:
                 return jsonify({"error": "LinkedIn not connected"}), 400
@@ -3743,7 +3887,7 @@ def schedule_retry(scheduled_id: int):
             result = client.create_smart_post(
                 token['access_token'],
                 token['user_urn'],
-                content,
+                content[:3000],
                 article_title=article_topic,
             )
         
@@ -3751,7 +3895,7 @@ def schedule_retry(scheduled_id: int):
             update_scheduled_post_status(
                 scheduled_id,
                 status='posted',
-                linkedin_post_urn=result.get('post_urn'),
+                linkedin_post_urn=result.get(urn_key),
             )
             return jsonify({"success": True, "message": "Post successful!"})
         else:

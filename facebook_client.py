@@ -23,7 +23,7 @@ FACEBOOK_OAUTH_URL = f"https://www.facebook.com/{GRAPH_API_VERSION}/dialog/oauth
 
 FACEBOOK_SCOPES = os.environ.get(
     "FACEBOOK_SCOPES",
-    "pages_manage_posts,pages_read_engagement,pages_show_list,publish_to_groups",
+    "pages_manage_posts,pages_read_engagement,pages_show_list,business_management",
 )
 
 
@@ -126,9 +126,15 @@ class FacebookClient:
     def get_user_pages(self, access_token: str) -> list[dict]:
         """Return Pages the user manages, each with its own page access token.
 
+        Queries both /me/accounts (personal pages) and any linked Business
+        portfolios so that business-owned pages are included.
+
         Each dict contains: id, name, access_token, category.
         """
+        seen_ids: set[str] = set()
         pages: list[dict] = []
+
+        # 1) Personal pages via /me/accounts
         try:
             url = f"{GRAPH_API_BASE}/me/accounts"
             params = {
@@ -141,11 +147,50 @@ class FacebookClient:
                     logger.error("Failed to fetch pages: %s - %s", response.status_code, response.text)
                     break
                 data = response.json()
-                pages.extend(data.get("data", []))
+                for page in data.get("data", []):
+                    if page["id"] not in seen_ids:
+                        seen_ids.add(page["id"])
+                        pages.append(page)
                 url = data.get("paging", {}).get("next")
-                params = {}  # next URL already has params
+                params = {}
         except Exception as e:
             logger.error("Error fetching Facebook pages: %s", e)
+
+        # 2) Business-owned pages via /me/businesses -> /{biz}/owned_pages
+        try:
+            biz_resp = requests.get(
+                f"{GRAPH_API_BASE}/me/businesses",
+                params={"fields": "id,name", "access_token": access_token},
+                timeout=30,
+            )
+            if biz_resp.status_code == 200:
+                for biz in biz_resp.json().get("data", []):
+                    biz_id = biz["id"]
+                    url = f"{GRAPH_API_BASE}/{biz_id}/owned_pages"
+                    params = {
+                        "fields": "id,name,access_token,category",
+                        "access_token": access_token,
+                    }
+                    while url:
+                        resp = requests.get(url, params=params, timeout=30)
+                        if resp.status_code != 200:
+                            logger.warning(
+                                "Failed to fetch business %s pages: %s - %s",
+                                biz_id, resp.status_code, resp.text,
+                            )
+                            break
+                        data = resp.json()
+                        for page in data.get("data", []):
+                            if page["id"] not in seen_ids:
+                                seen_ids.add(page["id"])
+                                pages.append(page)
+                        url = data.get("paging", {}).get("next")
+                        params = {}
+            else:
+                logger.debug("No business accounts found (or permission not granted): %s", biz_resp.text)
+        except Exception as e:
+            logger.error("Error fetching business pages: %s", e)
+
         return pages
 
     def get_user_groups(self, access_token: str) -> list[dict]:
