@@ -3372,7 +3372,7 @@ def schedule_add():
 @app.route('/schedule')
 def schedule_list():
     """View all scheduled posts."""
-    status_filter = request.args.get('status', '')
+    status_filter = request.args.get('status', 'pending')
     platform_filter = request.args.get('platform', '')
     date_from = request.args.get('date_from', '').strip()
     date_to = request.args.get('date_to', '').strip()

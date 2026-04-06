@@ -915,12 +915,12 @@
             <select class="form-select form-select-sm" style="width: auto;" id="filter-used" onchange="applyPostFilters()">
                 <option value="">All Status</option>
                 <option value="used">✓ Used</option>
-                <option value="unused">○ Unused</option>
+                <option value="unused" selected>○ Unused</option>
             </select>
             <select class="form-select form-select-sm" style="width: auto;" id="filter-queued" onchange="applyPostFilters()">
                 <option value="">All Queue</option>
                 <option value="queued">✅ Queued</option>
-                <option value="not-queued">➕ Not Queued</option>
+                <option value="not-queued" selected>➕ Not Queued</option>
             </select>
             <select class="form-select form-select-sm" style="width: auto;" id="filter-platform" onchange="applyPostFilters()">
                 <option value="">All Platforms</option>
@@ -1549,6 +1549,7 @@ function openImageLightbox(imageUrl) {
 }
 
 document.addEventListener('DOMContentLoaded', function() {
+    applyPostFilters();
     checkLinkedInStatus();
     checkThreadsStatus();
     checkFacebookStatus();
