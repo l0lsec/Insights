@@ -416,7 +416,7 @@ th[onclick]:hover {
                 <!-- Filters -->
                 <form method="get" class="d-flex align-items-center gap-2 flex-wrap" id="filter-form">
                     <select name="status" class="form-select form-select-sm" style="width: auto;" onchange="refreshQueue()">
-                        <option value="">All Statuses</option>
+                        <option value="" {% if not status_filter %}selected{% endif %}>All Statuses</option>
                         <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>⏳ Pending</option>
                         <option value="posted" {% if status_filter == 'posted' %}selected{% endif %}>✅ Posted</option>
                         <option value="failed" {% if status_filter == 'failed' %}selected{% endif %}>❌ Failed</option>
