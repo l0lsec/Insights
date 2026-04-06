@@ -2066,6 +2066,7 @@ def linkedin_status():
                     "configured": True,
                     "display_name": token['display_name'],
                     "email": token['email'],
+                    "expires_at": expires_at,
                     "message": "Connected (token refreshed)",
                 })
             except Exception as e:
@@ -2092,6 +2093,7 @@ def linkedin_status():
         "display_name": token['display_name'],
         "email": token['email'],
         "user_urn": token['user_urn'],
+        "expires_at": token['expires_at'],
         "configure_url": url_for('linkedin_configure') if needs_configuration else None,
     })
 
@@ -2372,6 +2374,7 @@ def threads_status():
                 "username": token['username'],
                 "display_name": token['display_name'],
                 "profile_picture_url": token['profile_picture_url'],
+                "expires_at": expires_at,
                 "message": "Connected (token refreshed)",
             })
         except Exception as e:
@@ -2389,6 +2392,7 @@ def threads_status():
         "display_name": token['display_name'],
         "profile_picture_url": token['profile_picture_url'],
         "user_id": token['user_id'],
+        "expires_at": token['expires_at'],
     })
 
 
@@ -2689,6 +2693,7 @@ def facebook_status():
         "user_id": token['user_id'],
         "page_name": token['page_name'],
         "page_id": token['page_id'],
+        "expires_at": token['expires_at'],
     })
 
 
@@ -3024,6 +3029,7 @@ def twitter_status():
                     "username": token['username'],
                     "display_name": token['display_name'],
                     "user_id": token['user_id'],
+                    "expires_at": expires_at,
                     "message": "Connected (token refreshed)",
                 })
             except Exception as e:
@@ -3046,6 +3052,7 @@ def twitter_status():
         "username": token['username'],
         "display_name": token['display_name'],
         "user_id": token['user_id'],
+        "expires_at": token['expires_at'],
     })
 
 
