@@ -137,6 +137,9 @@ th[onclick]:hover {
     </div>
 </div>
 
+<!-- Token Renewal Banner -->
+<div id="token-renewal-banner" class="d-none"></div>
+
 <!-- Time Slots Configuration -->
 <div class="card mb-4">
     <div class="card-header bg-light d-flex justify-content-between align-items-center" data-bs-toggle="collapse" data-bs-target="#timeSlotsCollapse" style="cursor: pointer;">
@@ -1212,15 +1215,87 @@ function getActionButtons(post) {
     }
 }
 
+const tokenExpiryData = {};
+let statusChecksCompleted = 0;
+const TOTAL_STATUS_CHECKS = 4;
+
+function onStatusCheckComplete(platform, data) {
+    if (data && data.connected && data.expires_at) {
+        tokenExpiryData[platform] = {
+            expires_at: data.expires_at,
+            authUrl: {
+                'LinkedIn': '{{ url_for("linkedin_auth") }}',
+                'Threads': '{{ url_for("threads_auth") }}',
+                'Facebook': '{{ url_for("facebook_auth") }}',
+                'Twitter': '{{ url_for("twitter_auth") }}'
+            }[platform]
+        };
+    }
+    statusChecksCompleted++;
+    if (statusChecksCompleted >= TOTAL_STATUS_CHECKS) {
+        checkTokenRenewals();
+    }
+}
+
+function checkTokenRenewals() {
+    const banner = document.getElementById('token-renewal-banner');
+    const warnings = [];
+    const now = new Date();
+
+    for (const [platform, info] of Object.entries(tokenExpiryData)) {
+        if (platform === 'Twitter') continue;
+
+        const expiresAt = new Date(info.expires_at + (info.expires_at.endsWith('Z') ? '' : 'Z'));
+        const msRemaining = expiresAt - now;
+        const daysRemaining = Math.floor(msRemaining / (1000 * 60 * 60 * 24));
+
+        let level = null;
+        if (daysRemaining <= 3) {
+            level = 'danger';
+        } else if (daysRemaining <= 7) {
+            level = 'warning';
+        } else if (daysRemaining <= 14) {
+            level = 'info';
+        }
+
+        if (level) {
+            const expiryDate = expiresAt.toLocaleDateString('en-US', { month: 'long', day: 'numeric' });
+            const dayText = daysRemaining <= 0 ? 'today' : daysRemaining === 1 ? 'in 1 day' : `in ${daysRemaining} days`;
+            warnings.push({ platform, level, daysRemaining, dayText, expiryDate, authUrl: info.authUrl });
+        }
+    }
+
+    if (warnings.length === 0) {
+        banner.className = 'd-none';
+        banner.innerHTML = '';
+        return;
+    }
+
+    const levelPriority = { danger: 0, warning: 1, info: 2 };
+    const worstLevel = warnings.reduce((worst, w) => levelPriority[w.level] < levelPriority[worst] ? w.level : worst, 'info');
+
+    const icon = worstLevel === 'danger' ? '🚨' : worstLevel === 'warning' ? '⚠️' : 'ℹ️';
+    const title = worstLevel === 'danger' ? 'Token renewal urgent' : worstLevel === 'warning' ? 'Token renewal needed' : 'Token renewal recommended';
+
+    const items = warnings.map(w =>
+        `<li class="mb-1"><strong>${w.platform}:</strong> access expires ${w.dayText} (${w.expiryDate}) ` +
+        `<a href="${w.authUrl}" class="btn btn-sm btn-outline-${w.level === 'info' ? 'primary' : w.level} ms-2 py-0">Reconnect</a></li>`
+    ).join('');
+
+    banner.className = `alert alert-${worstLevel} mb-4`;
+    banner.innerHTML = `<strong>${icon} ${title}</strong><ul class="mb-0 mt-2">${items}</ul>`;
+}
+
 function checkLinkedInStatus() {
+    let linkedInData = null;
     fetch('{{ url_for("linkedin_status") }}')
         .then(response => response.json())
         .then(data => {
+            linkedInData = data;
             const badge = document.getElementById('linkedin-status-badge');
             const content = document.getElementById('linkedin-status-content');
             
             if (data.connected && data.needs_configuration) {
-                // Connected but needs member ID configuration
                 badge.className = 'badge bg-warning text-dark';
                 badge.textContent = 'Needs Setup';
                 content.innerHTML = `
@@ -1285,7 +1360,8 @@ function checkLinkedInStatus() {
             document.getElementById('linkedin-status-badge').textContent = 'Error';
             document.getElementById('linkedin-status-content').innerHTML = 
                 '<span class="text-danger">Failed to check LinkedIn status</span>';
-        });
+        })
+        .finally(() => onStatusCheckComplete('LinkedIn', linkedInData));
 }
 
 function disconnectLinkedIn() {
@@ -1305,9 +1381,11 @@ function disconnectLinkedIn() {
 
 // Check Threads connection status
 function checkThreadsStatus() {
+    let threadsData = null;
     fetch('{{ url_for("threads_status") }}')
         .then(response => response.json())
         .then(data => {
+            threadsData = data;
             const badge = document.getElementById('threads-status-badge');
             const content = document.getElementById('threads-status-content');
             
@@ -1360,7 +1438,8 @@ function checkThreadsStatus() {
             document.getElementById('threads-status-badge').textContent = 'Error';
             document.getElementById('threads-status-content').innerHTML = 
                 '<span class="text-danger">Failed to check Threads status</span>';
-        });
+        })
+        .finally(() => onStatusCheckComplete('Threads', threadsData));
 }
 
 function disconnectThreads() {
@@ -1380,9 +1459,11 @@ function disconnectThreads() {
 
 // Check Facebook connection status
 function checkFacebookStatus() {
+    let facebookData = null;
     fetch('{{ url_for("facebook_status") }}')
         .then(response => response.json())
         .then(data => {
+            facebookData = data;
             const badge = document.getElementById('facebook-status-badge');
             const content = document.getElementById('facebook-status-content');
 
@@ -1433,7 +1514,8 @@ function checkFacebookStatus() {
             document.getElementById('facebook-status-badge').textContent = 'Error';
             document.getElementById('facebook-status-content').innerHTML =
                 '<span class="text-danger">Failed to check Facebook status</span>';
-        });
+        })
+        .finally(() => onStatusCheckComplete('Facebook', facebookData));
 }
 
 function disconnectFacebook() {
@@ -1453,9 +1535,11 @@ function disconnectFacebook() {
 
 // Check Twitter/X connection status
 function checkTwitterStatus() {
+    let twitterData = null;
     fetch('{{ url_for("twitter_status") }}')
         .then(response => response.json())
         .then(data => {
+            twitterData = data;
             const badge = document.getElementById('twitter-status-badge');
             const content = document.getElementById('twitter-status-content');
 
@@ -1501,7 +1585,8 @@ function checkTwitterStatus() {
             document.getElementById('twitter-status-badge').textContent = 'Error';
             document.getElementById('twitter-status-content').innerHTML =
                 '<span class="text-danger">Failed to check Twitter status</span>';
-        });
+        })
+        .finally(() => onStatusCheckComplete('Twitter', twitterData));
 }
 
 function disconnectTwitter() {
