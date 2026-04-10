@@ -154,6 +154,8 @@
             <div class="source-thumbnail">
                 {% if source.og_image %}
                 <img src="{{ source.og_image }}" alt="Preview" onerror="this.style.display='none'; this.parentElement.innerHTML='🔗';">
+                {% elif source.is_github %}
+                🐙
                 {% else %}
                 🔗
                 {% endif %}
@@ -167,7 +169,9 @@
                 <p class="source-description">{{ source.description }}</p>
                 {% endif %}
                 <div class="source-meta">
-                    {% if source.is_youtube %}
+                    {% if source.is_github %}
+                    <span class="badge" style="background-color: #24292f; color: #fff;">🐙 GitHub</span>
+                    {% elif source.is_youtube %}
                     <span class="badge" style="background-color: #ff0000; color: #fff;">▶ YouTube</span>
                     {% endif %}
                     {% if source.is_youtube and source.episode_status == 'complete' %}
@@ -186,7 +190,16 @@
                 </div>
             </div>
             <div class="source-actions align-self-center">
-                {% if source.is_youtube %}
+                {% if source.is_github %}
+                <a href="{{ url_for('compose_page') }}?source_id={{ source.id }}" 
+                   class="btn btn-sm btn-primary" title="Generate posts from this source">
+                    ✨ Generate Posts
+                </a>
+                <button type="button" class="btn btn-sm btn-outline-secondary"
+                        onclick="refreshGithubSource({{ source.id }})" title="Refresh repo data from GitHub">
+                    🔄 Refresh
+                </button>
+                {% elif source.is_youtube %}
                     {% if source.episode_status == 'complete' %}
                 <a href="{{ url_for('process_episode', url=source.url, title=source.title) }}"
                    class="btn btn-sm btn-success" title="View transcription results">
@@ -229,7 +242,7 @@
 {% else %}
 <div class="empty-state">
     <h3>📭 No Saved Sources Yet</h3>
-    <p>Add article URLs or YouTube videos to extract and save content, or use the Command Center.</p>
+    <p>Add article URLs, YouTube videos, or GitHub repos to extract and save content, or use the Command Center.</p>
     <div class="d-flex gap-2 justify-content-center">
         <button type="button" class="btn btn-primary" onclick="showAddUrlModal()">
             ➕ Add URL
@@ -284,8 +297,8 @@
                     <div class="mb-3">
                         <label for="urlInput" class="form-label">URL</label>
                         <input type="url" class="form-control" id="urlInput" 
-                               placeholder="https://example.com/article or YouTube URL" required>
-                        <div class="form-text">Enter the URL of an article, webpage, or YouTube video to extract content from.</div>
+                               placeholder="https://example.com/article, YouTube URL, or GitHub repo" required>
+                        <div class="form-text">Enter the URL of an article, webpage, YouTube video, or GitHub repository to extract content from.</div>
                     </div>
                 </form>
             </div>
@@ -403,6 +416,14 @@ function submitAddUrl(event) {
         if (data.is_youtube) {
             successDiv.innerHTML += ' <br><small>YouTube video ready for transcription.</small>';
             setTimeout(() => location.reload(), 1200);
+        } else if (data.is_github) {
+            successDiv.innerHTML += ' <br><small>GitHub repository data extracted.</small>';
+            addSourceCardToPage(data.source, {isGithub: true});
+            setTimeout(() => {
+                if (addUrlModal) {
+                    addUrlModal.hide();
+                }
+            }, 1500);
         } else {
             addSourceCardToPage(data.source);
             setTimeout(() => {
@@ -421,11 +442,11 @@ function submitAddUrl(event) {
     });
 }
 
-function addSourceCardToPage(source) {
+function addSourceCardToPage(source, opts) {
+    opts = opts || {};
     // Check if we're showing the empty state
     const emptyState = document.querySelector('.empty-state');
     if (emptyState) {
-        // Reload the page to show the new sources list
         location.reload();
         return;
     }
@@ -436,7 +457,6 @@ function addSourceCardToPage(source) {
         const currentCount = parseInt(countSpan.textContent) || 0;
         countSpan.textContent = currentCount + 1;
         
-        // Update singular/plural
         const countText = countSpan.parentElement;
         if (currentCount + 1 === 1) {
             countText.innerHTML = '<strong>1</strong> saved source';
@@ -452,15 +472,47 @@ function addSourceCardToPage(source) {
         card.className = 'source-card';
         card.setAttribute('data-source-id', source.id);
         
-        const thumbnailContent = source.og_image 
-            ? `<img src="${source.og_image}" alt="Preview" onerror="this.style.display='none'; this.parentElement.innerHTML='🔗';">`
-            : '🔗';
+        let thumbnailContent;
+        if (source.og_image) {
+            thumbnailContent = `<img src="${source.og_image}" alt="Preview" onerror="this.style.display='none'; this.parentElement.innerHTML='🔗';">`;
+        } else if (opts.isGithub) {
+            thumbnailContent = '🐙';
+        } else {
+            thumbnailContent = '🔗';
+        }
         
         const descriptionHtml = source.description 
             ? `<p class="source-description">${escapeHtml(source.description)}</p>`
             : '';
         
         const today = new Date().toISOString().slice(0, 10);
+
+        let badgeHtml = '';
+        if (opts.isGithub) {
+            badgeHtml = '<span class="badge" style="background-color: #24292f; color: #fff;">🐙 GitHub</span>';
+        }
+
+        let actionsHtml = `
+            <a href="{{ url_for('compose_page') }}?source_id=${source.id}" 
+               class="btn btn-sm btn-primary" title="Generate posts from this source">
+                ✨ Generate Posts
+            </a>`;
+        if (opts.isGithub) {
+            actionsHtml += `
+            <button type="button" class="btn btn-sm btn-outline-secondary"
+                    onclick="refreshGithubSource(${source.id})" title="Refresh repo data from GitHub">
+                🔄 Refresh
+            </button>`;
+        }
+        actionsHtml += `
+            <button type="button" class="btn btn-sm btn-outline-secondary" 
+                    onclick="viewSourceDetails(${source.id})" title="View full content">
+                👁️ View
+            </button>
+            <button type="button" class="btn btn-sm btn-outline-danger" 
+                    onclick="confirmDeleteSource(${source.id}, '${escapeHtml(source.title)}')" title="Delete">
+                🗑️
+            </button>`;
         
         card.innerHTML = `
             <div class="d-flex gap-3">
@@ -474,27 +526,16 @@ function addSourceCardToPage(source) {
                     </a>
                     ${descriptionHtml}
                     <div class="source-meta">
+                        ${badgeHtml}
                         <span title="Created">📅 Saved: ${today}</span>
                     </div>
                 </div>
                 <div class="source-actions align-self-center">
-                    <a href="{{ url_for('compose_page') }}?source_id=${source.id}" 
-                       class="btn btn-sm btn-primary" title="Generate posts from this source">
-                        ✨ Generate Posts
-                    </a>
-                    <button type="button" class="btn btn-sm btn-outline-secondary" 
-                            onclick="viewSourceDetails(${source.id})" title="View full content">
-                        👁️ View
-                    </button>
-                    <button type="button" class="btn btn-sm btn-outline-danger" 
-                            onclick="confirmDeleteSource(${source.id}, '${escapeHtml(source.title)}')" title="Delete">
-                        🗑️
-                    </button>
+                    ${actionsHtml}
                 </div>
             </div>
         `;
         
-        // Insert at the top of the list
         sourcesList.insertBefore(card, sourcesList.firstChild);
     }
 }
@@ -616,6 +657,41 @@ function reextractSource() {
             reextractBtn.disabled = false;
             reextractBtn.innerHTML = '🔄 Re-extract';
             alert('Re-extraction failed. Please try again.');
+        });
+}
+
+function refreshGithubSource(sourceId) {
+    const card = document.querySelector(`[data-source-id="${sourceId}"]`);
+    const btn = card ? card.querySelector('[onclick*="refreshGithubSource"]') : null;
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
+    }
+
+    fetch(`/sources/${sourceId}/reextract`, { method: 'POST' })
+        .then(response => response.json())
+        .then(data => {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '🔄 Refresh';
+            }
+            if (data.error) {
+                alert('Refresh failed: ' + data.error);
+                return;
+            }
+            if (card && data.source) {
+                const titleEl = card.querySelector('.source-title');
+                const descEl = card.querySelector('.source-description');
+                if (titleEl) titleEl.textContent = data.source.title || 'Untitled';
+                if (descEl) descEl.textContent = data.source.description || '';
+            }
+        })
+        .catch(() => {
+            if (btn) {
+                btn.disabled = false;
+                btn.innerHTML = '🔄 Refresh';
+            }
+            alert('Refresh failed. Please try again.');
         });
 }
 
