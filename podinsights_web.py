@@ -204,6 +204,11 @@ from stock_images import (
     is_configured as stock_images_configured,
     get_configured_services as get_stock_image_services,
 )
+from github_client import (
+    is_github_repo_url,
+    parse_github_repo_url,
+    fetch_github_repo,
+)
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
@@ -4528,30 +4533,60 @@ def compose_generate():
                 use_local=use_local,
             )
         elif source_type == 'url':
-            result = generate_posts_from_url(
-                url=content,
-                platforms=platforms,
-                tone=tone,
-                posts_per_platform=posts_per_platform,
-                extra_context=extra_context,
-                use_local=use_local,
-            )
-            # New structure: {"posts": {...}, "source_data": {...}}
-            generated = result.get("posts", result)
-            source_data = result.get("source_data")
-            
-            # Auto-save URL content to url_sources
-            if source_data:
+            if is_github_repo_url(content):
+                owner, repo_name = parse_github_repo_url(content)
+                repo_data = fetch_github_repo(owner, repo_name)
+                gh_extra = extra_context or ""
+                gh_extra = f"This content is from the GitHub repository {repo_data['title']}. Include the repo URL ({content}) as credit.\n{gh_extra}".strip()
+                generated = generate_posts_from_text(
+                    text=repo_data['content'],
+                    platforms=platforms,
+                    tone=tone,
+                    topic=repo_data['title'],
+                    posts_per_platform=posts_per_platform,
+                    extra_context=gh_extra,
+                    use_local=use_local,
+                )
+                source_data = {
+                    "url": content,
+                    "title": repo_data['title'],
+                    "description": repo_data['description'],
+                    "content": repo_data['content'],
+                    "og_image": repo_data['og_image'],
+                }
                 source_id = add_url_source(
-                    url=source_data.get("url", content),
-                    title=source_data.get("title", ""),
-                    description=source_data.get("description", ""),
-                    content=source_data.get("content", ""),
-                    og_image=source_data.get("og_image"),
+                    url=content,
+                    title=repo_data['title'],
+                    description=repo_data['description'],
+                    content=repo_data['content'],
+                    og_image=repo_data['og_image'],
                 )
                 source_data["source_id"] = source_id
-            if not image_url and source_data and source_data.get("og_image"):
-                image_url = source_data["og_image"]
+            else:
+                result = generate_posts_from_url(
+                    url=content,
+                    platforms=platforms,
+                    tone=tone,
+                    posts_per_platform=posts_per_platform,
+                    extra_context=extra_context,
+                    use_local=use_local,
+                )
+                # New structure: {"posts": {...}, "source_data": {...}}
+                generated = result.get("posts", result)
+                source_data = result.get("source_data")
+                
+                # Auto-save URL content to url_sources
+                if source_data:
+                    source_id = add_url_source(
+                        url=source_data.get("url", content),
+                        title=source_data.get("title", ""),
+                        description=source_data.get("description", ""),
+                        content=source_data.get("content", ""),
+                        og_image=source_data.get("og_image"),
+                    )
+                    source_data["source_id"] = source_id
+                if not image_url and source_data and source_data.get("og_image"):
+                    image_url = source_data["og_image"]
         elif source_type == 'text':
             generated = generate_posts_from_text(
                 text=content,
@@ -5603,6 +5638,7 @@ def sources_page():
     for s in sources:
         s_dict = dict(s)
         s_dict['is_youtube'] = is_youtube_url(s_dict.get('url', ''))
+        s_dict['is_github'] = is_github_repo_url(s_dict.get('url', ''))
         if s_dict['is_youtube']:
             ep = get_episode(s_dict['url'])
             if ep:
@@ -5670,6 +5706,29 @@ def add_source():
                     "description": description,
                     "content": "",
                     "og_image": og_image,
+                }
+            })
+
+        if is_github_repo_url(url):
+            owner, repo_name = parse_github_repo_url(url)
+            repo_data = fetch_github_repo(owner, repo_name)
+            source_id = add_url_source(
+                url=url,
+                title=repo_data['title'],
+                description=repo_data['description'],
+                content=repo_data['content'],
+                og_image=repo_data['og_image'],
+            )
+            return jsonify({
+                "success": True,
+                "is_github": True,
+                "source": {
+                    "id": source_id,
+                    "url": url,
+                    "title": repo_data['title'],
+                    "description": repo_data['description'],
+                    "content": repo_data['content'],
+                    "og_image": repo_data['og_image'],
                 }
             })
 
@@ -5823,6 +5882,30 @@ def reextract_source(source_id: int):
     url = source['url']
     
     try:
+        if is_github_repo_url(url):
+            owner, repo_name = parse_github_repo_url(url)
+            repo_data = fetch_github_repo(owner, repo_name)
+            updated = update_url_source_content(
+                source_id=source_id,
+                title=repo_data['title'],
+                description=repo_data['description'],
+                content=repo_data['content'],
+                og_image=repo_data['og_image'],
+            )
+            if not updated:
+                return jsonify({"error": "Failed to update source"}), 500
+            return jsonify({
+                "success": True,
+                "source": {
+                    "id": source_id,
+                    "url": url,
+                    "title": repo_data['title'],
+                    "description": repo_data['description'],
+                    "content": repo_data['content'],
+                    "og_image": repo_data['og_image'],
+                }
+            })
+
         # Use trafilatura for robust article extraction
         downloaded = trafilatura.fetch_url(url)
         
@@ -5929,11 +6012,14 @@ def compose_generate_from_source():
     if not source:
         return jsonify({"error": "Source not found"}), 404
     
-    if not image_url and source['og_image']:
+    if not image_url and source['og_image'] and not is_github_repo_url(source['url']):
         image_url = source['og_image']
 
     if is_youtube_url(source['url']):
         credit = f"IMPORTANT: Include this YouTube video URL as a reference/credit in every post: {source['url']}"
+        extra_context = f"{credit}\n{extra_context}" if extra_context else credit
+    elif is_github_repo_url(source['url']):
+        credit = f"This content is from the GitHub repository {source['title']}. Include the repo URL ({source['url']}) as credit."
         extra_context = f"{credit}\n{extra_context}" if extra_context else credit
 
     if not platforms:
