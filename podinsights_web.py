@@ -4851,9 +4851,7 @@ def compose_import_file():
     original_filename = file.filename
 
     for i, row in enumerate(rows, start=2):
-        platform = row['platform'].lower()
-        if platform == 'x':
-            platform = 'twitter'
+        raw_platform = row['platform']
         content = row['copy']
 
         content_preview = (content[:80] + '...') if len(content) > 80 else content
@@ -4865,34 +4863,32 @@ def compose_import_file():
                 "reason": "empty_content",
                 "message": "Content is empty",
                 "fix": "Add post text to the 'copy' column in this row.",
-                "platform": row['platform'] or "(blank)",
+                "platform": raw_platform or "(blank)",
                 "preview": "",
             })
             continue
 
-        if platform not in IMPORT_PLATFORMS:
+        tokens = [t.strip() for t in re.split(r'[,;|]', raw_platform) if t.strip()]
+        seen = set()
+        platforms = []
+        for token in tokens:
+            normalized = token.lower()
+            if normalized == 'x':
+                normalized = 'twitter'
+            if normalized in seen:
+                continue
+            seen.add(normalized)
+            platforms.append((normalized, token))
+
+        if not platforms:
             skipped += 1
             skipped_details.append({
                 "row": i,
                 "reason": "unsupported_platform",
-                "message": f"Unsupported platform '{row['platform']}'",
-                "fix": f"Change the Platform value to one of: Threads, LinkedIn, Facebook, Twitter/X.",
-                "platform": row['platform'] or "(blank)",
+                "message": f"Unsupported platform '{raw_platform}'",
+                "fix": "Change the Platform value to one of: Threads, LinkedIn, Facebook, Twitter/X. Use commas to list multiple (e.g. 'Twitter,Threads').",
+                "platform": raw_platform or "(blank)",
                 "preview": content_preview,
-            })
-            continue
-
-        existing_id = existing.get((platform, content))
-        if existing_id is not None:
-            skipped += 1
-            skipped_details.append({
-                "row": i,
-                "reason": "duplicate",
-                "message": f"Duplicate — identical {platform} post already exists (Post #{existing_id})",
-                "fix": "This post is already in the Command Center. Edit the copy in the file to make it unique, or delete the existing post first.",
-                "platform": platform,
-                "preview": content_preview,
-                "duplicate_post_id": existing_id,
             })
             continue
 
@@ -4900,15 +4896,42 @@ def compose_import_file():
         if row.get('video'):
             source_content = f"{original_filename} | {row['video']}"
 
-        new_id = add_standalone_post(
-            source_type='import',
-            source_content=source_content,
-            platform=platform,
-            content=content,
-        )
-        existing[(platform, content)] = new_id
-        imported += 1
-        by_platform[platform] = by_platform.get(platform, 0) + 1
+        for platform, original_token in platforms:
+            if platform not in IMPORT_PLATFORMS:
+                skipped += 1
+                skipped_details.append({
+                    "row": i,
+                    "reason": "unsupported_platform",
+                    "message": f"Unsupported platform '{original_token}'",
+                    "fix": "Change the Platform value to one of: Threads, LinkedIn, Facebook, Twitter/X. Use commas to list multiple (e.g. 'Twitter,Threads').",
+                    "platform": original_token or "(blank)",
+                    "preview": content_preview,
+                })
+                continue
+
+            existing_id = existing.get((platform, content))
+            if existing_id is not None:
+                skipped += 1
+                skipped_details.append({
+                    "row": i,
+                    "reason": "duplicate",
+                    "message": f"Duplicate — identical {platform} post already exists (Post #{existing_id})",
+                    "fix": "This post is already in the Command Center. Edit the copy in the file to make it unique, or delete the existing post first.",
+                    "platform": platform,
+                    "preview": content_preview,
+                    "duplicate_post_id": existing_id,
+                })
+                continue
+
+            new_id = add_standalone_post(
+                source_type='import',
+                source_content=source_content,
+                platform=platform,
+                content=content,
+            )
+            existing[(platform, content)] = new_id
+            imported += 1
+            by_platform[platform] = by_platform.get(platform, 0) + 1
 
     return jsonify({
         "success": True,
