@@ -368,6 +368,13 @@
                                                     ✕
                                                 </button>
                                             </div>
+                                            <div class="d-none mt-2 align-items-center gap-2 post-link-image-row" id="post-link-image-row-{{ post.id }}" style="display: flex;">
+                                                <select class="form-select form-select-sm d-none" id="post-link-urls-{{ post.id }}" style="max-width: 60%;"></select>
+                                                <button class="btn btn-sm btn-outline-info flex-grow-1" type="button" onclick="fetchLinkImage({{ post.id }}, 'social')" id="post-link-image-btn-{{ post.id }}" title="Pull og:image from the URL in the post">
+                                                    🔗 Use Image From Link
+                                                </button>
+                                                <span class="spinner-border spinner-border-sm text-info d-none" id="post-link-image-spinner-{{ post.id }}" role="status"></span>
+                                            </div>
                                         </div>
                                         
                                         <!-- Library Pane -->
@@ -468,7 +475,7 @@
                     <label class="form-label fw-bold" for="posts-per-platform">Posts per Platform</label>
                     <div class="input-group">
                         <button class="btn btn-outline-secondary" type="button" onclick="adjustPostCount(-1)">−</button>
-                        <input type="number" class="form-control text-center" id="posts-per-platform" value="1" min="1" max="21">
+                        <input type="number" class="form-control text-center" id="posts-per-platform" value="10" min="1" max="21">
                         <button class="btn btn-outline-secondary" type="button" onclick="adjustPostCount(1)">+</button>
                     </div>
                     <small class="text-muted">Generate 1-21 unique posts per platform</small>
@@ -2420,8 +2427,128 @@ function editPostImage(postId) {
     const fileInput = document.getElementById(`image-file-input-${postId}`);
     if (fileInput) fileInput.value = '';
     
+    populatePostLinkUrls(postId);
+    
     editForm.classList.remove('d-none');
     if (addBtn) addBtn.classList.add('d-none');
+}
+
+// Same regex used server-side in extract_urls_from_text
+const POST_URL_REGEX = /https?:\/\/[^\s<>"'\)\]\}]+/gi;
+const POST_URL_TRAILING_PUNCT = /[.,;:!?>]+$/;
+
+function extractUrlsFromPostText(text) {
+    if (!text) return [];
+    const seen = [];
+    const matches = text.match(POST_URL_REGEX) || [];
+    for (let raw of matches) {
+        let cleaned = raw.replace(POST_URL_TRAILING_PUNCT, '');
+        while (cleaned.endsWith(')') &&
+               (cleaned.split('(').length - 1) < (cleaned.split(')').length - 1)) {
+            cleaned = cleaned.slice(0, -1);
+        }
+        if (!cleaned) continue;
+        try {
+            const u = new URL(cleaned);
+            if (u.protocol !== 'http:' && u.protocol !== 'https:') continue;
+        } catch (e) { continue; }
+        if (!seen.includes(cleaned)) seen.push(cleaned);
+        if (seen.length >= 5) break;
+    }
+    return seen;
+}
+
+function populatePostLinkUrls(postId) {
+    const row = document.getElementById(`post-link-image-row-${postId}`);
+    const select = document.getElementById(`post-link-urls-${postId}`);
+    const btn = document.getElementById(`post-link-image-btn-${postId}`);
+    if (!row || !select || !btn) return;
+    
+    const textEl = document.getElementById(`saved-post-${postId}`);
+    const text = textEl ? (textEl.innerText || textEl.textContent || '') : '';
+    const urls = extractUrlsFromPostText(text);
+    
+    select.innerHTML = '';
+    if (urls.length === 0) {
+        row.style.display = 'none';
+        return;
+    }
+    row.style.display = 'flex';
+    
+    if (urls.length > 1) {
+        for (const url of urls) {
+            const opt = document.createElement('option');
+            opt.value = url;
+            opt.textContent = url.length > 50 ? url.slice(0, 47) + '…' : url;
+            opt.title = url;
+            select.appendChild(opt);
+        }
+        select.classList.remove('d-none');
+    } else {
+        select.classList.add('d-none');
+    }
+    
+    btn.dataset.firstUrl = urls[0];
+}
+
+function fetchLinkImage(postId, kind) {
+    const select = document.getElementById(`post-link-urls-${postId}`);
+    const btn = document.getElementById(`post-link-image-btn-${postId}`);
+    const spinner = document.getElementById(`post-link-image-spinner-${postId}`);
+    if (!btn) return;
+    
+    let target = '';
+    if (select && !select.classList.contains('d-none') && select.value) {
+        target = select.value;
+    } else if (btn.dataset.firstUrl) {
+        target = btn.dataset.firstUrl;
+    } else {
+        const textEl = document.getElementById(`saved-post-${postId}`);
+        const urls = extractUrlsFromPostText(textEl ? (textEl.innerText || textEl.textContent || '') : '');
+        target = urls[0] || '';
+    }
+    
+    if (!target) {
+        showToast('No URL detected in this post.', 'error');
+        return;
+    }
+    
+    btn.disabled = true;
+    if (spinner) spinner.classList.remove('d-none');
+    
+    const endpoint = kind === 'social'
+        ? `/social/${postId}/link-image`
+        : `/compose/post/${postId}/link-image`;
+    
+    fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: target })
+    })
+    .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
+    .then(({ ok, data }) => {
+        if (ok && data.success && data.image_url) {
+            const urlInput = document.getElementById(`image-url-input-${postId}`);
+            if (urlInput) urlInput.value = data.image_url;
+            const finalUrl = document.getElementById(`post-final-image-url-${postId}`);
+            if (finalUrl) finalUrl.value = data.image_url;
+            if (typeof savePostImageWithUrl === 'function') {
+                savePostImageWithUrl(postId, data.image_url);
+            } else {
+                savePostImage(postId);
+            }
+            showToast('Pulled image from link!', 'success');
+        } else {
+            showToast('Could not get image from link: ' + (data.error || 'unknown error'), 'error');
+        }
+    })
+    .catch(err => {
+        showToast('Error: ' + err.message, 'error');
+    })
+    .finally(() => {
+        btn.disabled = false;
+        if (spinner) spinner.classList.add('d-none');
+    });
 }
 
 function cancelImageEdit(postId) {

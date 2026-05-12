@@ -265,6 +265,254 @@ def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
+# ── SSRF-hardened outbound fetch utilities ─────────────────────────────────
+#
+# Any code path that fetches a URL whose value is influenced by user input
+# (post bodies, recall image lists, og:image candidates, etc.) MUST go through
+# `_fetch_safely` so we get protocol allowlisting, public-IP DNS validation,
+# per-redirect re-checks, response-size caps, and content-type checks.
+
+import ipaddress
+import socket
+from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urljoin
+
+_ALLOWED_URL_SCHEMES = {"http", "https"}
+_ALLOWED_URL_PORTS = {None, 80, 443}
+_FETCH_USER_AGENT = "PodInsightsBot/1.0 (+https://podinsights.local)"
+_MAX_FETCH_REDIRECTS = 5
+_URL_REGEX = re.compile(r'https?://[^\s<>"\'\)\]\}]+', re.IGNORECASE)
+_TRAILING_PUNCT = '.,;:!?>'
+
+# Background pool for non-blocking og:image fetches triggered from save paths
+_link_image_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="link-image")
+
+
+class UnsafeURLError(ValueError):
+    """Raised when a URL fails SSRF validation."""
+
+
+def _ip_is_public(ip_obj) -> bool:
+    """Return True only for globally routable, non-private IP addresses."""
+    if (
+        ip_obj.is_loopback
+        or ip_obj.is_link_local
+        or ip_obj.is_private
+        or ip_obj.is_reserved
+        or ip_obj.is_multicast
+        or ip_obj.is_unspecified
+    ):
+        return False
+    # Block IPv4-mapped/IPv4-compatible IPv6 that wrap a private address
+    if isinstance(ip_obj, ipaddress.IPv6Address):
+        mapped = ip_obj.ipv4_mapped or getattr(ip_obj, "sixtofour", None)
+        if mapped is not None and not _ip_is_public(mapped):
+            return False
+    return True
+
+
+def _assert_safe_url(url: str):
+    """Validate scheme, port, and resolved IPs for a URL. Returns the parsed URL."""
+    if not isinstance(url, str) or not url.strip():
+        raise UnsafeURLError("URL is empty")
+    parsed = urlparse(url.strip())
+    scheme = (parsed.scheme or "").lower()
+    if scheme not in _ALLOWED_URL_SCHEMES:
+        raise UnsafeURLError(f"URL scheme not allowed: {scheme!r}")
+    if not parsed.hostname:
+        raise UnsafeURLError("URL has no hostname")
+    if "@" in (parsed.netloc or ""):
+        raise UnsafeURLError("URL must not contain userinfo")
+    port = parsed.port
+    if port not in _ALLOWED_URL_PORTS:
+        raise UnsafeURLError(f"URL port not allowed: {port}")
+
+    host = parsed.hostname
+    # Reject bare IP literals that fall in private space without a DNS lookup
+    try:
+        literal_ip = ipaddress.ip_address(host)
+    except ValueError:
+        literal_ip = None
+    if literal_ip is not None and not _ip_is_public(literal_ip):
+        raise UnsafeURLError(f"URL host resolves to non-public address: {host}")
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except socket.gaierror as exc:
+        raise UnsafeURLError(f"DNS resolution failed for {host!r}: {exc}") from exc
+    if not infos:
+        raise UnsafeURLError(f"No addresses resolved for {host!r}")
+    for info in infos:
+        sockaddr = info[4]
+        ip_str = sockaddr[0]
+        # IPv6 scoped addresses arrive like "fe80::1%eth0" -- strip zone id
+        if "%" in ip_str:
+            ip_str = ip_str.split("%", 1)[0]
+        try:
+            ip_obj = ipaddress.ip_address(ip_str)
+        except ValueError as exc:
+            raise UnsafeURLError(f"Could not parse resolved address {ip_str!r}") from exc
+        if not _ip_is_public(ip_obj):
+            raise UnsafeURLError(
+                f"URL host {host!r} resolves to non-public address {ip_str}"
+            )
+    return parsed
+
+
+def _fetch_safely(
+    url: str,
+    *,
+    max_bytes: int,
+    timeout: float = 10.0,
+    allowed_content_types: tuple = (),
+):
+    """Fetch a URL with SSRF, redirect, size, and content-type protections.
+
+    Returns (body_bytes, content_type, final_url). Raises UnsafeURLError on
+    SSRF/validation failures, or RuntimeError on fetch problems.
+    """
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
+
+    current = url
+    session = requests.Session()
+    session.headers.update({"User-Agent": _FETCH_USER_AGENT, "Accept": "*/*"})
+    try:
+        for hop in range(_MAX_FETCH_REDIRECTS + 1):
+            _assert_safe_url(current)
+            response = session.get(
+                current,
+                stream=True,
+                timeout=timeout,
+                allow_redirects=False,
+            )
+            try:
+                if response.is_redirect or response.status_code in (301, 302, 303, 307, 308):
+                    location = response.headers.get("Location")
+                    if not location:
+                        raise RuntimeError(
+                            f"Redirect status {response.status_code} without Location"
+                        )
+                    next_url = urljoin(current, location)
+                    if hop >= _MAX_FETCH_REDIRECTS:
+                        raise RuntimeError("Too many redirects")
+                    current = next_url
+                    continue
+
+                if not response.ok:
+                    raise RuntimeError(
+                        f"Upstream returned HTTP {response.status_code} for {current}"
+                    )
+
+                content_type = (response.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                if allowed_content_types and not any(
+                    content_type.startswith(prefix) for prefix in allowed_content_types
+                ):
+                    raise RuntimeError(
+                        f"Disallowed content type {content_type!r} for {current}"
+                    )
+
+                content_length_header = response.headers.get("Content-Length")
+                if content_length_header is not None:
+                    try:
+                        if int(content_length_header) > max_bytes:
+                            raise RuntimeError(
+                                f"Response too large ({content_length_header} bytes) for {current}"
+                            )
+                    except ValueError:
+                        pass  # malformed header -- enforce via streaming below
+
+                buffer = bytearray()
+                for chunk in response.iter_content(chunk_size=64 * 1024):
+                    if not chunk:
+                        continue
+                    buffer.extend(chunk)
+                    if len(buffer) > max_bytes:
+                        raise RuntimeError(
+                            f"Response exceeded max_bytes ({max_bytes}) for {current}"
+                        )
+                return bytes(buffer), content_type, current
+            finally:
+                response.close()
+        raise RuntimeError("Too many redirects")
+    finally:
+        session.close()
+
+
+def extract_urls_from_text(text: str | None, *, limit: int = 5) -> list:
+    """Pull HTTP(S) URLs out of arbitrary text, deduped, trailing punct stripped."""
+    if not text:
+        return []
+    seen = []
+    for match in _URL_REGEX.findall(text):
+        cleaned = match.rstrip(_TRAILING_PUNCT)
+        # Balance trailing closing parens that the regex grabbed
+        while cleaned.endswith(')') and cleaned.count('(') < cleaned.count(')'):
+            cleaned = cleaned[:-1]
+        if not cleaned:
+            continue
+        try:
+            parsed = urlparse(cleaned)
+        except ValueError:
+            continue
+        if parsed.scheme.lower() not in _ALLOWED_URL_SCHEMES or not parsed.hostname:
+            continue
+        if cleaned not in seen:
+            seen.append(cleaned)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def fetch_og_image_for_url(url: str):
+    """Fetch a webpage safely and return an absolute, SSRF-validated og:image URL."""
+    try:
+        body, _ctype, final_url = _fetch_safely(
+            url,
+            max_bytes=2_000_000,
+            timeout=8,
+            allowed_content_types=("text/html", "application/xhtml"),
+        )
+    except (UnsafeURLError, RuntimeError, requests.RequestException) as exc:
+        app.logger.info("og:image page fetch failed for %s: %s", url, exc)
+        return None
+
+    try:
+        # Parse only enough to find meta/link tags
+        soup = BeautifulSoup(body, "html.parser")
+    except Exception as exc:
+        app.logger.info("og:image HTML parse failed for %s: %s", url, exc)
+        return None
+
+    candidate = None
+    for selector in (
+        ("meta", {"property": re.compile(r"^og:image(?::url)?$", re.IGNORECASE)}),
+        ("meta", {"name": re.compile(r"^og:image$", re.IGNORECASE)}),
+        ("meta", {"name": re.compile(r"^twitter:image(?::src)?$", re.IGNORECASE)}),
+        ("meta", {"property": re.compile(r"^twitter:image(?::src)?$", re.IGNORECASE)}),
+        ("link", {"rel": re.compile(r"image_src", re.IGNORECASE)}),
+    ):
+        tag_name, attrs = selector
+        tag = soup.find(tag_name, attrs=attrs)
+        if not tag:
+            continue
+        value = tag.get("content") or tag.get("href")
+        if value:
+            candidate = value.strip()
+            break
+
+    if not candidate:
+        return None
+
+    absolute = urljoin(final_url, candidate)
+    try:
+        _assert_safe_url(absolute)
+    except UnsafeURLError as exc:
+        app.logger.info("og:image candidate rejected for %s: %s", url, exc)
+        return None
+    return absolute
+
+
 def validate_and_clean_image(file_storage):
     """
     Validate image by parsing with Pillow and re-encode to strip embedded data.
@@ -312,15 +560,16 @@ def save_stock_image_to_library(image_url: str, direct_save: bool = False) -> st
     Otherwise downloads and re-uploads to Cloudinary or local storage.
     Returns the saved image URL.
     """
-    import requests as req
-    import re
-    
-    # Check if this image URL is already in the library
+    # Check if this image URL is already in the library.
+    # `list_uploaded_images()` returns `sqlite3.Row` objects which use mapping
+    # access (`row['col']`) but do not implement `dict.get()`.
     existing = list_uploaded_images()
     for img in existing:
-        # Check if original URL matches (stored in filename or url)
-        if img.get('url') == image_url or image_url in str(img.get('filename', '')):
-            return img['url']
+        keys = img.keys() if hasattr(img, 'keys') else []
+        existing_url = img['url'] if 'url' in keys else None
+        existing_filename = img['filename'] if 'filename' in keys else ''
+        if existing_url == image_url or (existing_filename and image_url in str(existing_filename)):
+            return existing_url or image_url
     
     # Check if this is a stock image URL that allows hotlinking
     stock_domains = ['images.unsplash.com', 'unsplash.com', 'pexels.com', 'pixabay.com']
@@ -353,23 +602,22 @@ def save_stock_image_to_library(image_url: str, direct_save: bool = False) -> st
         )
         return image_url
     
-    # For non-stock URLs, download and re-upload
-    response = req.get(image_url, timeout=30, stream=True)
-    response.raise_for_status()
-    
-    # Get content type to determine extension
-    content_type = response.headers.get('content-type', 'image/jpeg')
+    # For non-stock URLs, download and re-upload through the SSRF-hardened helper
+    image_data, content_type, _final_url = _fetch_safely(
+        image_url,
+        max_bytes=16 * 1024 * 1024,
+        timeout=15,
+        allowed_content_types=("image/",),
+    )
+
     ext_map = {
         'image/jpeg': 'jpg',
         'image/png': 'png',
         'image/gif': 'gif',
         'image/webp': 'webp',
     }
-    ext = ext_map.get(content_type.split(';')[0].strip(), 'jpg')
-    
-    # Read image data
-    image_data = response.content
-    
+    ext = ext_map.get((content_type or '').split(';')[0].strip(), 'jpg')
+
     # Validate and clean the image
     img_file = io.BytesIO(image_data)
     try:
@@ -1725,8 +1973,8 @@ def generate_article_social(article_id: int):
     if not platforms:
         platforms = ["twitter", "linkedin", "facebook", "threads"]
     
-    # Get number of posts per platform (default to 1, max 21)
-    posts_per_platform = request.form.get('posts_per_platform', 1, type=int)
+    # Get number of posts per platform (default to 10, max 21)
+    posts_per_platform = request.form.get('posts_per_platform', 10, type=int)
     posts_per_platform = max(1, min(posts_per_platform, 21))
     
     # Get optional extra context for the prompt
@@ -1841,6 +2089,15 @@ def edit_social_post(post_id: int):
         return {"error": "Content cannot be empty"}, 400
     
     update_social_post(post_id, content)
+
+    # Auto-fetch og:image if the edit added a new URL and no image is set
+    existing_image = post['image_url'] if 'image_url' in post.keys() else None
+    if not existing_image:
+        old_urls = set(extract_urls_from_text(post['content'] if 'content' in post.keys() else ''))
+        new_urls = extract_urls_from_text(content)
+        if any(u not in old_urls for u in new_urls):
+            _maybe_attach_link_image(post_id, content, kind='social')
+
     return {"success": True, "content": content}
 
 
@@ -1854,6 +2111,76 @@ def edit_social_post_image(post_id: int):
     image_url = request.form.get('image_url', '').strip() or None
     update_social_post_image(post_id, image_url)
     return jsonify({"success": True, "image_url": image_url})
+
+
+@app.route('/social/<int:post_id>/link-image', methods=['GET', 'POST'])
+def social_apply_link_image(post_id: int):
+    """Fetch the og:image of a URL referenced by a social post and attach it."""
+    post = get_social_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    content = post['content'] if 'content' in post.keys() else ''
+    detected = extract_urls_from_text(content)
+    current_image = post['image_url'] if 'image_url' in post.keys() else None
+
+    if request.method == 'GET':
+        return jsonify({
+            "success": True,
+            "detected_urls": detected,
+            "image_url": current_image,
+        })
+
+    data = request.get_json(silent=True) or {}
+    override = (data.get('url') or '').strip()
+    allow_external = bool(data.get('allow_external'))
+
+    target = override or (detected[0] if detected else None)
+    if not target:
+        return jsonify({
+            "error": "No URL found in post and none provided.",
+            "detected_urls": detected,
+        }), 400
+    if override and override not in detected and not allow_external:
+        return jsonify({
+            "error": "Override URL is not present in the post body.",
+            "detected_urls": detected,
+        }), 400
+
+    try:
+        _assert_safe_url(target)
+    except UnsafeURLError as exc:
+        return jsonify({"error": f"URL rejected: {exc}", "detected_urls": detected}), 400
+
+    og_image = fetch_og_image_for_url(target)
+    if not og_image:
+        return jsonify({
+            "error": "Could not find an og:image at that URL.",
+            "detected_urls": detected,
+            "source_url": target,
+        }), 422
+
+    try:
+        saved_url = save_stock_image_to_library(og_image)
+    except (UnsafeURLError, RuntimeError, ValueError, requests.RequestException) as exc:
+        app.logger.warning(
+            "Failed to save og:image %s for social post %s: %s", og_image, post_id, exc
+        )
+        return jsonify({
+            "error": f"Failed to download og:image: {exc}",
+            "detected_urls": detected,
+            "source_url": target,
+            "og_image_url": og_image,
+        }), 422
+
+    update_social_post_image(post_id, saved_url)
+    return jsonify({
+        "success": True,
+        "image_url": saved_url,
+        "source_url": target,
+        "og_image_url": og_image,
+        "detected_urls": detected,
+    })
 
 
 @app.route('/social/posts/bulk-image', methods=['POST'])
@@ -4506,7 +4833,7 @@ def compose_generate():
     content = request.form.get('content', '').strip()
     platforms = request.form.getlist('platforms')
     tone = request.form.get('tone', 'professional')
-    posts_per_platform = request.form.get('posts_per_platform', 1, type=int)
+    posts_per_platform = request.form.get('posts_per_platform', 10, type=int)
     extra_context = request.form.get('extra_context', '').strip() or None
     topic = request.form.get('topic', '').strip() or None
     image_url = request.form.get('image_url', '').strip() or None
@@ -4546,6 +4873,7 @@ def compose_generate():
                     posts_per_platform=posts_per_platform,
                     extra_context=gh_extra,
                     use_local=use_local,
+                    source_url=content,
                 )
                 source_data = {
                     "url": content,
@@ -4626,12 +4954,16 @@ def compose_generate():
                         "mime_type": mime,
                     })
             elif recall_urls:
-                # Recalled from recent image prompts -- fetch by URL
+                # Recalled from recent image prompts -- fetch by URL through SSRF guard
                 for url in recall_urls[:4]:
                     try:
-                        resp = _urlreq.urlopen(url, timeout=10)
-                        raw = resp.read()
-                        mime = resp.headers.get('Content-Type', '') or mimetypes.guess_type(url)[0] or 'image/jpeg'
+                        raw, ctype, _final = _fetch_safely(
+                            url,
+                            max_bytes=16 * 1024 * 1024,
+                            timeout=15,
+                            allowed_content_types=("image/",),
+                        )
+                        mime = ctype or mimetypes.guess_type(url)[0] or 'image/jpeg'
                         if first_image_bytes is None:
                             first_image_bytes = raw
                         image_url = image_url or url
@@ -4639,6 +4971,8 @@ def compose_generate():
                             "base64": b64module.b64encode(raw).decode(),
                             "mime_type": mime,
                         })
+                    except (UnsafeURLError, RuntimeError, requests.RequestException) as exc:
+                        app.logger.warning("Could not fetch recalled image %s: %s", url, exc)
                     except Exception:
                         app.logger.warning("Could not fetch recalled image: %s", url)
                 if not images_payload:
@@ -4714,6 +5048,8 @@ def compose_generate():
                     'content': post_content,
                     'image_url': image_url,
                 })
+                if not image_url:
+                    _maybe_attach_link_image(post_id, post_content)
         
         response_data = {
             "success": True,
@@ -4768,6 +5104,9 @@ def compose_create_post():
         content=content,
         image_url=image_url,
     )
+
+    if not image_url:
+        _maybe_attach_link_image(post_id, content)
 
     return jsonify({
         "success": True,
@@ -4932,6 +5271,7 @@ def compose_import_file():
             existing[(platform, content)] = new_id
             imported += 1
             by_platform[platform] = by_platform.get(platform, 0) + 1
+            _maybe_attach_link_image(new_id, content)
 
     return jsonify({
         "success": True,
@@ -4954,6 +5294,16 @@ def compose_edit_post(post_id: int):
         return jsonify({"error": "Content is required"}), 400
     
     update_standalone_post(post_id, new_content)
+
+    # If the edit introduced a URL and the post still has no image, kick off a
+    # background fetch of the og:image. Skip when the body did not change or
+    # already contained the same URLs.
+    if not post.get('image_url'):
+        old_urls = set(extract_urls_from_text(post.get('content') or ''))
+        new_urls = extract_urls_from_text(new_content)
+        if any(u not in old_urls for u in new_urls):
+            _maybe_attach_link_image(post_id, new_content)
+
     return jsonify({"success": True, "content": new_content})
 
 
@@ -5068,6 +5418,161 @@ def compose_apply_stock_image(post_id: int):
     
     update_standalone_post_image(post_id, saved_url)
     return jsonify({"success": True, "image_url": saved_url, "saved_to_library": saved_url != image_url})
+
+
+@app.route('/compose/post/<int:post_id>/link-image', methods=['GET', 'POST'])
+def compose_apply_link_image(post_id: int):
+    """Fetch the og:image of a URL referenced by the post and attach it.
+    ---
+    tags:
+      - Compose
+    parameters:
+      - name: post_id
+        in: path
+        type: integer
+        required: true
+      - name: body
+        in: body
+        schema:
+          type: object
+          properties:
+            url:
+              type: string
+              description: Optional override URL. Must be one of the URLs detected in the post body unless `allow_external` is true.
+            allow_external:
+              type: boolean
+              default: false
+    responses:
+      200:
+        description: Image attached successfully (POST) or detected URLs (GET)
+      400:
+        description: No URL available or override URL not in post body
+      404:
+        description: Post not found
+      422:
+        description: Could not extract an og:image from the URL
+    """
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    detected = extract_urls_from_text(post.get('content') or '')
+
+    if request.method == 'GET':
+        return jsonify({
+            "success": True,
+            "detected_urls": detected,
+            "image_url": post.get('image_url'),
+        })
+
+    data = request.get_json(silent=True) or {}
+    override = (data.get('url') or '').strip()
+    allow_external = bool(data.get('allow_external'))
+
+    target = override or (detected[0] if detected else None)
+    if not target:
+        return jsonify({
+            "error": "No URL found in post and none provided.",
+            "detected_urls": detected,
+        }), 400
+
+    if override and override not in detected and not allow_external:
+        return jsonify({
+            "error": "Override URL is not present in the post body.",
+            "detected_urls": detected,
+        }), 400
+
+    try:
+        _assert_safe_url(target)
+    except UnsafeURLError as exc:
+        return jsonify({"error": f"URL rejected: {exc}", "detected_urls": detected}), 400
+
+    og_image = fetch_og_image_for_url(target)
+    if not og_image:
+        return jsonify({
+            "error": "Could not find an og:image at that URL.",
+            "detected_urls": detected,
+            "source_url": target,
+        }), 422
+
+    try:
+        saved_url = save_stock_image_to_library(og_image)
+    except (UnsafeURLError, RuntimeError, ValueError, requests.RequestException) as exc:
+        app.logger.warning("Failed to save og:image %s for post %s: %s", og_image, post_id, exc)
+        return jsonify({
+            "error": f"Failed to download og:image: {exc}",
+            "detected_urls": detected,
+            "source_url": target,
+            "og_image_url": og_image,
+        }), 422
+
+    update_standalone_post_image(post_id, saved_url)
+    return jsonify({
+        "success": True,
+        "image_url": saved_url,
+        "source_url": target,
+        "og_image_url": og_image,
+        "detected_urls": detected,
+    })
+
+
+def _maybe_attach_link_image(post_id: int, content: str | None, kind: str = 'standalone') -> None:
+    """Schedule a background fetch of the first URL's og:image for the post.
+
+    No-op if the post already has an image, has no URLs, or all fetches fail.
+    Designed to be called from request handlers without blocking the response.
+    `kind` is 'standalone' (compose) or 'social' (per-article posts).
+    """
+    if not content:
+        return
+    urls = extract_urls_from_text(content)
+    if not urls:
+        return
+
+    if kind == 'social':
+        loader, updater = get_social_post, update_social_post_image
+    else:
+        loader, updater = get_standalone_post, update_standalone_post_image
+
+    def _worker(pid: int, candidate_urls: list) -> None:
+        try:
+            current = loader(pid)
+            if not current:
+                return
+            if current['image_url'] if 'image_url' in current.keys() else None:
+                return
+            for candidate in candidate_urls:
+                try:
+                    _assert_safe_url(candidate)
+                except UnsafeURLError as exc:
+                    app.logger.info("Skipping unsafe URL %s for post %s: %s", candidate, pid, exc)
+                    continue
+                og_image = fetch_og_image_for_url(candidate)
+                if not og_image:
+                    continue
+                try:
+                    saved_url = save_stock_image_to_library(og_image)
+                except (UnsafeURLError, RuntimeError, ValueError, requests.RequestException) as exc:
+                    app.logger.info(
+                        "Could not save og:image %s for post %s: %s", og_image, pid, exc
+                    )
+                    continue
+                latest = loader(pid)
+                latest_image = latest['image_url'] if latest and 'image_url' in latest.keys() else None
+                if latest and not latest_image:
+                    updater(pid, saved_url)
+                    app.logger.info(
+                        "Auto-attached og:image to %s post %s from %s", kind, pid, candidate
+                    )
+                return
+        except Exception:
+            app.logger.exception("Background link-image worker failed for post %s", pid)
+
+    try:
+        _link_image_executor.submit(_worker, post_id, urls)
+    except RuntimeError:
+        # Executor shut down (e.g. during reload); run inline as a best effort
+        _worker(post_id, urls)
 
 
 @app.route('/compose/stock-images/search', methods=['GET'])
@@ -6023,7 +6528,7 @@ def compose_generate_from_source():
     source_id = request.form.get('source_id', type=int)
     platforms = request.form.getlist('platforms')
     tone = request.form.get('tone', 'professional')
-    posts_per_platform = request.form.get('posts_per_platform', 1, type=int)
+    posts_per_platform = request.form.get('posts_per_platform', 10, type=int)
     extra_context = request.form.get('extra_context', '').strip() or None
     image_url = request.form.get('image_url', '').strip() or None
     use_local = request.form.get('use_local', 'false').lower() in ('true', '1', 'yes')
@@ -6067,6 +6572,7 @@ def compose_generate_from_source():
             posts_per_platform=posts_per_platform,
             extra_context=extra_context,
             use_local=use_local,
+            source_url=source['url'],
         )
         
         update_url_source_last_used(source_id)
@@ -6102,6 +6608,8 @@ def compose_generate_from_source():
                     'content': post_content,
                     'image_url': image_url,
                 })
+                if not image_url:
+                    _maybe_attach_link_image(post_id, post_content)
         
         return jsonify({
             "success": True,
