@@ -1,4 +1,4 @@
-"""Flask web interface for the PodInsights tool."""
+"""Flask web interface for the Insights tool."""
 
 from __future__ import annotations
 import os
@@ -145,7 +145,7 @@ from database import (
     get_generated_thumbnail,
     delete_generated_thumbnail,
 )
-from podinsights import (
+from insights import (
     transcribe_audio,
     summarize_text,
     extract_action_items,
@@ -231,7 +231,7 @@ swagger_config = {
 
 swagger_template = {
     "info": {
-        "title": "PodInsights API",
+        "title": "Insights API",
         "description": "API for managing podcasts, articles, social media posts, and scheduling",
         "version": "1.0.0"
     },
@@ -279,7 +279,7 @@ from urllib.parse import urljoin
 
 _ALLOWED_URL_SCHEMES = {"http", "https"}
 _ALLOWED_URL_PORTS = {None, 80, 443}
-_FETCH_USER_AGENT = "PodInsightsBot/1.0 (+https://podinsights.local)"
+_FETCH_USER_AGENT = "InsightsBot/1.0 (+https://insights.local)"
 _MAX_FETCH_REDIRECTS = 5
 _URL_REGEX = re.compile(r'https?://[^\s<>"\'\)\]\}]+', re.IGNORECASE)
 _TRAILING_PUNCT = '.,;:!?>'
@@ -641,7 +641,7 @@ def save_stock_image_to_library(image_url: str, direct_save: bool = False) -> st
     if CLOUDINARY_CONFIGURED:
         result = cloudinary.uploader.upload(
             cleaned_bytes,
-            folder="podinsights/stock",
+            folder="insights/stock",
             resource_type="image"
         )
         saved_url = result['secure_url']
@@ -4999,7 +4999,7 @@ def compose_generate():
                     if CLOUDINARY_CONFIGURED:
                         result = cloudinary.uploader.upload(
                             first_image_bytes,
-                            folder="podinsights",
+                            folder="insights",
                             resource_type="image",
                         )
                         image_url = result['secure_url']
@@ -5662,7 +5662,7 @@ def compose_upload_image():
         try:
             result = cloudinary.uploader.upload(
                 cleaned_bytes,
-                folder="podinsights",
+                folder="insights",
                 resource_type="image"
             )
             image_url = result['secure_url']
@@ -6556,7 +6556,7 @@ def compose_generate_from_source():
     posts_per_platform = max(1, min(posts_per_platform, 10))
     
     try:
-        from podinsights import generate_posts_from_text
+        from insights import generate_posts_from_text
         
         source_text = f"TITLE: {source['title']}\n\n"
         if source['description']:

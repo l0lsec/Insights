@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Configure Facebook - PodInsights{% endblock %}
+{% block title %}Configure Facebook - Insights{% endblock %}
 {% block header %}Configure Facebook{% endblock %}
 {% block content %}
 
@@ -26,7 +26,7 @@
                     <li>Go to the <a href="https://developers.facebook.com/apps/" target="_blank">Meta Developer Portal</a> and log in.</li>
                     <li>Click <strong>"Create App"</strong>.</li>
                     <li>Choose <strong>"Other"</strong> as the use case, then <strong>"Business"</strong> as the app type.</li>
-                    <li>Give your app a name (e.g. <em>"PodInsights Facebook"</em>) and click <strong>"Create App"</strong>.</li>
+                    <li>Give your app a name (e.g. <em>"Insights Facebook"</em>) and click <strong>"Create App"</strong>.</li>
                     <li>On the dashboard, find <strong>"Facebook Login for Business"</strong> and click <strong>"Set Up"</strong>.</li>
                 </ol>
             </div>
@@ -77,7 +77,7 @@
 FACEBOOK_APP_SECRET=your_app_secret_here
 FACEBOOK_REDIRECT_URI={{ request.url_root }}facebook/callback</code></pre>
                     </li>
-                    <li>Restart PodInsights so the new variables are loaded.</li>
+                    <li>Restart Insights so the new variables are loaded.</li>
                     <li>Return to the <a href="{{ url_for('compose_page') }}">Command Center</a> and click <strong>"Connect"</strong> on the Facebook card.</li>
                 </ol>
             </div>

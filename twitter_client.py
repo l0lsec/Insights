@@ -255,7 +255,7 @@ class TwitterClient:
             # Download the image
             logger.info("Downloading image from: %s", image_url)
             dl_headers = {
-                "User-Agent": "Mozilla/5.0 (compatible; PodInsights/1.0)"
+                "User-Agent": "Mozilla/5.0 (compatible; Insights/1.0)"
             }
             img_response = requests.get(
                 image_url, headers=dl_headers, timeout=30, allow_redirects=True

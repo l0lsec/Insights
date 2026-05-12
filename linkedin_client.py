@@ -29,7 +29,7 @@ def fetch_og_metadata(url: str, timeout: int = 10) -> dict:
     
     try:
         headers = {
-            "User-Agent": "Mozilla/5.0 (compatible; PodInsights/1.0; +https://podinsights.app)"
+            "User-Agent": "Mozilla/5.0 (compatible; Insights/1.0; +https://insights.app)"
         }
         response = requests.get(url, headers=headers, timeout=timeout, allow_redirects=True)
         response.raise_for_status()
@@ -313,7 +313,7 @@ class LinkedInClient:
             # Step 1: Download the image from the URL
             logger.info("Downloading image from: %s", image_url)
             headers = {
-                "User-Agent": "Mozilla/5.0 (compatible; PodInsights/1.0)"
+                "User-Agent": "Mozilla/5.0 (compatible; Insights/1.0)"
             }
             img_response = requests.get(image_url, headers=headers, timeout=30, allow_redirects=True)
             img_response.raise_for_status()
