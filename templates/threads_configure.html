@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Configure Threads - PodInsights{% endblock %}
+{% block title %}Configure Threads - Insights{% endblock %}
 {% block header %}Configure Threads{% endblock %}
 {% block content %}
 
@@ -31,7 +31,7 @@
                             <li>Select <strong>"Business"</strong> as the app type, then click <strong>Next</strong>.</li>
                         </ul>
                     </li>
-                    <li>Give your app a name (e.g. <em>"PodInsights Threads"</em>) and click <strong>"Create App"</strong>.</li>
+                    <li>Give your app a name (e.g. <em>"Insights Threads"</em>) and click <strong>"Create App"</strong>.</li>
                     <li>On the app dashboard, scroll to <strong>"Add Products"</strong>, find <strong>"Threads API"</strong> and click <strong>"Set Up"</strong>.</li>
                 </ol>
             </div>
@@ -93,7 +93,7 @@
 THREADS_APP_SECRET=your_app_secret_here
 THREADS_REDIRECT_URI={{ request.url_root }}threads/callback</code></pre>
                     </li>
-                    <li>Restart PodInsights so the new variables are loaded.</li>
+                    <li>Restart Insights so the new variables are loaded.</li>
                     <li>Return to the <a href="{{ url_for('schedule_list') }}">Schedule</a> page and click <strong>"Connect Threads"</strong>.</li>
                     <li>Authorize the app when prompted &mdash; you will be redirected back automatically.</li>
                 </ol>

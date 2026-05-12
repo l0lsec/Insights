@@ -1,4 +1,4 @@
-"""Simple SQLite helpers for PodInsights.
+"""Simple SQLite helpers for Insights.
 
 This module abstracts the small SQLite database used by both the CLI and the
 web interface. Each function wraps a query so callers don't need to know SQL.
