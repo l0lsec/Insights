@@ -611,7 +611,7 @@ def generate_social_copy(
     article_content: str,
     article_topic: str,
     platforms: List[str] | None = None,
-    posts_per_platform: int = 1,
+    posts_per_platform: int = 10,
     extra_context: str | None = None,
 ) -> dict:
     """Generate social media promotional copy with hashtags for different platforms.
@@ -804,7 +804,7 @@ def generate_posts_from_prompt(
     prompt: str,
     platforms: List[str] | None = None,
     tone: str = "professional",
-    posts_per_platform: int = 1,
+    posts_per_platform: int = 10,
     extra_context: str | None = None,
     use_local: bool = False,
 ) -> dict:
@@ -870,7 +870,7 @@ def generate_posts_from_url(
     url: str,
     platforms: List[str] | None = None,
     tone: str = "professional",
-    posts_per_platform: int = 1,
+    posts_per_platform: int = 10,
     extra_context: str | None = None,
     use_local: bool = False,
 ) -> dict:
@@ -974,7 +974,10 @@ def generate_posts_from_url(
                     "content": (
                         "You are a social media content creator specializing in sharing and promoting web content. "
                         "You create engaging posts that summarize, comment on, or promote articles and web pages. "
-                        "Include the URL in posts where appropriate (especially for LinkedIn). "
+                        "CRITICAL: When generating posts from a webpage, you MUST always include the exact source "
+                        "URL verbatim in every single post on every platform. Do not shorten, paraphrase, omit, or "
+                        "replace the URL with placeholder text like '[link]' or 'link in bio'. The URL must appear "
+                        "as a clickable link in the post body. "
                         "You ALWAYS reply with valid JSON only."
                     ),
                 },
@@ -982,14 +985,14 @@ def generate_posts_from_url(
                     "role": "user",
                     "content": (
                         f"Create social media posts to share this web content:\n\n"
-                        f"URL: {url}\n\n"
+                        f"SOURCE URL (MUST be included verbatim in every post): {url}\n\n"
                         f"{extracted_content}\n\n"
                         f"TONE: {tone_instruction}\n\n"
                         + (f"ADDITIONAL CONTEXT:\n{extra_context}\n\n" if extra_context else "")
                         + f"Create posts for these platforms:\n{platform_list}\n\n"
                         "For each post:\n"
                         "1. Summarize or comment on the key points\n"
-                        "2. Include the URL where appropriate\n"
+                        f"2. ALWAYS include the source URL ({url}) verbatim in the post body — this is mandatory for every platform, with no exceptions\n"
                         "3. Add relevant hashtags\n"
                         "4. Make it engaging and encourage clicks/engagement\n"
                         + _build_format_instruction(plats, n)
@@ -1017,11 +1020,17 @@ def generate_posts_from_text(
     platforms: List[str] | None = None,
     tone: str = "professional",
     topic: str | None = None,
-    posts_per_platform: int = 1,
+    posts_per_platform: int = 10,
     extra_context: str | None = None,
     use_local: bool = False,
+    source_url: str | None = None,
 ) -> dict:
-    """Generate social media posts from user-provided text content."""
+    """Generate social media posts from user-provided text content.
+
+    If ``source_url`` is provided, the generator is instructed to include that
+    URL verbatim in every post (used for saved URL sources and similar flows
+    where the text was extracted from a webpage).
+    """
     if platforms is None:
         platforms = ["linkedin", "threads", "twitter"]
 
@@ -1037,6 +1046,29 @@ def generate_posts_from_text(
         ])
 
         topic_section = f"TOPIC: {topic}\n\n" if topic else ""
+        url_section = f"SOURCE URL (MUST be included verbatim in every post): {source_url}\n\n" if source_url else ""
+        system_url_rule = (
+            " CRITICAL: A SOURCE URL has been provided with this content. You MUST include that exact URL "
+            "verbatim in every single post on every platform. Do not shorten, paraphrase, omit, or replace "
+            "the URL with placeholder text like '[link]' or 'link in bio'. The URL must appear as a clickable "
+            "link in the post body."
+            if source_url else ""
+        )
+        if source_url:
+            post_steps = (
+                "1. Capture the key message or insight\n"
+                f"2. ALWAYS include the source URL ({source_url}) verbatim in the post body — this is mandatory for every platform, with no exceptions\n"
+                "3. Optimize for the platform's format\n"
+                "4. Include relevant hashtags\n"
+                "5. Make it engaging and shareable\n"
+            )
+        else:
+            post_steps = (
+                "1. Capture the key message or insight\n"
+                "2. Optimize for the platform's format\n"
+                "3. Include relevant hashtags\n"
+                "4. Make it engaging and shareable\n"
+            )
 
         def _messages(plats, n):
             return [
@@ -1044,7 +1076,8 @@ def generate_posts_from_text(
                     "role": "system",
                     "content": (
                         "You are a social media content creator. You transform text content into engaging "
-                        "social media posts optimized for different platforms. "
+                        "social media posts optimized for different platforms."
+                        f"{system_url_rule} "
                         "You ALWAYS reply with valid JSON only."
                     ),
                 },
@@ -1053,15 +1086,13 @@ def generate_posts_from_text(
                     "content": (
                         f"Transform the following content into social media posts:\n\n"
                         f"{topic_section}"
+                        f"{url_section}"
                         f"CONTENT:\n{text[:5000]}\n\n"
                         f"TONE: {tone_instruction}\n\n"
                         + (f"ADDITIONAL CONTEXT:\n{extra_context}\n\n" if extra_context else "")
                         + f"Create posts for these platforms:\n{platform_list}\n\n"
                         "For each post:\n"
-                        "1. Capture the key message or insight\n"
-                        "2. Optimize for the platform's format\n"
-                        "3. Include relevant hashtags\n"
-                        "4. Make it engaging and shareable\n"
+                        + post_steps
                         + _build_format_instruction(plats, n)
                     ),
                 },
@@ -1179,7 +1210,7 @@ def generate_posts_from_images(
     prompt: str | None = None,
     platforms: List[str] | None = None,
     tone: str = "professional",
-    posts_per_platform: int = 1,
+    posts_per_platform: int = 10,
     extra_context: str | None = None,
     use_local: bool = False,
 ) -> dict:
