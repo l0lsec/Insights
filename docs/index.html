@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Insights – AI-Powered Content Platform</title>
-  <meta name="description" content="Turn RSS feeds, podcasts, YouTube videos, and articles into summaries, generated articles, and platform-ready social media posts. One pipeline from ingestion to publishing.">
+  <meta name="description" content="Self-hosted AI content platform that turns RSS feeds, podcasts, YouTube videos, articles, GitHub repos, and images into summaries, generated articles, and platform-ready social posts. Transcribes with Whisper, generates with OpenAI or local Ollama, and publishes to LinkedIn, Threads, Facebook, and X/Twitter.">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,600;0,9..40,700;1,9..40,400&display=swap" rel="stylesheet">
@@ -12,6 +12,7 @@
     :root {
       --bg: #0f0a1f;
       --surface: #1a1428;
+      --surface-2: #221a33;
       --border: #2d2640;
       --text: #e8e4f0;
       --muted: #9b92b0;
@@ -28,7 +29,7 @@
       line-height: 1.6;
       min-height: 100vh;
     }
-    .wrap { max-width: 720px; margin: 0 auto; padding: 0 1.5rem; }
+    .wrap { max-width: 820px; margin: 0 auto; padding: 0 1.5rem; }
     header {
       padding: 4rem 0 3rem;
       text-align: center;
@@ -51,11 +52,12 @@
       margin: 0 0 2rem;
     }
     .lead {
-      font-size: 1.125rem;
+      font-size: 1.0625rem;
       color: var(--muted);
-      margin: 0 0 3rem;
+      margin: 0 0 1.25rem;
       line-height: 1.7;
     }
+    .lead:last-of-type { margin-bottom: 3rem; }
     .cta {
       display: inline-flex;
       align-items: center;
@@ -77,7 +79,7 @@
     .cta.secondary:hover { border-color: var(--accent); background: rgba(124, 58, 237, 0.1); }
     .buttons { display: flex; flex-wrap: wrap; gap: 0.75rem; justify-content: center; margin-bottom: 4rem; }
     section {
-      padding: 2rem 0;
+      padding: 2.25rem 0;
       border-top: 1px solid var(--border);
     }
     section h2 {
@@ -86,11 +88,15 @@
       margin: 0 0 1rem;
       color: var(--text);
     }
+    section p.section-lead {
+      color: var(--muted);
+      margin: 0 0 1.25rem;
+    }
     ul { margin: 0; padding-left: 1.25rem; color: var(--muted); }
-    li { margin-bottom: 0.35rem; }
+    li { margin-bottom: 0.4rem; }
     .grid {
       display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
       gap: 1rem;
       margin-top: 1rem;
     }
@@ -100,8 +106,68 @@
       border-radius: 12px;
       padding: 1rem 1.25rem;
       font-size: 0.9375rem;
+      color: var(--muted);
     }
-    .card strong { color: var(--accent-light); }
+    .card strong { color: var(--accent-light); display: block; margin-bottom: 0.25rem; }
+    .pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 0.75rem;
+    }
+    .pill {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      padding: 0.3rem 0.75rem;
+      font-size: 0.8125rem;
+      color: var(--accent-light);
+    }
+    .steps {
+      counter-reset: step;
+      list-style: none;
+      padding: 0;
+    }
+    .steps li {
+      counter-increment: step;
+      padding-left: 2.25rem;
+      position: relative;
+      margin-bottom: 0.75rem;
+    }
+    .steps li::before {
+      content: counter(step);
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 1.5rem;
+      height: 1.5rem;
+      border-radius: 50%;
+      background: var(--accent);
+      color: #fff;
+      font-weight: 600;
+      font-size: 0.8125rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    code {
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 0.1rem 0.4rem;
+      font-size: 0.85em;
+      color: var(--accent-light);
+    }
+    pre {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.25rem;
+      overflow-x: auto;
+      color: var(--text);
+      font-size: 0.875rem;
+    }
+    pre code { background: transparent; border: 0; padding: 0; color: inherit; }
     footer {
       margin-top: 4rem;
       padding: 2rem 0;
@@ -119,9 +185,12 @@
     <header>
       <img src="logo.svg" alt="Insights" class="logo" width="100" height="100">
       <h1>Insights</h1>
-      <p class="tagline">AI-Powered Content Platform for Ingestion, Analysis & Social Media Publishing</p>
+      <p class="tagline">AI-Powered Content Platform for Ingestion, Analysis &amp; Social Media Publishing</p>
       <p class="lead">
-        Turn RSS feeds, podcasts, YouTube videos, and articles into summaries, generated articles, and platform-ready social posts. One pipeline from ingestion to publishing—with transcription, summarization, and scheduling built in.
+        Turn RSS feeds, podcasts, YouTube videos, articles, GitHub repos, and images into summaries, generated articles, and platform-ready social posts. Transcribe with Whisper, generate with OpenAI or local Ollama, and schedule/publish to LinkedIn, Threads, Facebook, and X/Twitter from one self-hosted Flask UI.
+      </p>
+      <p class="lead">
+        What started as a podcast transcription tool has grown into a complete content pipeline: ingest any source, let AI do the heavy lifting, and push polished posts out on your schedule.
       </p>
       <div class="buttons">
         <a href="#" id="github-repo" class="cta" target="_blank" rel="noopener">View on GitHub</a>
@@ -130,25 +199,108 @@
     </header>
 
     <section>
-      <h2>Features</h2>
+      <h2>Content sources</h2>
+      <p class="section-lead">Ingest from anywhere — Insights normalizes it all into a single processing pipeline.</p>
       <div class="grid">
-        <div class="card"><strong>RSS &amp; YouTube</strong> – Subscribe to feeds or paste video URLs; transcribe and analyze.</div>
-        <div class="card"><strong>Summaries &amp; actions</strong> – AI summaries and extracted action items from any content.</div>
-        <div class="card"><strong>Article generation</strong> – Turn content into blog posts, news articles, or deep-dives.</div>
-        <div class="card"><strong>Social copy</strong> – Platform-optimized posts for LinkedIn, Threads, Twitter, Facebook, and more.</div>
-        <div class="card"><strong>Scheduling</strong> – Time slots, daily limits, and background publishing.</div>
-        <div class="card"><strong>JIRA</strong> – Create tickets from action items with full context.</div>
+        <div class="card"><strong>RSS feeds</strong> Audio podcasts and text/news feeds with automatic metadata parsing.</div>
+        <div class="card"><strong>YouTube</strong> Channels, playlists, or single videos — audio is extracted via yt-dlp and transcribed.</div>
+        <div class="card"><strong>Article URLs</strong> Any web page, extracted via trafilatura with Open Graph images.</div>
+        <div class="card"><strong>GitHub repos</strong> Paste a repo URL to pull metadata and README content as a source.</div>
+        <div class="card"><strong>Images</strong> Drop in images and use a vision model to generate grounded posts.</div>
+        <div class="card"><strong>Raw text</strong> Paste anything — notes, transcripts, briefs — and process it directly.</div>
       </div>
+    </section>
+
+    <section>
+      <h2>AI processing</h2>
+      <p class="section-lead">Powered by OpenAI by default, with optional routing to a local Ollama instance for text and vision.</p>
+      <div class="grid">
+        <div class="card"><strong>Transcription</strong> mlx-whisper (Apple Silicon), faster-whisper, or the OpenAI Whisper API.</div>
+        <div class="card"><strong>Summarization</strong> Concise, markdown-formatted summaries of transcripts and articles.</div>
+        <div class="card"><strong>Action items</strong> Pull actionable tasks and follow-ups from any processed content.</div>
+        <div class="card"><strong>Article generation</strong> Blog posts, news articles, opinion pieces, or technical deep-dives.</div>
+        <div class="card"><strong>Article refinement</strong> Iteratively improve generated articles with AI-assisted feedback.</div>
+        <div class="card"><strong>Social copy</strong> Platform-tuned posts for LinkedIn, Threads, X/Twitter, Facebook, and Instagram.</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Command Center</h2>
+      <p class="section-lead">A single screen for generating, editing, and queuing social posts from any source.</p>
+      <ul>
+        <li><strong>From prompt</strong> — describe a topic or angle and generate posts on the spot</li>
+        <li><strong>From URL or GitHub repo</strong> — extract content automatically and turn it into posts</li>
+        <li><strong>From text</strong> — paste existing content and reshape it for each platform</li>
+        <li><strong>From images</strong> — use a vision model to generate posts grounded in what they show</li>
+        <li><strong>From saved sources</strong> — reuse previously ingested URLs, repos, or text with new instructions</li>
+        <li>Pick target platforms, tone (professional, casual, witty, educational, promotional), and generate 1–21 posts per platform in a batch</li>
+        <li>Bulk edit, delete, find-and-replace, and image assignment across posts</li>
+        <li>Attach uploads, search Unsplash/Pexels/Pixabay, or auto-link Open Graph images from URLs</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Publishing &amp; scheduling</h2>
+      <p class="section-lead">Connect each platform once, then queue posts and let the background worker publish them.</p>
+      <div class="grid">
+        <div class="card"><strong>LinkedIn</strong> OAuth posting with rich link previews and image support.</div>
+        <div class="card"><strong>Threads</strong> OAuth posting via the Meta Threads API with text and images.</div>
+        <div class="card"><strong>Facebook Pages</strong> OAuth posting with text and optional image attachments.</div>
+        <div class="card"><strong>X / Twitter</strong> OAuth 2.0 + PKCE for v2 API text and chunked image uploads.</div>
+        <div class="card"><strong>Time slots</strong> Recurring posting times per day-of-week and per platform.</div>
+        <div class="card"><strong>Auto-queue</strong> New posts drop into the next available slot automatically.</div>
+        <div class="card"><strong>Daily limits</strong> Per-platform caps so you don't spam your audience.</div>
+        <div class="card"><strong>Drag-and-drop</strong> Reorder the queue, post now, or reschedule any pending post.</div>
+      </div>
+    </section>
+
+    <section>
+      <h2>Integrations</h2>
+      <div class="pills">
+        <span class="pill">OpenAI</span>
+        <span class="pill">Ollama (local)</span>
+        <span class="pill">Whisper</span>
+        <span class="pill">JIRA</span>
+        <span class="pill">GitHub</span>
+        <span class="pill">Unsplash</span>
+        <span class="pill">Pexels</span>
+        <span class="pill">Pixabay</span>
+        <span class="pill">Cloudinary</span>
+        <span class="pill">yt-dlp</span>
+        <span class="pill">trafilatura</span>
+        <span class="pill">Swagger / OpenAPI</span>
+      </div>
+      <ul style="margin-top: 1.25rem;">
+        <li><strong>JIRA</strong> — create tickets from extracted action items with full source context</li>
+        <li><strong>GitHub</strong> — fetch repo metadata and README content as a content source</li>
+        <li><strong>Cloudinary</strong> — optional cloud image hosting for platforms that require public URLs</li>
+        <li><strong>REST API</strong> — interactive Swagger docs at <code>/apidocs/</code> for programmatic access</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Get started</h2>
+      <p class="section-lead">Self-hosted Flask app. Python 3.11+ and an OpenAI API key recommended.</p>
+      <ol class="steps">
+        <li>Clone the repo and create a virtualenv: <code>python3 -m venv venv &amp;&amp; source venv/bin/activate</code></li>
+        <li>Install dependencies: <code>python -m pip install -r requirements.txt</code></li>
+        <li>Copy <code>.env.example</code> to <code>.env</code> and set <code>OPENAI_API_KEY</code> (plus any platform OAuth credentials you want)</li>
+        <li>Run the web UI: <code>python insights_web.py</code> and open <code>http://localhost:5001</code></li>
+      </ol>
+      <p style="margin-top: 1.25rem; color: var(--muted);">For one-off audio processing from the terminal:</p>
+<pre><code>python insights.py path/to/podcast.mp3</code></pre>
     </section>
 
     <section>
       <h2>Use cases</h2>
       <ul>
         <li>Content creators repurposing podcasts and YouTube videos into articles and social posts</li>
+        <li>Developers turning GitHub repos and release notes into launch posts and threads</li>
         <li>Marketing teams keeping a consistent social presence from any source</li>
         <li>Researchers extracting summaries and action items from interviews or lectures</li>
-        <li>Social managers generating and queuing posts from URLs or saved sources</li>
+        <li>Social managers generating and queuing posts from URLs, repos, images, or saved text</li>
         <li>Converting meetings or long-form video into JIRA tickets and shareable content</li>
+        <li>Podcast and YouTube fans who prefer reading summaries before committing to a full episode</li>
       </ul>
     </section>
 
