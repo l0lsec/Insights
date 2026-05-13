@@ -10,9 +10,9 @@
 
 ---
 
-Insights is an AI-powered content platform that turns RSS feeds, podcasts, YouTube videos, articles, and URLs into summaries, generated articles, and platform-ready social media posts. It combines state-of-the-art speech recognition with OpenAI to process audio, video, and text content, then helps you publish and schedule posts across LinkedIn, Threads, Facebook, and X/Twitter — all from a single web interface or CLI.
+Insights is an AI-powered content platform that turns RSS feeds, podcasts, YouTube videos, articles, URLs, GitHub repositories, and images into summaries, generated articles, and platform-ready social media posts. It combines state-of-the-art speech recognition with OpenAI (and optional local Ollama models) to process audio, video, text, and visual content, then helps you publish and schedule posts across LinkedIn, Threads, Facebook, and X/Twitter — all from a single web interface or CLI.
 
-What started as a podcast transcription tool has grown into a complete content pipeline: ingest any source — RSS feeds, YouTube channels, individual videos, or raw text — let AI do the heavy lifting, and push polished posts out on your schedule.
+What started as a podcast transcription tool has grown into a complete content pipeline: ingest any source — RSS feeds, YouTube channels, individual videos, GitHub repos, web pages, images, or raw text — let AI do the heavy lifting, and push polished posts out on your schedule.
 
 ### Features
 
@@ -20,6 +20,8 @@ What started as a podcast transcription tool has grown into a complete content p
 - **RSS Feeds** - Subscribe to audio (podcast) and text (blog/news) feeds with automatic metadata parsing
 - **YouTube Videos** - Paste a YouTube video, channel, or playlist URL to transcribe and analyze video content via yt-dlp audio extraction
 - **URL Extraction** - Paste any URL and extract article content, metadata, and Open Graph images via trafilatura
+- **GitHub Repositories** - Paste a GitHub repo URL to ingest README content, metadata, and project details as a source
+- **Image Inputs** - Drop in images to generate posts with vision-capable models (OpenAI or local Ollama)
 - **Direct Text Input** - Provide raw text for processing without a source URL
 - **Audio Transcription** - Transcribe podcast episodes and YouTube videos using mlx-whisper (Apple Silicon), faster-whisper, or the OpenAI Whisper API
 
@@ -28,7 +30,8 @@ What started as a podcast transcription tool has grown into a complete content p
 - **Action Item Extraction** - Pull actionable tasks and follow-ups from any processed content
 - **Article Generation** - Transform source content into polished blog posts, news articles, opinion pieces, or technical deep-dives
 - **Article Refinement** - Iteratively improve generated articles with AI-assisted feedback
-- **Social Media Copy** - Auto-generate platform-optimized posts for LinkedIn, Threads, Twitter/X, Facebook, Bluesky, Instagram, and Mastodon
+- **Social Media Copy** - Auto-generate platform-optimized posts for LinkedIn, Threads, X/Twitter, Facebook, and Instagram
+- **Local Model Support** - Optionally route generation through a local Ollama instance (text and vision models) instead of OpenAI
 
 #### Social Media Management
 - **Command Center** - Central hub for generating posts from prompts, URLs, saved sources, or free text
@@ -49,9 +52,11 @@ What started as a podcast transcription tool has grown into a complete content p
 
 #### Integrations
 - **JIRA** - Create tickets from extracted action items with full source context
+- **GitHub** - Fetch repo metadata and README content as a source for posts and articles
 - **Stock Images** - Search Unsplash, Pexels, and Pixabay for post images
 - **Cloudinary** - Optional cloud image hosting for platform compatibility
 - **OpenAI** - Powers transcription, summarization, article generation, and post creation
+- **Ollama (optional)** - Run text and vision generation locally against your own models
 
 #### API & Documentation
 - **Swagger/OpenAPI** - Interactive API docs at `/apidocs/` via Flasgger
@@ -118,16 +123,18 @@ View and manage your posting queue with drag-and-drop reordering, status/platfor
 
 | File | Description |
 |------|-------------|
-| `podinsights.py` | CLI entry point - transcribe, summarize, and extract action items from audio files and YouTube videos |
-| `podinsights_web.py` | Flask web application with all routes, background workers, and UI logic |
-| `database.py` | SQLite database operations for feeds, episodes, articles, posts, schedules, and more |
+| `insights.py` | CLI entry point and core AI generation library (transcription, summaries, articles, social copy, vision, thumbnails) |
+| `insights_web.py` | Flask web application with all routes, background workers, and UI logic |
+| `database.py` | SQLite database operations for feeds, episodes, articles, posts, schedules, sources, and more |
 | `linkedin_client.py` | LinkedIn API client - OAuth flow, token management, and post publishing |
 | `threads_client.py` | Threads (Meta) API client - OAuth flow, token management, and post publishing |
 | `facebook_client.py` | Facebook Pages API client - OAuth flow, page token management, and post publishing |
 | `twitter_client.py` | X/Twitter API v2 client - OAuth 2.0 PKCE flow, token management, text and image posting |
+| `github_client.py` | GitHub repo URL parsing and metadata/README fetching for source ingestion |
 | `stock_images.py` | Stock image search across Unsplash, Pexels, and Pixabay with keyword extraction |
 | `templates/` | Flask HTML templates for all pages (feeds, articles, compose, schedule, etc.) |
 | `static/` | Static assets (logo, favicon) |
+| `episodes.db` | Local SQLite database (created on first run) |
 
 ## Requirements
 
@@ -158,7 +165,7 @@ python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
 
-If you see **“Defaulting to user installation because normal site-packages is not writeable”** or scripts installed to `~/Library/Python/3.x/bin`, you’re not using the venv’s pip. Use `python -m pip` (and run the app with `python podinsights_web.py`), not `pip3`/`python3`, so the venv’s interpreter is used. With the venv activated, `which python` should show a path inside the project’s `venv/`.
+If you see **“Defaulting to user installation because normal site-packages is not writeable”** or scripts installed to `~/Library/Python/3.x/bin`, you’re not using the venv’s pip. Use `python -m pip` (and run the app with `python insights_web.py`), not `pip3`/`python3`, so the venv’s interpreter is used. With the venv activated, `which python` should show a path inside the project’s `venv/`.
 
 The default `requirements.txt` includes `mlx-whisper` for Apple Silicon Macs. If you are on a different platform:
 
@@ -188,13 +195,13 @@ See the [Environment Variables](#environment-variables) section below for all op
 
 **Web UI** (recommended):
 ```bash
-python podinsights_web.py
+python insights_web.py
 ```
 Open `http://localhost:5001` in your browser.
 
 **CLI** (quick one-off processing):
 ```bash
-python podinsights.py path/to/podcast.mp3
+python insights.py path/to/podcast.mp3
 ```
 
 ## Environment Variables
@@ -212,6 +219,9 @@ All variables can be set in a `.env` file in the project root. See `.env.example
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENAI_MODEL` | `gpt-4o` | OpenAI model used for summarization, articles, and post generation |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Base URL for an optional local Ollama server |
+| `OLLAMA_TEXT_MODEL` | `llama3.2` | Local text model used when generation is routed through Ollama |
+| `OLLAMA_VISION_MODEL` | `llama3.2-vision` | Local vision model used when image inputs are routed through Ollama |
 | `PORT` | `5001` | Port for the Flask web server |
 | `FLASK_SECRET_KEY` | auto-generated | Secret key for Flask sessions |
 
@@ -281,7 +291,7 @@ All variables can be set in a `.env` file in the project root. See `.env.example
 The CLI is designed for quick one-off processing of audio files:
 
 ```bash
-python podinsights.py path/to/podcast.mp3
+python insights.py path/to/podcast.mp3
 ```
 
 The script transcribes the audio, generates a summary, and extracts action items. Results are printed to the terminal and saved to a JSON file alongside the audio. Use `--json` to specify a custom output path and `--verbose` for debug logging.
@@ -298,7 +308,7 @@ The JSON output contains:
 The web UI is the primary interface and provides access to all features. Start it with:
 
 ```bash
-python podinsights_web.py
+python insights_web.py
 ```
 
 Navigate to `http://localhost:5001` to get started.
@@ -310,7 +320,7 @@ Navigate to `http://localhost:5001` to get started.
 3. **Process content** - Click an episode or video to transcribe and analyze it, or process text articles to extract summaries and action items
 4. **View results** - See AI-generated summaries, action items, and the full transcript on the results page
 
-Processed content is stored in a local SQLite database (`podinsights.db`) for quick access.
+Processed content is stored in a local SQLite database (`episodes.db`) for quick access.
 
 ### YouTube Videos
 
@@ -344,19 +354,20 @@ The Command Center (`/compose`) is your hub for social media content creation:
 
 **Generating Posts:**
 1. **From Prompt** - Enter any topic or idea and let AI generate platform-optimized posts
-2. **From URL** - Paste a URL and the system extracts content to generate relevant posts
+2. **From URL** - Paste a URL (including GitHub repos) and the system extracts content to generate relevant posts
 3. **From Text** - Paste existing content and transform it into social media posts
-4. **From Saved Source** - Reuse previously saved URL content with different instructions
+4. **From Images** - Drop in images and use a vision model to generate posts grounded in what they show
+5. **From Saved Source** - Reuse previously saved URL, GitHub, or text content with different instructions
 
-For each generation, select target platforms, choose how many posts to create (1-10), set a tone, and add optional context.
+For each generation, select target platforms, choose how many posts to create (1-21 per platform), set a tone, and add optional context.
 
 **Managing Posts:**
 - Copy, edit, mark as used, post immediately, add to queue, schedule for a specific time, or delete
 - Attach images from uploads or stock photo search
 - Bulk edit, delete, or find-and-replace across posts
 
-**URL Sources:**
-When generating from URLs, extracted content is saved automatically. Access the **Sources** page to reuse content for future generations.
+**URL & GitHub Sources:**
+When generating from URLs or GitHub repos, extracted content (article body, repo metadata, README) is saved automatically. Access the **Sources** page to reuse content for future generations.
 
 ### Schedule Management
 
