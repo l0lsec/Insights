@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>Sign in · Insights</title>
+    <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+    <link
+        href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css"
+        rel="stylesheet"
+        integrity="sha384-9ndCyUaIbzAi2FUVXJi0CjmCapSmO7SnpJef0486qhLnuZ2cdeRhO02iuK6FUUVM"
+        crossorigin="anonymous"
+    >
+    <style>
+        body {
+            background: linear-gradient(135deg, #0F0A1F 0%, #1a1033 100%);
+            min-height: 100vh;
+            color: #e8e4f0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+        }
+        .auth-card {
+            background: #1a1428;
+            border: 1px solid #2d2640;
+            border-radius: 12px;
+            padding: 2.25rem;
+            width: 100%;
+            max-width: 380px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.4);
+        }
+        .auth-card h1 {
+            font-size: 1.5rem;
+            font-weight: 600;
+            margin: 0 0 0.25rem;
+            background: linear-gradient(135deg, #A78BFA, #7C3AED);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .auth-card .subtitle {
+            color: #9b92b0;
+            font-size: 0.9rem;
+            margin: 0 0 1.5rem;
+        }
+        .auth-card .form-label {
+            font-size: 0.8125rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #9b92b0;
+            margin-bottom: 0.25rem;
+            font-weight: 600;
+        }
+        .auth-card .form-control {
+            background: #221a33;
+            border: 1px solid #2d2640;
+            color: #e8e4f0;
+        }
+        .auth-card .form-control:focus {
+            background: #221a33;
+            border-color: #7C3AED;
+            color: #e8e4f0;
+            box-shadow: 0 0 0 0.2rem rgba(124, 58, 237, 0.25);
+        }
+        .btn-purple {
+            background: linear-gradient(135deg, #A78BFA, #7C3AED);
+            color: #fff;
+            border: 0;
+            font-weight: 600;
+            width: 100%;
+        }
+        .btn-purple:hover { color: #fff; opacity: 0.92; }
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            margin-bottom: 1.5rem;
+        }
+        .brand img { height: 36px; }
+        .brand span {
+            font-weight: 600;
+            background: linear-gradient(135deg, #A78BFA, #7C3AED);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .signup-link a { color: #A78BFA; text-decoration: none; }
+        .signup-link a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="auth-card">
+        <div class="brand">
+            <img src="{{ url_for('static', filename='logo.svg') }}" alt="Insights">
+            <span>Insights</span>
+        </div>
+        <h1>Sign in</h1>
+        <p class="subtitle">Enter your credentials to continue.</p>
+
+        {% if error %}
+        <div class="alert alert-danger py-2" role="alert">{{ error }}</div>
+        {% endif %}
+
+        <form method="post" action="{{ url_for('login') }}">
+            {% if next_url %}
+            <input type="hidden" name="next" value="{{ next_url }}">
+            {% endif %}
+            <div class="mb-3">
+                <label class="form-label" for="username">Username</label>
+                <input type="text" id="username" name="username" class="form-control" required autofocus autocomplete="username">
+            </div>
+            <div class="mb-3">
+                <label class="form-label" for="password">Password</label>
+                <input type="password" id="password" name="password" class="form-control" required autocomplete="current-password">
+            </div>
+            <button type="submit" class="btn btn-purple">Sign in</button>
+        </form>
+
+        {% if signups_allowed %}
+        <p class="signup-link text-center mt-3 mb-0" style="font-size: 0.875rem; color: #9b92b0;">
+            Need an account? <a href="{{ url_for('signup') }}">Create one</a>
+        </p>
+        {% endif %}
+    </div>
+</body>
+</html>
