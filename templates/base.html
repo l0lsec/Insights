@@ -147,7 +147,7 @@
                 <img src="{{ url_for('static', filename='logo.svg') }}" alt="Insights" height="36" class="me-2">
                 <span style="font-weight: 600; background: linear-gradient(135deg, #A78BFA, #7C3AED); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">Insights</span>
             </a>
-            <div class="navbar-nav ms-auto">
+            <div class="navbar-nav ms-auto align-items-lg-center">
                 <a class="nav-link" href="{{ url_for('index') }}" style="color: #A78BFA;">Feeds</a>
                 <a class="nav-link" href="{{ url_for('compose_page') }}" style="color: #e94560;">Compose</a>
                 <a class="nav-link" href="{{ url_for('sources_page') }}" style="color: #A78BFA;">Sources</a>
@@ -156,6 +156,19 @@
                 <a class="nav-link" href="{{ url_for('view_articles') }}" style="color: #A78BFA;">Articles</a>
                 <a class="nav-link" href="{{ url_for('schedule_list') }}" style="color: #A78BFA;">Schedule</a>
                 <a class="nav-link" href="{{ url_for('thumbnails_page') }}" style="color: #e94560;">Thumbnails</a>
+                <a class="nav-link" href="{{ url_for('activity_page') }}" style="color: #A78BFA;">Activity</a>
+                {% if current_user %}
+                <span class="nav-link" style="color: #9b92b0; cursor: default;">
+                    <span style="opacity: 0.6;">·</span>
+                    {{ current_user['username'] }}
+                </span>
+                <form method="post" action="{{ url_for('logout') }}" class="d-inline m-0 p-0">
+                    <button type="submit" class="btn btn-link nav-link p-0 ms-2"
+                            style="color: #A78BFA; text-decoration: none; border: 0; background: transparent;">
+                        Logout
+                    </button>
+                </form>
+                {% endif %}
             </div>
         </div>
     </nav>

@@ -3,11 +3,27 @@
 from __future__ import annotations
 import os
 import io
+import csv
+import json
+import sqlite3
 import tempfile
 import threading
 import uuid
 from queue import Queue
-from flask import Flask, request, render_template, redirect, url_for, session, jsonify, send_from_directory
+from flask import (
+    Flask,
+    Response,
+    request,
+    render_template,
+    redirect,
+    url_for,
+    session,
+    jsonify,
+    send_from_directory,
+    abort,
+    g,
+)
+from werkzeug.security import generate_password_hash, check_password_hash
 from PIL import Image
 import cloudinary
 import cloudinary.uploader
@@ -144,6 +160,19 @@ from database import (
     list_generated_thumbnails,
     get_generated_thumbnail,
     delete_generated_thumbnail,
+    # Users (authentication)
+    create_user,
+    get_user_by_username,
+    get_user_by_id,
+    count_users,
+    list_users,
+    update_last_login,
+    # Activity log
+    log_activity,
+    list_activity,
+    count_activity,
+    iter_activity_for_export,
+    distinct_activity_actions,
 )
 from insights import (
     transcribe_audio,
@@ -211,7 +240,30 @@ from github_client import (
 )
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", os.urandom(24).hex())
+
+# Session secret key. A stable value is required so login sessions survive
+# restarts; if FLASK_SECRET_KEY is missing we fall back to a per-process
+# ephemeral key and log a loud warning (login cookies will be invalidated on
+# every restart, which defeats the purpose).
+_secret_key_env = os.environ.get("FLASK_SECRET_KEY")
+if not _secret_key_env:
+    import logging as _logging
+    _logging.getLogger(__name__).warning(
+        "FLASK_SECRET_KEY is not set. Generating an ephemeral key — all "
+        "sessions will be invalidated on restart. Set FLASK_SECRET_KEY in .env "
+        "to a stable value (e.g. python -c \"import secrets; print(secrets.token_hex(32))\")."
+    )
+app.secret_key = _secret_key_env or os.urandom(24).hex()
+
+# Harden the session cookie. SESSION_COOKIE_SECURE should be set to "true"
+# only when serving over HTTPS, otherwise the browser will refuse the cookie
+# and login will silently fail on http://localhost.
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("SESSION_COOKIE_SECURE", "").lower() == "true",
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30),
+)
 
 # Configure Swagger/OpenAPI documentation
 swagger_config = {
@@ -263,6 +315,399 @@ if os.environ.get('CLOUDINARY_CLOUD_NAME'):
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+# ── Authentication & activity tracking ────────────────────────────────────
+#
+# Multi-user login: every request must carry session['user_id'] except for a
+# small allow-list of endpoints (login/signup/logout pages, static assets, and
+# the health check). Mutating (non-GET) requests are recorded in
+# activity_log via after_request; named auth events use log_event().
+
+PUBLIC_ENDPOINTS = {"login", "signup", "logout", "health"}
+
+# Auto-tracking writes a row for every non-GET request, but we suppress
+# rows for these endpoints because they're either covered by an explicit
+# log_event() call or aren't interesting in the audit log.
+SKIP_TRACK_ENDPOINTS = {"login", "logout", "signup", "health"}
+
+
+def _is_static_endpoint(endpoint: str | None) -> bool:
+    if not endpoint:
+        return False
+    return endpoint == "static" or endpoint.endswith(".static")
+
+
+def _client_ip() -> str | None:
+    fwd = request.headers.get("X-Forwarded-For")
+    if fwd:
+        return fwd.split(",")[0].strip()
+    return request.remote_addr
+
+
+def _short_ua() -> str:
+    return (request.headers.get("User-Agent") or "")[:500]
+
+
+def _signups_allowed() -> bool:
+    """First user is always allowed (bootstrap). After that, gated by env."""
+    try:
+        if count_users() == 0:
+            return True
+    except sqlite3.OperationalError:
+        return True
+    return os.environ.get("ALLOW_SIGNUP", "").lower() == "true"
+
+
+def current_user():
+    """Return the logged-in user row for this request, cached on flask.g."""
+    if "user_id" not in session:
+        return None
+    cached = getattr(g, "_current_user", None)
+    if cached is not None:
+        return cached
+    user = get_user_by_id(session["user_id"])
+    if user is None:
+        # Stale session pointing at a deleted user
+        session.pop("user_id", None)
+        return None
+    g._current_user = user
+    return user
+
+
+@app.context_processor
+def _inject_current_user():
+    return {"current_user": current_user()}
+
+
+def _target_from_view_args(view_args: dict | None) -> str | None:
+    """Best-effort: turn {'episode_id': 42} into 'episode:42' for the log."""
+    if not view_args:
+        return None
+    for key, value in view_args.items():
+        if not isinstance(key, str):
+            continue
+        if key.endswith("_id") and isinstance(value, (int, str)):
+            entity = key[: -len("_id")] or "id"
+            return f"{entity}:{value}"
+    # Fall back to the first scalar value
+    for key, value in view_args.items():
+        if isinstance(value, (int, str)):
+            return f"{key}:{value}"
+    return None
+
+
+def log_event(
+    action: str,
+    *,
+    status_code: int = 200,
+    details: dict | None = None,
+    username: str | None = None,
+) -> None:
+    """Record a named event (login_success, login_failed, logout, signup, ...)."""
+    user = current_user() if "user_id" in session else None
+    try:
+        log_activity(
+            action=action,
+            user_id=user["id"] if user else None,
+            username=username or (user["username"] if user else None),
+            method=request.method,
+            path=request.path,
+            endpoint=request.endpoint,
+            status_code=status_code,
+            ip=_client_ip(),
+            user_agent=_short_ua(),
+            details=json.dumps(details) if details else None,
+        )
+    except Exception:
+        app.logger.exception("activity log_event failed for action=%s", action)
+
+
+@app.before_request
+def _auth_and_timer():
+    # Start a per-request timer used by the activity logger.
+    g._track_t0 = time.monotonic()
+
+    endpoint = request.endpoint
+    if _is_static_endpoint(endpoint):
+        return None
+    if endpoint in PUBLIC_ENDPOINTS or endpoint is None:
+        return None
+
+    if "user_id" not in session:
+        if request.method == "GET":
+            # Preserve the original target so we can bounce them back post-login.
+            return redirect(url_for("login", next=request.full_path))
+        # For JSON / form POSTs, return 401 instead of a redirect so the
+        # caller (browser fetch, API client) gets a clear error.
+        return jsonify({"error": "authentication required"}), 401
+
+    # Resolve the user once and cache it; this also clears a stale session
+    # pointing at a deleted account.
+    if current_user() is None:
+        if request.method == "GET":
+            return redirect(url_for("login", next=request.full_path))
+        return jsonify({"error": "authentication required"}), 401
+
+    return None
+
+
+@app.after_request
+def _track_request(response):
+    endpoint = request.endpoint
+    # Only record mutations to keep the log signal-rich. Auth endpoints use
+    # log_event() explicitly so we skip them here to avoid duplicate rows.
+    if (
+        request.method == "GET"
+        or endpoint is None
+        or endpoint in SKIP_TRACK_ENDPOINTS
+        or _is_static_endpoint(endpoint)
+    ):
+        return response
+
+    try:
+        user = current_user()
+        duration_ms = None
+        t0 = getattr(g, "_track_t0", None)
+        if t0 is not None:
+            duration_ms = int((time.monotonic() - t0) * 1000)
+        log_activity(
+            action=endpoint,
+            user_id=user["id"] if user else None,
+            username=user["username"] if user else None,
+            method=request.method,
+            path=request.path,
+            endpoint=endpoint,
+            target=_target_from_view_args(request.view_args),
+            status_code=response.status_code,
+            ip=_client_ip(),
+            user_agent=_short_ua(),
+            duration_ms=duration_ms,
+        )
+    except Exception:
+        app.logger.exception("activity after_request log failed")
+    return response
+
+
+def _safe_next_url(next_value: str | None) -> str | None:
+    """Only accept relative paths for the post-login redirect (no open redirects)."""
+    if not next_value:
+        return None
+    parsed = urlparse(next_value)
+    if parsed.scheme or parsed.netloc:
+        return None
+    if not next_value.startswith("/"):
+        return None
+    return next_value
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    error: str | None = None
+    next_url = request.values.get("next")
+
+    if request.method == "POST":
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+
+        user = get_user_by_username(username) if username else None
+        if user is None or not check_password_hash(user["password_hash"], password):
+            log_event(
+                "login_failed",
+                status_code=401,
+                username=username or None,
+                details={"reason": "invalid_credentials"},
+            )
+            error = "Invalid username or password."
+        else:
+            session.clear()
+            session["user_id"] = user["id"]
+            session.permanent = True
+            try:
+                update_last_login(user["id"])
+            except Exception:
+                app.logger.exception("update_last_login failed")
+            log_event("login_success", username=user["username"])
+            target = _safe_next_url(next_url) or url_for("index")
+            return redirect(target)
+
+    return render_template(
+        "login.html",
+        error=error,
+        next_url=next_url or "",
+        signups_allowed=_signups_allowed(),
+    )
+
+
+@app.route("/signup", methods=["GET", "POST"])
+def signup():
+    if not _signups_allowed():
+        abort(404)
+
+    error: str | None = None
+    username = ""
+
+    if request.method == "POST":
+        username = (request.form.get("username") or "").strip()
+        password = request.form.get("password") or ""
+        confirm = request.form.get("confirm") or ""
+
+        if len(username) < 3 or len(username) > 32 or not re.match(r"^[A-Za-z0-9_.-]+$", username):
+            error = "Username must be 3–32 characters (letters, numbers, . _ -)."
+        elif len(password) < 8:
+            error = "Password must be at least 8 characters."
+        elif password != confirm:
+            error = "Passwords do not match."
+        elif get_user_by_username(username) is not None:
+            error = "That username is already taken."
+        else:
+            try:
+                user_id = create_user(
+                    username,
+                    generate_password_hash(password, method="pbkdf2:sha256"),
+                )
+            except sqlite3.IntegrityError:
+                error = "That username is already taken."
+            else:
+                session.clear()
+                session["user_id"] = user_id
+                session.permanent = True
+                log_event("signup", username=username)
+                return redirect(url_for("index"))
+
+    return render_template("signup.html", error=error, username=username)
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    if "user_id" in session:
+        log_event("logout")
+    session.clear()
+    return redirect(url_for("login"))
+
+
+# ── Activity log viewer ───────────────────────────────────────────────────
+
+
+def _parse_activity_filters():
+    """Pull and normalize filter params from the querystring."""
+    raw_user = request.args.get("user_id") or ""
+    user_id: int | None = None
+    if raw_user.isdigit():
+        user_id = int(raw_user)
+
+    action = (request.args.get("action") or "").strip() or None
+    start = (request.args.get("start") or "").strip() or None
+    end = (request.args.get("end") or "").strip() or None
+
+    # Accept YYYY-MM-DD inputs (datetime-local without time also works);
+    # broaden bare dates to full-day ranges.
+    if start and len(start) == 10:
+        start = f"{start} 00:00:00"
+    if end and len(end) == 10:
+        end = f"{end} 23:59:59"
+
+    return {
+        "user_id": user_id,
+        "action": action,
+        "start_ts": start,
+        "end_ts": end,
+    }
+
+
+@app.route("/activity")
+def activity_page():
+    filters = _parse_activity_filters()
+
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except ValueError:
+        page = 1
+    per_page = 50
+    offset = (page - 1) * per_page
+
+    rows = list_activity(**filters, limit=per_page, offset=offset)
+    total = count_activity(**filters)
+    total_pages = max(1, (total + per_page - 1) // per_page)
+
+    return render_template(
+        "activity.html",
+        rows=rows,
+        total=total,
+        page=page,
+        per_page=per_page,
+        total_pages=total_pages,
+        users=list_users(),
+        actions=distinct_activity_actions(),
+        filter_user_id=filters["user_id"] or "",
+        filter_action=request.args.get("action", ""),
+        filter_start=request.args.get("start", ""),
+        filter_end=request.args.get("end", ""),
+    )
+
+
+@app.route("/activity.csv")
+def activity_csv():
+    filters = _parse_activity_filters()
+
+    def generate():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(
+            [
+                "id",
+                "ts",
+                "user_id",
+                "username",
+                "action",
+                "method",
+                "path",
+                "endpoint",
+                "target",
+                "status_code",
+                "ip",
+                "user_agent",
+                "duration_ms",
+                "details",
+            ]
+        )
+        yield buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+
+        for row in iter_activity_for_export(**filters):
+            writer.writerow(
+                [
+                    row["id"],
+                    row["ts"],
+                    row["user_id"],
+                    row["username"],
+                    row["action"],
+                    row["method"],
+                    row["path"],
+                    row["endpoint"],
+                    row["target"],
+                    row["status_code"],
+                    row["ip"],
+                    row["user_agent"],
+                    row["duration_ms"],
+                    row["details"],
+                ]
+            )
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate(0)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    headers = {
+        "Content-Disposition": f'attachment; filename="activity-{stamp}.csv"'
+    }
+    return Response(generate(), mimetype="text/csv", headers=headers)
+
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"})
 
 
 # ── SSRF-hardened outbound fetch utilities ─────────────────────────────────
@@ -4634,7 +5079,8 @@ def schedule_debug():
     next_threads = get_next_available_slot('threads')
     
     # Get pending scheduled posts
-    with sqlite3.connect('pod_insights.db') as conn:
+    from database import DB_PATH as _DB_PATH
+    with sqlite3.connect(_DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         cur = conn.execute(
             """
@@ -5125,6 +5571,10 @@ def compose_import_file():
     import csv as csv_mod
 
     IMPORT_PLATFORMS = {'threads', 'linkedin', 'facebook', 'twitter'}
+    TRUTHY = {'true', '1', 'yes', 'y', 't'}
+
+    def _is_truthy(val) -> bool:
+        return str(val or '').strip().lower() in TRUTHY
 
     file = request.files.get('file')
     if not file or not file.filename:
@@ -5143,6 +5593,7 @@ def compose_import_file():
             platform_col = header_map.get('platform')
             copy_col = header_map.get('copy')
             video_col = header_map.get('video')
+            repost_col = header_map.get('repost')
             if not platform_col or not copy_col:
                 return jsonify({"error": "CSV must have 'Platform' and 'copy' columns. "
                                 f"Found: {', '.join(reader.fieldnames or [])}"}), 400
@@ -5151,6 +5602,7 @@ def compose_import_file():
                     'platform': (row.get(platform_col) or '').strip(),
                     'copy': (row.get(copy_col) or '').strip(),
                     'video': (row.get(video_col) or '').strip() if video_col else '',
+                    'repost': (row.get(repost_col) or '').strip() if repost_col else '',
                 })
         else:
             import openpyxl
@@ -5172,11 +5624,13 @@ def compose_import_file():
                 return jsonify({"error": "Spreadsheet must have a 'copy' column. "
                                 f"Found: {', '.join(str(h) for h in raw_rows[0])}"}), 400
             video_idx = headers.index('video') if 'video' in headers else None
+            repost_idx = headers.index('repost') if 'repost' in headers else None
             for row in raw_rows[1:]:
                 rows.append({
                     'platform': str(row[platform_idx]).strip() if row[platform_idx] else '',
                     'copy': str(row[copy_idx]).strip() if row[copy_idx] else '',
                     'video': str(row[video_idx]).strip() if video_idx is not None and row[video_idx] else '',
+                    'repost': str(row[repost_idx]).strip() if repost_idx is not None and row[repost_idx] is not None else '',
                 })
     except Exception as e:
         return jsonify({"error": f"Failed to parse file: {str(e)}"}), 400
@@ -5235,6 +5689,8 @@ def compose_import_file():
         if row.get('video'):
             source_content = f"{original_filename} | {row['video']}"
 
+        is_repost = _is_truthy(row.get('repost'))
+
         for platform, original_token in platforms:
             if platform not in IMPORT_PLATFORMS:
                 skipped += 1
@@ -5249,13 +5705,13 @@ def compose_import_file():
                 continue
 
             existing_id = existing.get((platform, content))
-            if existing_id is not None:
+            if existing_id is not None and not is_repost:
                 skipped += 1
                 skipped_details.append({
                     "row": i,
                     "reason": "duplicate",
                     "message": f"Duplicate — identical {platform} post already exists (Post #{existing_id})",
-                    "fix": "This post is already in the Command Center. Edit the copy in the file to make it unique, or delete the existing post first.",
+                    "fix": "This post is already in the Command Center. Edit the copy in the file to make it unique, delete the existing post first, or set the 'repost' column to true to allow a duplicate.",
                     "platform": platform,
                     "preview": content_preview,
                     "duplicate_post_id": existing_id,
@@ -5267,8 +5723,10 @@ def compose_import_file():
                 source_content=source_content,
                 platform=platform,
                 content=content,
+                repost=is_repost,
             )
-            existing[(platform, content)] = new_id
+            if not is_repost:
+                existing[(platform, content)] = new_id
             imported += 1
             by_platform[platform] = by_platform.get(platform, 0) + 1
             _maybe_attach_link_image(new_id, content)

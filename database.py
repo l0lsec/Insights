@@ -10,7 +10,7 @@ import sqlite3
 from typing import Dict, Iterable, Optional, List
 from datetime import datetime
 
-DB_PATH = "episodes.db"
+DB_PATH = "insights.db"
 
 
 def init_db(db_path: str = DB_PATH) -> None:
@@ -257,15 +257,18 @@ def init_db(db_path: str = DB_PATH) -> None:
                 content TEXT,
                 image_url TEXT,
                 created_at TEXT,
-                used INTEGER DEFAULT 0
+                used INTEGER DEFAULT 0,
+                repost INTEGER DEFAULT 0
             )
             """
         )
-        # Upgrade standalone_posts table to include image_url if missing
+        # Upgrade standalone_posts table to include newer columns if missing
         cur = conn.execute("PRAGMA table_info(standalone_posts)")
         standalone_columns = [row[1] for row in cur.fetchall()]
         if "image_url" not in standalone_columns:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN image_url TEXT")
+        if "repost" not in standalone_columns:
+            conn.execute("ALTER TABLE standalone_posts ADD COLUMN repost INTEGER DEFAULT 0")
         # URL sources - stores extracted content from URLs for reuse
         conn.execute(
             """
@@ -310,6 +313,49 @@ def init_db(db_path: str = DB_PATH) -> None:
                 created_at TEXT
             )
             """
+        )
+        # Application users for login authentication
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_login_at TIMESTAMP
+            )
+            """
+        )
+        # Audit log of mutating actions and named auth events
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS activity_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                user_id INTEGER,
+                username TEXT,
+                action TEXT NOT NULL,
+                method TEXT,
+                path TEXT,
+                endpoint TEXT,
+                target TEXT,
+                status_code INTEGER,
+                ip TEXT,
+                user_agent TEXT,
+                duration_ms INTEGER,
+                details TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_activity_log_ts ON activity_log(ts DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_activity_log_user ON activity_log(user_id, ts DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_activity_log_action ON activity_log(action, ts DESC)"
         )
         # Upgrade any existing DB with newer columns
         cur = conn.execute("PRAGMA table_info(episodes)")
@@ -2602,6 +2648,7 @@ def add_standalone_post(
     platform: str,
     content: str,
     image_url: Optional[str] = None,
+    repost: bool = False,
     db_path: str = DB_PATH,
 ) -> int:
     """Save a standalone post (not tied to an article) and return its id.
@@ -2612,6 +2659,9 @@ def add_standalone_post(
         platform: Target platform (e.g., 'linkedin', 'threads', 'twitter')
         content: The generated post content
         image_url: Optional URL of an image to attach to the post
+        repost: If True, marks this as an intentional duplicate that bypassed
+            the import-time duplicate check so the same content can be posted
+            again.
         
     Returns:
         The ID of the newly created post
@@ -2620,10 +2670,10 @@ def add_standalone_post(
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
             """
-            INSERT INTO standalone_posts (source_type, source_content, platform, content, image_url, created_at, used)
-            VALUES (?, ?, ?, ?, ?, ?, 0)
+            INSERT INTO standalone_posts (source_type, source_content, platform, content, image_url, created_at, used, repost)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?)
             """,
-            (source_type, source_content, platform, content, image_url, created_at),
+            (source_type, source_content, platform, content, image_url, created_at, 1 if repost else 0),
         )
         conn.commit()
         return cur.lastrowid
@@ -3299,3 +3349,216 @@ def delete_generated_thumbnail(
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+# ---------------------------------------------------------------------------
+# Users (authentication)
+# ---------------------------------------------------------------------------
+
+
+def create_user(
+    username: str,
+    password_hash: str,
+    db_path: str = DB_PATH,
+) -> int:
+    """Insert a new user and return the new row id.
+
+    Raises ``sqlite3.IntegrityError`` if the username is already taken.
+    """
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
+            (username, password_hash),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def get_user_by_username(
+    username: str,
+    db_path: str = DB_PATH,
+) -> Optional[sqlite3.Row]:
+    """Return the user row for ``username`` (case-insensitive) or ``None``."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT * FROM users WHERE LOWER(username) = LOWER(?)",
+            (username,),
+        )
+        return cur.fetchone()
+
+
+def get_user_by_id(
+    user_id: int,
+    db_path: str = DB_PATH,
+) -> Optional[sqlite3.Row]:
+    """Return the user row for ``user_id`` or ``None``."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,))
+        return cur.fetchone()
+
+
+def count_users(db_path: str = DB_PATH) -> int:
+    """Return the total number of registered users."""
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute("SELECT COUNT(*) FROM users")
+        return int(cur.fetchone()[0])
+
+
+def list_users(db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    """Return all users ordered by username."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT id, username, created_at, last_login_at FROM users ORDER BY username ASC"
+        )
+        return cur.fetchall()
+
+
+def update_last_login(user_id: int, db_path: str = DB_PATH) -> None:
+    """Stamp ``last_login_at`` on the given user."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE users SET last_login_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (user_id,),
+        )
+        conn.commit()
+
+
+# ---------------------------------------------------------------------------
+# Activity log
+# ---------------------------------------------------------------------------
+
+
+def log_activity(
+    action: str,
+    *,
+    user_id: Optional[int] = None,
+    username: Optional[str] = None,
+    method: Optional[str] = None,
+    path: Optional[str] = None,
+    endpoint: Optional[str] = None,
+    target: Optional[str] = None,
+    status_code: Optional[int] = None,
+    ip: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    duration_ms: Optional[int] = None,
+    details: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> int:
+    """Append one row to ``activity_log`` and return its id."""
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO activity_log (
+                user_id, username, action, method, path, endpoint,
+                target, status_code, ip, user_agent, duration_ms, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                user_id,
+                username,
+                action,
+                method,
+                path,
+                endpoint,
+                target,
+                status_code,
+                ip,
+                user_agent,
+                duration_ms,
+                details,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def _activity_filter_clause(
+    user_id: Optional[int],
+    action: Optional[str],
+    start_ts: Optional[str],
+    end_ts: Optional[str],
+) -> tuple[str, list]:
+    clauses: list[str] = []
+    params: list = []
+    if user_id is not None:
+        clauses.append("user_id = ?")
+        params.append(user_id)
+    if action:
+        clauses.append("action LIKE ?")
+        params.append(f"%{action}%")
+    if start_ts:
+        clauses.append("ts >= ?")
+        params.append(start_ts)
+    if end_ts:
+        clauses.append("ts <= ?")
+        params.append(end_ts)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+def list_activity(
+    user_id: Optional[int] = None,
+    action: Optional[str] = None,
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    db_path: str = DB_PATH,
+) -> List[sqlite3.Row]:
+    """Return a page of activity rows matching the filters, newest first."""
+    where, params = _activity_filter_clause(user_id, action, start_ts, end_ts)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            f"SELECT * FROM activity_log{where} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?",
+            (*params, int(limit), int(offset)),
+        )
+        return cur.fetchall()
+
+
+def count_activity(
+    user_id: Optional[int] = None,
+    action: Optional[str] = None,
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> int:
+    """Return total number of activity rows matching the filters."""
+    where, params = _activity_filter_clause(user_id, action, start_ts, end_ts)
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(f"SELECT COUNT(*) FROM activity_log{where}", params)
+        return int(cur.fetchone()[0])
+
+
+def iter_activity_for_export(
+    user_id: Optional[int] = None,
+    action: Optional[str] = None,
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> Iterable[sqlite3.Row]:
+    """Yield activity rows matching the filters for CSV streaming."""
+    where, params = _activity_filter_clause(user_id, action, start_ts, end_ts)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            f"SELECT * FROM activity_log{where} ORDER BY ts DESC, id DESC",
+            params,
+        )
+        for row in cur:
+            yield row
+    finally:
+        conn.close()
+
+
+def distinct_activity_actions(db_path: str = DB_PATH) -> List[str]:
+    """Return distinct action names in the activity log, alphabetical."""
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "SELECT DISTINCT action FROM activity_log ORDER BY action ASC"
+        )
+        return [row[0] for row in cur.fetchall() if row[0]]

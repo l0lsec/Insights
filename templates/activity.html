@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}Activity · Insights{% endblock %}
+{% block header %}Activity log{% endblock %}
+
+{% block content %}
+<div class="filter-bar">
+    <form method="get" action="{{ url_for('activity_page') }}" class="row g-2 align-items-end">
+        <div class="col-md-2">
+            <label class="form-label" for="user_id">User</label>
+            <select id="user_id" name="user_id" class="form-select">
+                <option value="">All users</option>
+                {% for u in users %}
+                <option value="{{ u['id'] }}" {% if filter_user_id == u['id'] %}selected{% endif %}>{{ u['username'] }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label" for="action">Action contains</label>
+            <input type="text" id="action" name="action" list="action-options" class="form-control"
+                   value="{{ filter_action }}" placeholder="e.g. delete, login, jira">
+            <datalist id="action-options">
+                {% for a in actions %}
+                <option value="{{ a }}"></option>
+                {% endfor %}
+            </datalist>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label" for="start">From</label>
+            <input type="date" id="start" name="start" class="form-control" value="{{ filter_start }}">
+        </div>
+        <div class="col-md-2">
+            <label class="form-label" for="end">To</label>
+            <input type="date" id="end" name="end" class="form-control" value="{{ filter_end }}">
+        </div>
+        <div class="col-md-3 d-flex gap-2">
+            <button type="submit" class="btn btn-primary">Apply</button>
+            <a href="{{ url_for('activity_page') }}" class="btn btn-outline-secondary">Reset</a>
+            <a href="{{ url_for('activity_csv',
+                                 user_id=filter_user_id,
+                                 action=filter_action,
+                                 start=filter_start,
+                                 end=filter_end) }}"
+               class="btn btn-outline-success">Export CSV</a>
+        </div>
+    </form>
+</div>
+
+<p class="results-count mb-2">
+    {{ total }} {{ 'event' if total == 1 else 'events' }}{% if total %} · page {{ page }} of {{ total_pages }}{% endif %}
+</p>
+
+<div class="table-responsive">
+    <table class="table table-sm table-hover align-middle">
+        <thead>
+            <tr>
+                <th style="white-space: nowrap;">Time</th>
+                <th>User</th>
+                <th>Action</th>
+                <th>Target</th>
+                <th>Method</th>
+                <th>Path</th>
+                <th>Status</th>
+                <th>IP</th>
+                <th style="text-align: right;">ms</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr>
+                <td style="white-space: nowrap; font-variant-numeric: tabular-nums; color: #6c757d;">{{ row['ts'] }}</td>
+                <td>{{ row['username'] or '—' }}</td>
+                <td><code>{{ row['action'] }}</code></td>
+                <td>{{ row['target'] or '' }}</td>
+                <td><span class="badge bg-secondary">{{ row['method'] or '' }}</span></td>
+                <td style="font-family: ui-monospace, SFMono-Regular, monospace; font-size: 0.85em;">{{ row['path'] or '' }}</td>
+                <td>
+                    {% set sc = row['status_code'] %}
+                    {% if sc is none %}
+                        <span class="text-muted">—</span>
+                    {% elif sc < 300 %}
+                        <span class="badge bg-success">{{ sc }}</span>
+                    {% elif sc < 400 %}
+                        <span class="badge bg-secondary">{{ sc }}</span>
+                    {% elif sc < 500 %}
+                        <span class="badge bg-warning text-dark">{{ sc }}</span>
+                    {% else %}
+                        <span class="badge bg-danger">{{ sc }}</span>
+                    {% endif %}
+                </td>
+                <td style="color: #6c757d;">{{ row['ip'] or '' }}</td>
+                <td style="text-align: right; color: #6c757d; font-variant-numeric: tabular-nums;">
+                    {{ row['duration_ms'] if row['duration_ms'] is not none else '' }}
+                </td>
+            </tr>
+            {% if row['details'] %}
+            <tr>
+                <td></td>
+                <td colspan="8" style="color: #6c757d; font-size: 0.85em;">
+                    <code>{{ row['details'] }}</code>
+                </td>
+            </tr>
+            {% endif %}
+            {% else %}
+            <tr>
+                <td colspan="9" class="text-center text-muted py-4">No activity matches these filters.</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if total_pages > 1 %}
+{% set qs = {'user_id': filter_user_id, 'action': filter_action, 'start': filter_start, 'end': filter_end} %}
+<nav aria-label="Activity pagination">
+    <ul class="pagination justify-content-center">
+        <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+            <a class="page-link" href="{{ url_for('activity_page', page=page-1, **qs) }}">Previous</a>
+        </li>
+        <li class="page-item disabled">
+            <span class="page-link">Page {{ page }} of {{ total_pages }}</span>
+        </li>
+        <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
+            <a class="page-link" href="{{ url_for('activity_page', page=page+1, **qs) }}">Next</a>
+        </li>
+    </ul>
+</nav>
+{% endif %}
+{% endblock %}
