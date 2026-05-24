@@ -258,10 +258,25 @@ class FacebookClient:
         text: str,
         image_url: str,
     ) -> dict:
-        """Publish a post with an image to a Facebook Page."""
-        try:
-            response = requests.post(
-                f"{GRAPH_API_BASE}/{page_id}/photos",
+        """Publish a post with an image to a Facebook Page.
+
+        Tries URL-based upload first (lets Facebook fetch the image itself).
+        On Facebook's generic ``code=1`` (``API_UNKNOWN``) error — which in
+        practice almost always means FB's fetcher failed on the remote URL,
+        despite the misleading "reduce the amount of data" wording — falls
+        back to downloading the bytes locally and uploading them via
+        multipart ``source=``. This mirrors what the LinkedIn/Threads clients
+        do and is far more reliable for images hosted on slow or finicky
+        origins.
+        """
+        endpoint = f"{GRAPH_API_BASE}/{page_id}/photos"
+        # FB photos endpoint accepts up to ~10MB. Anything larger will be
+        # rejected regardless of upload method, so don't even try.
+        max_bytes = 10 * 1024 * 1024
+
+        def _post_via_url() -> tuple[int, dict]:
+            r = requests.post(
+                endpoint,
                 data={
                     "message": text,
                     "url": image_url,
@@ -269,18 +284,61 @@ class FacebookClient:
                 },
                 timeout=60,
             )
-            if response.status_code == 200:
-                data = response.json()
+            return r.status_code, _safe_json(r)
+
+        def _post_via_bytes() -> tuple[int, dict]:
+            logger.info("Downloading image for Facebook byte upload: %s", image_url)
+            img_resp = requests.get(image_url, timeout=30, stream=True)
+            img_resp.raise_for_status()
+            content = img_resp.raw.read(max_bytes + 1, decode_content=True)
+            if len(content) > max_bytes:
+                return 0, {
+                    "error": {
+                        "message": (
+                            f"Image exceeds Facebook's ~10MB photo limit "
+                            f"({len(content)} bytes)"
+                        )
+                    }
+                }
+            mime = img_resp.headers.get("Content-Type", "image/jpeg").split(";")[0].strip()
+            filename = image_url.rsplit("/", 1)[-1].split("?")[0] or "image.jpg"
+            r = requests.post(
+                endpoint,
+                data={"message": text, "access_token": page_access_token},
+                files={"source": (filename, content, mime)},
+                timeout=120,
+            )
+            return r.status_code, _safe_json(r)
+
+        try:
+            status, data = _post_via_url()
+
+            # FB code 1 (API_UNKNOWN) on /photos with a `url` param is almost
+            # always a remote-fetch failure on FB's side. Retry by uploading
+            # the bytes ourselves before giving up.
+            err_code = ((data or {}).get("error") or {}).get("code")
+            if status != 200 and err_code == 1:
+                logger.warning(
+                    "Facebook URL-based image upload returned code=1; "
+                    "retrying with direct byte upload."
+                )
+                try:
+                    status, data = _post_via_bytes()
+                except requests.RequestException as e:
+                    logger.error("Facebook byte upload fetch failed: %s", e)
+                    return {"success": False, "error": {"message": str(e)}}
+
+            if status == 200:
                 post_id = data.get("post_id") or data.get("id", "")
                 return {
                     "success": True,
                     "post_id": post_id,
                     "permalink": f"https://www.facebook.com/{post_id.replace('_', '/posts/')}" if post_id else None,
-                    "status_code": response.status_code,
+                    "status_code": status,
                 }
-            error_data = _safe_json(response)
-            logger.error("Facebook image post failed: %s - %s", response.status_code, error_data)
-            return {"success": False, "status_code": response.status_code, "error": error_data}
+
+            logger.error("Facebook image post failed: %s - %s", status, data)
+            return {"success": False, "status_code": status, "error": data}
         except requests.RequestException as e:
             logger.error("Facebook image post request failed: %s", e)
             return {"success": False, "error": {"message": str(e)}}
