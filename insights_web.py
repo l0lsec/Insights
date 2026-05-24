@@ -2,6 +2,16 @@
 
 from __future__ import annotations
 import os
+
+# Load variables from .env into os.environ before any os.environ.get(...) calls
+# below (e.g. FLASK_SECRET_KEY, OPENAI_API_KEY, JIRA_*). override=False so a
+# value already exported in the shell still wins.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
+except ImportError:
+    pass
+
 import io
 import csv
 import json

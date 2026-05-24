@@ -454,7 +454,7 @@ X/Twitter uses the v2 API with pay-per-use pricing. Text posts cost $0.01 each. 
 
 ## Credits
 
-Developed by Sedric "ShowUpShowOut" Louissaint from Show Up Show Out Security. 
+Developed by Sedric "ShowUpShowOut" Louissaint. 
 
 Learn more about Show Up Show Out Security at [susos.co](https://susos.co).
 
