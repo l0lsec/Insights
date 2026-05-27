@@ -5766,8 +5766,11 @@ def compose_edit_post(post_id: int):
     # If the edit introduced a URL and the post still has no image, kick off a
     # background fetch of the og:image. Skip when the body did not change or
     # already contained the same URLs.
-    if not post.get('image_url'):
-        old_urls = set(extract_urls_from_text(post.get('content') or ''))
+    post_keys = post.keys() if hasattr(post, 'keys') else []
+    existing_image = post['image_url'] if 'image_url' in post_keys else None
+    existing_content = post['content'] if 'content' in post_keys else ''
+    if not existing_image:
+        old_urls = set(extract_urls_from_text(existing_content or ''))
         new_urls = extract_urls_from_text(new_content)
         if any(u not in old_urls for u in new_urls):
             _maybe_attach_link_image(post_id, new_content)
