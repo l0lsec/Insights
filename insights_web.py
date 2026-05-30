@@ -137,6 +137,8 @@ from database import (
     add_standalone_post,
     get_existing_standalone_content,
     list_standalone_posts,
+    list_standalone_posts_by_source_url,
+    count_standalone_posts_by_source_urls,
     get_standalone_post,
     update_standalone_post,
     update_standalone_post_image,
@@ -5987,6 +5989,70 @@ def compose_apply_link_image(post_id: int):
     })
 
 
+@app.route('/compose/post/<int:post_id>/refresh-source-image', methods=['POST'])
+def compose_refresh_source_image(post_id: int):
+    """Re-pull the image from the post's original source (YouTube/article).
+
+    Posts generated from a saved source store the source URL in
+    ``source_content`` (with ``source_type`` of 'saved_source' or 'url'). This
+    re-fetches the YouTube thumbnail or article og:image so an updated source
+    image can be applied to the post.
+    """
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    source_type = post['source_type'] if 'source_type' in post.keys() else None
+    source_content = post['source_content'] if 'source_content' in post.keys() else None
+    url = (source_content or '').strip()
+    if source_type not in ('saved_source', 'url') or not url.startswith(('http://', 'https://')):
+        return jsonify({"error": "This post is not tied to a YouTube/article source."}), 400
+
+    og_image = None
+    if is_youtube_url(url):
+        video_id = get_youtube_video_id(url)
+        try:
+            import yt_dlp
+            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                og_image = info.get("thumbnail")
+        except Exception:
+            og_image = None
+        if not og_image and video_id:
+            og_image = f"https://img.youtube.com/vi/{video_id}/maxresdefault.jpg"
+    else:
+        og_image = fetch_og_image_for_url(url)
+
+    if not og_image:
+        return jsonify({
+            "error": "Could not find an image at the source.",
+            "source_url": url,
+        }), 422
+
+    try:
+        _assert_safe_url(og_image)
+    except UnsafeURLError as exc:
+        return jsonify({"error": f"Source image rejected: {exc}", "source_url": url}), 422
+
+    try:
+        saved_url = save_stock_image_to_library(og_image)
+    except (UnsafeURLError, RuntimeError, ValueError, requests.RequestException) as exc:
+        app.logger.warning("Failed to save source image %s for post %s: %s", og_image, post_id, exc)
+        return jsonify({
+            "error": f"Failed to download source image: {exc}",
+            "source_url": url,
+            "og_image_url": og_image,
+        }), 422
+
+    update_standalone_post_image(post_id, saved_url)
+    return jsonify({
+        "success": True,
+        "image_url": saved_url,
+        "source_url": url,
+        "og_image_url": og_image,
+    })
+
+
 def _maybe_attach_link_image(post_id: int, content: str | None, kind: str = 'standalone') -> None:
     """Schedule a background fetch of the first URL's og:image for the post.
 
@@ -6633,11 +6699,15 @@ def compose_clear_all():
 def sources_page():
     """Display saved URL sources."""
     sources = list_url_sources()
+    post_counts = count_standalone_posts_by_source_urls(
+        [s['url'] for s in sources if s['url']]
+    )
     sources_with_status = []
     for s in sources:
         s_dict = dict(s)
         s_dict['is_youtube'] = is_youtube_url(s_dict.get('url', ''))
         s_dict['is_github'] = is_github_repo_url(s_dict.get('url', ''))
+        s_dict['post_count'] = post_counts.get(s_dict.get('url', ''), 0)
         if s_dict['is_youtube']:
             ep = get_episode(s_dict['url'])
             if ep:
@@ -6648,6 +6718,44 @@ def sources_page():
                 s_dict['episode_id'] = None
         sources_with_status.append(s_dict)
     return render_template('sources.html', sources=sources_with_status)
+
+
+@app.route('/sources/<int:source_id>/posts')
+def source_posts(source_id: int):
+    """Return the standalone posts generated from a saved source as JSON."""
+    source = get_url_source(source_id)
+    if not source:
+        return jsonify({"error": "Source not found"}), 404
+
+    posts = list_standalone_posts_by_source_url(source['url'])
+    post_ids = [p['id'] for p in posts]
+    posted_info = get_posted_info_for_standalone_posts(post_ids) if post_ids else {}
+
+    result = []
+    for p in posts:
+        p_keys = p.keys()
+        platform = p['platform']
+        posted = None
+        platform_posted = posted_info.get(p['id'], {}).get(platform)
+        if platform_posted:
+            posted = {
+                'url': platform_posted.get('url'),
+                'posted_at': platform_posted.get('posted_at'),
+            }
+        result.append({
+            'id': p['id'],
+            'platform': platform,
+            'content': p['content'],
+            'image_url': p['image_url'] if 'image_url' in p_keys else None,
+            'created_at': p['created_at'],
+            'used': bool(p['used']) if 'used' in p_keys else False,
+            'posted': posted,
+        })
+
+    return jsonify({
+        'source': {'id': source['id'], 'url': source['url'], 'title': source['title']},
+        'posts': result,
+    })
 
 
 @app.route('/sources', methods=['POST'])
@@ -6881,6 +6989,41 @@ def reextract_source(source_id: int):
     url = source['url']
     
     try:
+        if is_youtube_url(url):
+            video_id = get_youtube_video_id(url)
+            title, description, og_image = source['title'] or url, source['description'] or "", source['og_image']
+            try:
+                import yt_dlp
+                with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+                    info = ydl.extract_info(url, download=False)
+                    title = info.get("title", title)
+                    description = info.get("description", "")
+                    og_image = info.get("thumbnail")
+            except Exception:
+                pass
+            if not og_image and video_id:
+                og_image = f"https://img.youtube.com/vi/{video_id}/mqdefault.jpg"
+            updated = update_url_source_content(
+                source_id=source_id,
+                title=title,
+                description=description,
+                content="",
+                og_image=og_image,
+            )
+            if not updated:
+                return jsonify({"error": "Failed to update source"}), 500
+            return jsonify({
+                "success": True,
+                "source": {
+                    "id": source_id,
+                    "url": url,
+                    "title": title,
+                    "description": description,
+                    "content": "",
+                    "og_image": og_image,
+                }
+            })
+
         if is_github_repo_url(url):
             owner, repo_name = parse_github_repo_url(url)
             repo_data = fetch_github_repo(owner, repo_name)

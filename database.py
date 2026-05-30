@@ -2754,6 +2754,84 @@ def get_standalone_post(post_id: int, db_path: str = DB_PATH) -> Optional[sqlite
         return cur.fetchone()
 
 
+def list_standalone_posts_by_source_url(
+    url: str,
+    db_path: str = DB_PATH,
+) -> List[sqlite3.Row]:
+    """List standalone posts generated from a given saved source URL.
+
+    Posts generated from saved sources store the originating URL (truncated to
+    1000 chars) in ``source_content`` with a ``source_type`` of either
+    ``'saved_source'`` (Generate from Saved Source) or ``'url'`` (the URL tab on
+    the Command Center). There is no foreign key, so linkage is by URL string.
+
+    Args:
+        url: The source URL to match against.
+
+    Returns:
+        List of standalone post rows, most recent first.
+    """
+    if not url:
+        return []
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            """
+            SELECT * FROM standalone_posts
+            WHERE source_type IN ('saved_source', 'url')
+              AND source_content = ?
+            ORDER BY created_at DESC
+            """,
+            (url[:1000],),
+        )
+        return cur.fetchall()
+
+
+def count_standalone_posts_by_source_urls(
+    urls: List[str],
+    db_path: str = DB_PATH,
+) -> dict:
+    """Count standalone posts grouped by their source URL.
+
+    Returns a dict mapping each provided URL (original, untruncated) to the
+    number of standalone posts whose ``source_content`` matches it. URLs are
+    matched against the stored (truncated to 1000 chars) value.
+
+    Args:
+        urls: List of source URLs to count posts for.
+
+    Returns:
+        Dict of ``{url: count}`` (URLs with no posts map to 0).
+    """
+    counts = {u: 0 for u in urls}
+    if not urls:
+        return counts
+
+    # Map truncated value -> original url(s) so we can report against the
+    # caller's original URL strings.
+    truncated_to_originals: dict = {}
+    for u in urls:
+        truncated_to_originals.setdefault(u[:1000], []).append(u)
+
+    truncated_keys = list(truncated_to_originals.keys())
+    placeholders = ",".join("?" for _ in truncated_keys)
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            f"""
+            SELECT source_content, COUNT(*) AS cnt
+            FROM standalone_posts
+            WHERE source_type IN ('saved_source', 'url')
+              AND source_content IN ({placeholders})
+            GROUP BY source_content
+            """,
+            truncated_keys,
+        )
+        for row in cur.fetchall():
+            for original in truncated_to_originals.get(row[0], []):
+                counts[original] = row[1]
+    return counts
+
+
 def update_standalone_post(
     post_id: int,
     content: str,

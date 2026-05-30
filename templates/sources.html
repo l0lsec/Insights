@@ -196,7 +196,7 @@
                     ✨ Generate Posts
                 </a>
                 <button type="button" class="btn btn-sm btn-outline-secondary"
-                        onclick="refreshGithubSource({{ source.id }})" title="Refresh repo data from GitHub">
+                        onclick="refreshSource({{ source.id }})" title="Refresh repo data from GitHub">
                     🔄 Refresh
                 </button>
                 {% elif source.is_youtube %}
@@ -220,12 +220,24 @@
                     </button>
                 </form>
                     {% endif %}
+                <button type="button" class="btn btn-sm btn-outline-secondary"
+                        onclick="refreshSource({{ source.id }})" title="Refresh metadata from YouTube">
+                    🔄 Refresh
+                </button>
                 {% else %}
                 <a href="{{ url_for('compose_page') }}?source_id={{ source.id }}" 
                    class="btn btn-sm btn-primary" title="Generate posts from this source">
                     ✨ Generate Posts
                 </a>
+                <button type="button" class="btn btn-sm btn-outline-secondary"
+                        onclick="refreshSource({{ source.id }})" title="Refresh metadata from source">
+                    🔄 Refresh
+                </button>
                 {% endif %}
+                <button type="button" class="btn btn-sm btn-outline-info"
+                        onclick="viewSourcePosts({{ source.id }})" title="View posts generated from this source">
+                    💬 Posts{% if source.post_count %} ({{ source.post_count }}){% endif %}
+                </button>
                 <button type="button" class="btn btn-sm btn-outline-secondary" 
                         onclick="viewSourceDetails({{ source.id }})" title="View full content">
                     👁️ View
@@ -336,11 +348,166 @@
     </div>
 </div>
 
+<!-- Source Posts Modal -->
+<div class="modal fade" id="sourcePostsModal" tabindex="-1" aria-labelledby="sourcePostsModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="sourcePostsModalLabel">Posts from this Source</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div id="sourcePostsContent">
+                    <div class="text-center py-4">
+                        <div class="spinner-border text-primary" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <a href="#" id="generateMoreFromSourceBtn" class="btn btn-primary">✨ Generate More</a>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 let deleteSourceId = null;
 let currentSourceId = null;
 let addUrlModal = null;
+
+const PLATFORM_META = {
+    linkedin: { label: 'LinkedIn', icon: '💼', badge: 'bg-primary' },
+    threads: { label: 'Threads', icon: '🧵', badge: 'bg-dark' },
+    facebook: { label: 'Facebook', icon: '📘', badge: 'bg-info' },
+    twitter: { label: 'X', icon: '𝕏', badge: 'bg-secondary' },
+};
+
+function viewSourcePosts(sourceId) {
+    currentSourceId = sourceId;
+    const modal = new bootstrap.Modal(document.getElementById('sourcePostsModal'));
+    const contentDiv = document.getElementById('sourcePostsContent');
+    const generateBtn = document.getElementById('generateMoreFromSourceBtn');
+
+    generateBtn.href = "{{ url_for('compose_page') }}?source_id=" + sourceId;
+
+    contentDiv.innerHTML = `
+        <div class="text-center py-4">
+            <div class="spinner-border text-primary" role="status">
+                <span class="visually-hidden">Loading...</span>
+            </div>
+        </div>
+    `;
+
+    modal.show();
+
+    fetch(`/sources/${sourceId}/posts`)
+        .then(response => response.json())
+        .then(data => {
+            if (data.error) {
+                contentDiv.innerHTML = `<div class="alert alert-danger">${escapeHtml(data.error)}</div>`;
+                return;
+            }
+            renderSourcePosts(data.posts || []);
+        })
+        .catch(() => {
+            contentDiv.innerHTML = `<div class="alert alert-danger">Failed to load posts for this source.</div>`;
+        });
+}
+
+function renderSourcePosts(posts) {
+    const contentDiv = document.getElementById('sourcePostsContent');
+
+    if (!posts.length) {
+        contentDiv.innerHTML = `
+            <div class="text-center py-4 text-muted">
+                <p class="mb-2">No posts have been generated from this source yet.</p>
+                <a href="{{ url_for('compose_page') }}?source_id=${currentSourceId}" class="btn btn-sm btn-primary">
+                    ✨ Generate Posts
+                </a>
+            </div>
+        `;
+        return;
+    }
+
+    contentDiv.innerHTML = posts.map(post => {
+        const meta = PLATFORM_META[post.platform] || { label: post.platform, icon: '📝', badge: 'bg-secondary' };
+        const alreadyPosted = post.posted || post.used;
+        const postedBadge = post.posted
+            ? (post.posted.url
+                ? `<a href="${escapeHtml(post.posted.url)}" target="_blank" rel="noopener" class="badge bg-success text-decoration-none" title="Posted ${escapeHtml((post.posted.posted_at || '').slice(0, 16))} - click to view">🔗 Posted</a>`
+                : `<span class="badge bg-success">✓ Posted</span>`)
+            : (post.used ? `<span class="badge bg-success">✓ Used</span>` : `<span class="badge bg-light text-muted border">Not posted yet</span>`);
+
+        const repostLabel = alreadyPosted ? '🔁 Repost' : '🚀 Post Now';
+        const imageHtml = post.image_url
+            ? `<img src="${escapeHtml(post.image_url)}" alt="Post image" style="max-height:48px;max-width:80px;border-radius:6px;object-fit:cover;" class="ms-2">`
+            : '';
+
+        return `
+            <div class="border rounded p-3 mb-3" data-post-id="${post.id}">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <div class="d-flex align-items-center gap-2">
+                        <span class="badge ${meta.badge}">${meta.icon} ${meta.label}</span>
+                        ${postedBadge}
+                    </div>
+                    <button type="button" class="btn btn-sm ${alreadyPosted ? 'btn-outline-secondary' : 'btn-primary'} repost-btn"
+                            onclick="repostSourcePost(${post.id}, '${post.platform}', this, ${alreadyPosted ? 'true' : 'false'})">
+                        ${repostLabel}
+                    </button>
+                </div>
+                <div class="d-flex align-items-start">
+                    <pre class="mb-0 flex-grow-1" style="white-space:pre-wrap;word-break:break-word;font-family:inherit;font-size:0.9rem;background:#f8f9fa;padding:0.75rem;border-radius:8px;">${escapeHtml(post.content)}</pre>
+                    ${imageHtml}
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function repostSourcePost(postId, platform, btn, alreadyPosted) {
+    const meta = PLATFORM_META[platform] || { label: platform };
+    if (alreadyPosted && !confirm(`Re-publish this post to ${meta.label}?`)) {
+        return;
+    }
+
+    const originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span> Posting...';
+
+    fetch(`/compose/post/${postId}/${platform}`, { method: 'POST' })
+        .then(response => response.json().then(data => ({ status: response.status, data })))
+        .then(({ status, data }) => {
+            if (data.success) {
+                btn.classList.remove('btn-primary');
+                btn.classList.add('btn-success');
+                btn.innerHTML = '✓ Posted';
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.classList.remove('btn-success');
+                    btn.classList.add('btn-outline-secondary');
+                    btn.innerHTML = '🔁 Repost';
+                }, 2500);
+            } else {
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
+                const msg = data.error || 'Failed to post.';
+                if (status === 401 || data.needs_configuration) {
+                    alert(`${meta.label}: ${msg}\n\nConnect or configure the account from the Status page.`);
+                } else {
+                    alert(`${meta.label}: ${msg}`);
+                }
+            }
+        })
+        .catch(() => {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+            alert('Failed to post. Please try again.');
+        });
+}
 
 function showAddUrlModal() {
     // Reset form state
@@ -497,14 +664,16 @@ function addSourceCardToPage(source, opts) {
                class="btn btn-sm btn-primary" title="Generate posts from this source">
                 ✨ Generate Posts
             </a>`;
-        if (opts.isGithub) {
-            actionsHtml += `
+        actionsHtml += `
             <button type="button" class="btn btn-sm btn-outline-secondary"
-                    onclick="refreshGithubSource(${source.id})" title="Refresh repo data from GitHub">
+                    onclick="refreshSource(${source.id})" title="${opts.isGithub ? 'Refresh repo data from GitHub' : 'Refresh metadata from source'}">
                 🔄 Refresh
             </button>`;
-        }
         actionsHtml += `
+            <button type="button" class="btn btn-sm btn-outline-info"
+                    onclick="viewSourcePosts(${source.id})" title="View posts generated from this source">
+                💬 Posts
+            </button>
             <button type="button" class="btn btn-sm btn-outline-secondary" 
                     onclick="viewSourceDetails(${source.id})" title="View full content">
                 👁️ View
@@ -660,9 +829,9 @@ function reextractSource() {
         });
 }
 
-function refreshGithubSource(sourceId) {
+function refreshSource(sourceId) {
     const card = document.querySelector(`[data-source-id="${sourceId}"]`);
-    const btn = card ? card.querySelector('[onclick*="refreshGithubSource"]') : null;
+    const btn = card ? card.querySelector('[onclick*="refreshSource"]') : null;
     if (btn) {
         btn.disabled = true;
         btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
@@ -684,6 +853,15 @@ function refreshGithubSource(sourceId) {
                 const descEl = card.querySelector('.source-description');
                 if (titleEl) titleEl.textContent = data.source.title || 'Untitled';
                 if (descEl) descEl.textContent = data.source.description || '';
+
+                const thumbEl = card.querySelector('.source-thumbnail');
+                if (thumbEl) {
+                    if (data.source.og_image) {
+                        thumbEl.innerHTML = `<img src="${escapeHtml(data.source.og_image)}" alt="Preview" onerror="this.style.display='none'; this.parentElement.innerHTML='🔗';">`;
+                    } else {
+                        thumbEl.innerHTML = '🔗';
+                    }
+                }
             }
         })
         .catch(() => {

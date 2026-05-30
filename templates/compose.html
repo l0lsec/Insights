@@ -995,6 +995,14 @@
                                 <button class="btn btn-outline-{{ 'success' if post.used else 'secondary' }}" onclick="toggleUsed({{ post.id }}, this)" title="Mark as used">
                                     {% if post.used %}✓{% else %}○{% endif %}
                                 </button>
+                                <button class="btn btn-outline-secondary repost-btn" onclick="repostPost({{ post.id }}, '{{ platform }}', this)" title="Repost to {{ platform|capitalize }}">
+                                    🔁
+                                </button>
+                                {% if post.source_type in ['saved_source', 'url'] %}
+                                <button class="btn btn-outline-secondary refresh-image-btn" onclick="refreshPostImage({{ post.id }}, this)" title="Refresh image from original source (YouTube/article)">
+                                    🖼️
+                                </button>
+                                {% endif %}
                                 {% if platform == 'linkedin' %}
                                 <button class="btn btn-outline-info linkedin-post-btn" onclick="postToLinkedIn({{ post.id }}, this)" title="Post to LinkedIn Now" data-post-id="{{ post.id }}">
                                     💼
@@ -2328,6 +2336,41 @@ function populatePostLinkUrls(postId) {
     btn.dataset.firstUrl = urls[0];
 }
 
+function refreshPostImage(postId, btn) {
+    if (!confirm("Refresh this post's image from its original source?")) return;
+
+    const originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
+
+    fetch(`/compose/post/${postId}/refresh-source-image`, { method: 'POST' })
+        .then(r => r.json().then(data => ({ ok: r.ok, data })))
+        .then(({ ok, data }) => {
+            if (ok && data.success && data.image_url) {
+                const preview = document.getElementById(`image-preview-${postId}`);
+                if (preview) {
+                    const img = preview.querySelector('img');
+                    const span = preview.querySelector('span');
+                    if (img) img.src = data.image_url;
+                    if (span) span.textContent = data.image_url;
+                    preview.classList.remove('d-none');
+                }
+                const addBtn = document.getElementById(`add-image-btn-${postId}`);
+                if (addBtn) addBtn.classList.add('d-none');
+                showToast('Image refreshed from source!', 'success');
+            } else {
+                showToast(data.error || 'Could not refresh image', 'error');
+            }
+        })
+        .catch(err => {
+            showToast('Error: ' + err.message, 'error');
+        })
+        .finally(() => {
+            btn.disabled = false;
+            btn.innerHTML = originalHtml;
+        });
+}
+
 function fetchLinkImage(postId, kind) {
     const select = document.getElementById(`post-link-urls-${postId}`);
     const btn = document.getElementById(`post-link-image-btn-${postId}`);
@@ -3079,6 +3122,23 @@ function postToTwitter(postId, btn) {
             btn.disabled = false;
             alert('Error: ' + error.message);
         });
+}
+
+function repostPost(postId, platform, btn) {
+    // Reuses the same publish path as "Post Now". The publish endpoints have no
+    // duplicate guard, so already-posted content can be re-sent.
+    const handlers = {
+        linkedin: postToLinkedIn,
+        threads: postToThreads,
+        facebook: postToFacebook,
+        twitter: postToTwitter,
+    };
+    const handler = handlers[platform];
+    if (!handler) {
+        alert('Reposting is not supported for this platform.');
+        return;
+    }
+    handler(postId, btn);
 }
 
 function toggleQueue(postId, postType, platform, btn, isQueued) {
