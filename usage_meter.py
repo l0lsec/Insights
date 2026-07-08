@@ -1,6 +1,6 @@
 """AI usage metering: capture token usage and estimated cost for paid API calls.
 
-Imported by ``insights.py`` right after each paid OpenAI / Ollama call. Each recorder
+Imported by ``insights.py`` right after each paid OpenAI / Anthropic / Ollama call. Each recorder
 reads the response's ``usage`` block, estimates a dollar cost from the local price
 table below, resolves whether the call happened *proactively* (automated background
 work) or *reactively* (a user-triggered web request), and writes a row via
@@ -71,6 +71,30 @@ DEFAULT_PRICE = {
     "out": _envf("USAGE_PRICE_DEFAULT_OUT", 10.00),
 }
 
+# Anthropic (Claude) chat rates, dollars per 1,000,000 tokens (input / output).
+# Matched by longest-prefix against the model name, so e.g. "claude-opus-4-8"
+# resolves to the "claude-opus" entry unless a more specific key is added.
+PRICING_ANTHROPIC = {
+    "claude-opus": {
+        "in": _envf("USAGE_PRICE_CLAUDE_OPUS_IN", 5.00),
+        "out": _envf("USAGE_PRICE_CLAUDE_OPUS_OUT", 25.00),
+    },
+    "claude-sonnet": {
+        "in": _envf("USAGE_PRICE_CLAUDE_SONNET_IN", 3.00),
+        "out": _envf("USAGE_PRICE_CLAUDE_SONNET_OUT", 15.00),
+    },
+    "claude-haiku": {
+        "in": _envf("USAGE_PRICE_CLAUDE_HAIKU_IN", 1.00),
+        "out": _envf("USAGE_PRICE_CLAUDE_HAIKU_OUT", 5.00),
+    },
+}
+
+# Used for any Claude model not matched above (assume Opus-class pricing).
+DEFAULT_ANTHROPIC_PRICE = {
+    "in": _envf("USAGE_PRICE_CLAUDE_DEFAULT_IN", 5.00),
+    "out": _envf("USAGE_PRICE_CLAUDE_DEFAULT_OUT", 25.00),
+}
+
 # OpenAI Whisper transcription, USD per minute of audio.
 WHISPER_PER_MIN = _envf("USAGE_WHISPER_PER_MIN", 0.006)
 
@@ -78,14 +102,24 @@ WHISPER_PER_MIN = _envf("USAGE_WHISPER_PER_MIN", 0.006)
 IMAGE_PER_CALL = _envf("USAGE_PRICE_IMAGE", 0.19)
 
 
-def _price_for(model: str) -> dict:
+def _match_price(model: str, table: dict, default: dict) -> dict:
     """Return the {in, out} per-1M-token price for ``model`` (longest-prefix match)."""
     name = (model or "").lower()
     best = None
-    for key in PRICING:
+    for key in table:
         if name.startswith(key) and (best is None or len(key) > len(best)):
             best = key
-    return PRICING[best] if best else DEFAULT_PRICE
+    return table[best] if best else default
+
+
+def _price_for(model: str) -> dict:
+    """Return the {in, out} per-1M-token price for an OpenAI ``model``."""
+    return _match_price(model, PRICING, DEFAULT_PRICE)
+
+
+def _price_for_anthropic(model: str) -> dict:
+    """Return the {in, out} per-1M-token price for a Claude ``model``."""
+    return _match_price(model, PRICING_ANTHROPIC, DEFAULT_ANTHROPIC_PRICE)
 
 
 # ── Proactive vs reactive resolution ───────────────────────────────────────
@@ -187,10 +221,17 @@ def record_chat(response, *, category: str, provider: str, model: str) -> None:
     """Record a ``chat.completions`` call from its response's ``usage`` block."""
     try:
         usage = getattr(response, "usage", None)
-        pt = getattr(usage, "prompt_tokens", 0) or 0
-        ct = getattr(usage, "completion_tokens", 0) or 0
+        # OpenAI exposes prompt_tokens/completion_tokens; Anthropic uses
+        # input_tokens/output_tokens. Fall back so either shape is captured.
+        pt = (getattr(usage, "prompt_tokens", None)
+              or getattr(usage, "input_tokens", None) or 0)
+        ct = (getattr(usage, "completion_tokens", None)
+              or getattr(usage, "output_tokens", None) or 0)
         if provider == "openai":
             price = _price_for(model)
+            cost = pt / 1_000_000 * price["in"] + ct / 1_000_000 * price["out"]
+        elif provider == "anthropic":
+            price = _price_for_anthropic(model)
             cost = pt / 1_000_000 * price["in"] + ct / 1_000_000 * price["out"]
         else:
             cost = 0.0

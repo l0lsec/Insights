@@ -9,10 +9,17 @@ import os
 import re
 import shlex
 import shutil
+import types
 from typing import List
 from urllib.parse import urlparse, parse_qs
 
+# Which cloud LLM backend to use for text/vision generation: "openai" or "anthropic".
+# Defaults to OpenAI so existing deployments are unaffected. Local generation is
+# selected per-call via ``use_local`` and always uses the Ollama (OpenAI-compatible)
+# path regardless of this setting.
+LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").strip().lower()
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "llama3.2-vision")
 OLLAMA_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2")
@@ -45,17 +52,127 @@ NO_EM_DASH_RULE = (
 
 # ── Shared LLM helpers ────────────────────────────────────────────────────
 
+def _flatten_text(content) -> str:
+    """Return the plain-text portion of an OpenAI message ``content`` value."""
+    if isinstance(content, str):
+        return content
+    return "\n".join(b.get("text", "") for b in content if b.get("type") == "text")
+
+
+def _anthropic_image_block(url: str) -> dict:
+    """Convert an OpenAI ``image_url`` (data: or http) into an Anthropic image block."""
+    if url.startswith("data:"):
+        # Shape: ``data:<media_type>;base64,<data>``
+        header, _, data = url.partition(",")
+        media_type = header[len("data:"):].split(";")[0] or "image/png"
+        return {"type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": data}}
+    return {"type": "image", "source": {"type": "url", "url": url}}
+
+
+def _convert_content_for_anthropic(content):
+    """Convert an OpenAI message ``content`` (str or block list) to Anthropic form."""
+    if isinstance(content, str):
+        return content
+    blocks = []
+    for block in content:
+        btype = block.get("type")
+        if btype == "text":
+            blocks.append({"type": "text", "text": block.get("text", "")})
+        elif btype == "image_url":
+            blocks.append(_anthropic_image_block(block.get("image_url", {}).get("url", "")))
+        else:
+            blocks.append(block)  # pass through unknown block types unchanged
+    return blocks
+
+
+class _AnthropicChatClient:
+    """OpenAI-style ``chat.completions.create`` shim over the Anthropic Messages API.
+
+    The two APIs differ in ways this adapter normalises so the existing call sites
+    and usage metering work unchanged:
+
+    * ``system`` role messages become Anthropic's top-level ``system`` parameter.
+    * OpenAI ``image_url`` content blocks become Anthropic ``image`` blocks.
+    * Sampling kwargs (``temperature``, ``top_p``, ``extra_body`` …) are dropped —
+      Claude Opus 4.7+ reject them with a 400.
+    * ``max_tokens`` is required by Anthropic, so a default is supplied when a caller
+      omits it.
+    * The response is wrapped so ``.choices[0].message.content`` and ``.usage``
+      behave like the OpenAI shape the callers read.
+    """
+
+    DEFAULT_MAX_TOKENS = 4096
+
+    def __init__(self, api_key: str | None):
+        if not api_key:
+            raise RuntimeError("ANTHROPIC_API_KEY is not configured")
+        from anthropic import Anthropic
+
+        self._client = Anthropic(api_key=api_key)
+        # Mirror the OpenAI client surface: ``client.chat.completions.create(...)``.
+        self.chat = types.SimpleNamespace(
+            completions=types.SimpleNamespace(create=self._create)
+        )
+
+    def _create(self, *, model, messages, max_tokens=None, **_ignored):
+        system_parts: list[str] = []
+        converted: list[dict] = []
+        for msg in messages:
+            if msg.get("role") == "system":
+                system_parts.append(_flatten_text(msg.get("content", "")))
+                continue
+            converted.append({
+                "role": msg["role"],
+                "content": _convert_content_for_anthropic(msg.get("content", "")),
+            })
+
+        kwargs = {
+            "model": model,
+            "max_tokens": max_tokens or self.DEFAULT_MAX_TOKENS,
+            "messages": converted,
+        }
+        system = "\n\n".join(p for p in system_parts if p)
+        if system:
+            kwargs["system"] = system
+
+        return _AnthropicChatResponse(self._client.messages.create(**kwargs))
+
+
+class _AnthropicChatResponse:
+    """Wrap an Anthropic ``Message`` in the OpenAI response shape callers expect."""
+
+    def __init__(self, message):
+        text = "".join(
+            block.text for block in message.content
+            if getattr(block, "type", None) == "text"
+        )
+        self.choices = [types.SimpleNamespace(message=types.SimpleNamespace(content=text))]
+        self.usage = message.usage  # exposes input_tokens / output_tokens
+        self.model = message.model
+
+
 def _get_llm_client(use_local: bool = False, vision: bool = False):
-    """Return ``(client, model_name)`` for either Ollama or OpenAI."""
+    """Return ``(client, model_name, provider)`` for the configured LLM backend.
+
+    ``use_local`` selects a local Ollama server (OpenAI-compatible). Otherwise the
+    cloud backend is chosen by ``LLM_PROVIDER`` ("openai" or "anthropic"). The
+    ``vision`` flag only affects the Ollama model choice; the cloud models handle
+    text and vision with a single model.
+    """
     from openai import OpenAI
 
     if use_local:
         model = OLLAMA_VISION_MODEL if vision else OLLAMA_TEXT_MODEL
-        return OpenAI(base_url=f"{OLLAMA_BASE_URL}/v1", api_key="ollama"), model
+        return OpenAI(base_url=f"{OLLAMA_BASE_URL}/v1", api_key="ollama"), model, "ollama"
+
+    if LLM_PROVIDER == "anthropic":
+        return _AnthropicChatClient(os.getenv("ANTHROPIC_API_KEY")), ANTHROPIC_MODEL, "anthropic"
+
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     if not client.api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
-    return client, OPENAI_MODEL
+    return client, OPENAI_MODEL, "openai"
 
 
 def _get_llm_params(use_local: bool, num_platforms: int = 1, posts_per_call: int = 1) -> dict:
@@ -108,7 +225,8 @@ def _build_format_instruction(platforms: list[str], posts_per_platform: int) -> 
     return lines
 
 
-def _batch_generate(client, model, messages_fn, platforms, posts_per_platform, use_local):
+def _batch_generate(client, model, messages_fn, platforms, posts_per_platform,
+                    use_local, provider="openai"):
     """Generate posts, batching into smaller calls for local models.
 
     Tracks actual posts received per platform and keeps requesting until the
@@ -121,7 +239,7 @@ def _batch_generate(client, model, messages_fn, platforms, posts_per_platform, u
         msgs = messages_fn(plats, n)
         resp = client.chat.completions.create(model=model, messages=msgs, **params)
         _meter("record_chat", resp, category="social_posts",
-               provider="ollama" if use_local else "openai", model=model)
+               provider=provider, model=model)
         return _extract_json_from_llm(resp.choices[0].message.content.strip())
 
     if posts_per_platform <= batch_size:
@@ -441,50 +559,39 @@ def transcribe_audio(audio_path: str) -> str:
 
 
 def summarize_text(text: str) -> str:
-    """Summarize ``text`` using OpenAI."""
+    """Summarize ``text`` using the configured LLM provider."""
 
     try:
-        # Create a minimal OpenAI client on demand so the dependency is optional
-        from openai import OpenAI
+        client, model, provider = _get_llm_client()
 
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        if not client.api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
-
-        logger.debug("Requesting summary from OpenAI")
+        logger.debug("Requesting summary from %s", provider)
         # Ask the language model for a short summary of the transcript
         response = client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model,
             messages=[{"role": "user", "content": f"Summarize the following text. {NO_EM_DASH_RULE}\n\n{text}"}],
             temperature=0.2,
         )
         summary = response.choices[0].message.content.strip()
         _meter("record_chat", response, category="summary",
-               provider="openai", model=OPENAI_MODEL)
+               provider=provider, model=model)
         logger.debug("Summary received")
         return summary
     except Exception as exc:
-        logger.exception("OpenAI summarization failed")
-        raise RuntimeError("Failed to summarize text with OpenAI") from exc
+        logger.exception("LLM summarization failed")
+        raise RuntimeError("Failed to summarize text") from exc
 
 
 def extract_action_items(text: str) -> List[str]:
-    """Extract action items from ``text`` using OpenAI."""
+    """Extract action items from ``text`` using the configured LLM provider."""
 
     try:
         # Similar to ``summarize_text`` but asking for a bullet list of tasks
-        from openai import OpenAI
+        client, model, provider = _get_llm_client()
 
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        
-        if not client.api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
-
-        logger.debug("Requesting action items from OpenAI")
+        logger.debug("Requesting action items from %s", provider)
         # Ask the language model for a plain list of actions without extra text
         response = client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model,
             messages=[
                 {
                     "role": "user",
@@ -501,12 +608,12 @@ def extract_action_items(text: str) -> List[str]:
         lines = response.choices[0].message.content.splitlines()
         actions = [ln.lstrip("- ").strip() for ln in lines if ln.strip()]
         _meter("record_chat", response, category="action_items",
-               provider="openai", model=OPENAI_MODEL)
+               provider=provider, model=model)
         logger.debug("Action items received: %d", len(actions))
         return actions
     except Exception as exc:
-        logger.exception("OpenAI action item extraction failed")
-        raise RuntimeError("Failed to extract action items with OpenAI") from exc
+        logger.exception("LLM action item extraction failed")
+        raise RuntimeError("Failed to extract action items") from exc
 
 
 def generate_article(
@@ -546,12 +653,7 @@ def generate_article(
         The generated article in markdown format.
     """
     try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-        if not client.api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
+        client, model, provider = _get_llm_client()
 
         style_guides = {
             "blog": "Write in an engaging, conversational blog style with a personal voice.",
@@ -597,7 +699,7 @@ def generate_article(
 
         logger.debug("Generating article about: %s", topic)
         response = client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model,
             messages=[
                 {
                     "role": "system",
@@ -634,12 +736,12 @@ def generate_article(
         )
         article = response.choices[0].message.content.strip()
         _meter("record_chat", response, category="article",
-               provider="openai", model=OPENAI_MODEL)
+               provider=provider, model=model)
         logger.debug("Article generated successfully")
         return article
     except Exception as exc:
         logger.exception("Article generation failed")
-        raise RuntimeError("Failed to generate article with OpenAI") from exc
+        raise RuntimeError("Failed to generate article") from exc
 
 
 def generate_social_copy(
@@ -677,12 +779,7 @@ def generate_social_copy(
     posts_per_platform = max(1, min(posts_per_platform, 21))
 
     try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-        if not client.api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
+        client, model, provider = _get_llm_client()
 
         platform_guidelines = {
             "twitter": "280 characters max, punchy and engaging, 3-5 relevant hashtags",
@@ -716,7 +813,7 @@ def generate_social_copy(
 
         logger.debug("Generating %d social media post(s) per platform for: %s", posts_per_platform, article_topic)
         response = client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model,
             messages=[
                 {
                     "role": "system",
@@ -750,7 +847,7 @@ def generate_social_copy(
             max_tokens=3000 if posts_per_platform > 1 else 2000,
         )
         _meter("record_chat", response, category="social_posts",
-               provider="openai", model=OPENAI_MODEL)
+               provider=provider, model=model)
 
         # Parse the JSON response
         content = response.choices[0].message.content.strip()
@@ -769,7 +866,7 @@ def generate_social_copy(
         return {"raw": response.choices[0].message.content.strip()}
     except Exception as exc:
         logger.exception("Social media copy generation failed")
-        raise RuntimeError("Failed to generate social media copy with OpenAI") from exc
+        raise RuntimeError("Failed to generate social media copy") from exc
 
 
 def refine_article(
@@ -794,16 +891,11 @@ def refine_article(
         The refined article content in markdown.
     """
     try:
-        from openai import OpenAI
-
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-        if not client.api_key:
-            raise RuntimeError("OPENAI_API_KEY is not configured")
+        client, model, provider = _get_llm_client()
 
         logger.debug("Refining article based on feedback: %s", user_feedback[:100])
         response = client.chat.completions.create(
-            model=OPENAI_MODEL,
+            model=model,
             messages=[
                 {
                     "role": "system",
@@ -832,13 +924,13 @@ def refine_article(
             max_tokens=4000,
         )
         _meter("record_chat", response, category="refine",
-               provider="openai", model=OPENAI_MODEL)
+               provider=provider, model=model)
         refined = response.choices[0].message.content.strip()
         logger.debug("Article refined successfully")
         return refined
     except Exception as exc:
         logger.exception("Article refinement failed")
-        raise RuntimeError("Failed to refine article with OpenAI") from exc
+        raise RuntimeError("Failed to refine article") from exc
 
 
 def generate_posts_from_prompt(
@@ -856,7 +948,7 @@ def generate_posts_from_prompt(
     posts_per_platform = max(1, min(posts_per_platform, 10))
 
     try:
-        client, model = _get_llm_client(use_local)
+        client, model, provider = _get_llm_client(use_local)
         tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
 
         platform_list = "\n".join([
@@ -896,7 +988,7 @@ def generate_posts_from_prompt(
         logger.debug("Generating posts from prompt via %s: %s",
                       "Ollama" if use_local else "OpenAI", prompt[:100])
         result = _batch_generate(client, model, _messages, platforms,
-                                 posts_per_platform, use_local)
+                                 posts_per_platform, use_local, provider)
         if result:
             logger.debug("Generated posts for %d platforms from prompt", len(result))
             return result
@@ -1001,7 +1093,7 @@ def generate_posts_from_url(
     posts_per_platform = max(1, min(posts_per_platform, 10))
 
     try:
-        client, model = _get_llm_client(use_local)
+        client, model, provider = _get_llm_client(use_local)
         tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
 
         platform_list = "\n".join([
@@ -1046,7 +1138,7 @@ def generate_posts_from_url(
         logger.debug("Generating posts from URL via %s: %s",
                       "Ollama" if use_local else "OpenAI", url)
         result = _batch_generate(client, model, _messages, platforms,
-                                 posts_per_platform, use_local)
+                                 posts_per_platform, use_local, provider)
         if result:
             logger.debug("Generated posts for %d platforms from URL", len(result))
             return {"posts": result, "source_data": source_data}
@@ -1080,7 +1172,7 @@ def generate_posts_from_text(
     posts_per_platform = max(1, min(posts_per_platform, 10))
 
     try:
-        client, model = _get_llm_client(use_local)
+        client, model, provider = _get_llm_client(use_local)
         tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
 
         platform_list = "\n".join([
@@ -1145,7 +1237,7 @@ def generate_posts_from_text(
         logger.debug("Generating posts from text via %s (length: %d)",
                       "Ollama" if use_local else "OpenAI", len(text))
         result = _batch_generate(client, model, _messages, platforms,
-                                 posts_per_platform, use_local)
+                                 posts_per_platform, use_local, provider)
         if result:
             logger.debug("Generated posts for %d platforms from text", len(result))
             return result
@@ -1270,7 +1362,7 @@ def generate_posts_from_images(
     posts_per_platform = max(1, min(posts_per_platform, 10))
 
     try:
-        client, model = _get_llm_client(use_local, vision=True)
+        client, model, provider = _get_llm_client(use_local, vision=True)
         params = _get_llm_params(use_local, num_platforms=len(platforms),
                                  posts_per_call=posts_per_platform)
         tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
@@ -1327,7 +1419,7 @@ def generate_posts_from_images(
             **params,
         )
         _meter("record_chat", response, category="vision_posts",
-               provider="ollama" if use_local else "openai", model=model)
+               provider=provider, model=model)
 
         raw_text = response.choices[0].message.content.strip()
         result = _extract_json_from_llm(raw_text)

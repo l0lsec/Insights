@@ -3,6 +3,8 @@ flask>=3.0.0
 feedparser>=6.0.0
 requests>=2.31.0
 openai>=1.0.0
+# Anthropic (Claude) SDK - used when LLM_PROVIDER=anthropic
+anthropic>=0.40.0
 python-dotenv>=1.0.0
 beautifulsoup4>=4.12.0
 # Pin to 5.x: lxml 6+ removed html_clean (trafilatura/jusText need it)
