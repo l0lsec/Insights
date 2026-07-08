@@ -212,6 +212,7 @@ from insights import (
     generate_posts_from_text,
     generate_posts_from_images,
     check_ollama_status,
+    provider_model_options,
     # YouTube functions
     is_youtube_url,
     classify_youtube_url,
@@ -5340,6 +5341,7 @@ def compose_page():
         threads_connected=threads_connected,
         recent_prompts=recent_prompts_list,
         recent_image_prompts=recent_image_prompts_list,
+        model_options=provider_model_options(),
     )
 
 
@@ -5417,6 +5419,27 @@ def compose_delete_prompts_bulk():
         return jsonify({"error": str(e)}), 500
 
 
+def _parse_ai_provider(form):
+    """Parse the compose AI-provider selection into ``(provider, model, use_local)``.
+
+    ``provider`` is "openai"/"anthropic" for an explicit cloud choice, or ``None``
+    to use the configured default (``LLM_PROVIDER``). ``use_local`` is True for the
+    local (Ollama) option. Falls back to the legacy ``use_local`` form field when
+    no ``provider`` field is sent.
+    """
+    provider = (form.get('provider') or '').strip().lower() or None
+    model = (form.get('model') or '').strip() or None
+    if provider == 'cloud':          # legacy value => configured cloud default
+        provider = None
+    use_local = provider in ('local', 'ollama') or (
+        provider is None
+        and form.get('use_local', 'false').lower() in ('true', '1', 'yes')
+    )
+    if use_local:
+        provider = None              # local is signalled via use_local, not provider
+    return provider, model, use_local
+
+
 @app.route('/compose/generate', methods=['POST'])
 def compose_generate():
     """Generate social media posts using LLM based on source type."""
@@ -5428,8 +5451,8 @@ def compose_generate():
     extra_context = request.form.get('extra_context', '').strip() or None
     topic = request.form.get('topic', '').strip() or None
     image_url = request.form.get('image_url', '').strip() or None
-    use_local = request.form.get('use_local', 'false').lower() in ('true', '1', 'yes')
-    
+    ai_provider, ai_model, use_local = _parse_ai_provider(request.form)
+
     if source_type != 'image' and not content:
         return jsonify({"error": "Content is required"}), 400
     
@@ -5449,6 +5472,8 @@ def compose_generate():
                 posts_per_platform=posts_per_platform,
                 extra_context=extra_context,
                 use_local=use_local,
+                provider=ai_provider,
+                model=ai_model,
             )
         elif source_type == 'url':
             if is_github_repo_url(content):
@@ -5465,6 +5490,8 @@ def compose_generate():
                     extra_context=gh_extra,
                     use_local=use_local,
                     source_url=content,
+                    provider=ai_provider,
+                    model=ai_model,
                 )
                 source_data = {
                     "url": content,
@@ -5489,6 +5516,8 @@ def compose_generate():
                     posts_per_platform=posts_per_platform,
                     extra_context=extra_context,
                     use_local=use_local,
+                    provider=ai_provider,
+                    model=ai_model,
                 )
                 # New structure: {"posts": {...}, "source_data": {...}}
                 generated = result.get("posts", result)
@@ -5515,6 +5544,8 @@ def compose_generate():
                 posts_per_platform=posts_per_platform,
                 extra_context=extra_context,
                 use_local=use_local,
+                provider=ai_provider,
+                model=ai_model,
             )
         elif source_type == 'image':
             import base64 as b64module
@@ -5579,6 +5610,8 @@ def compose_generate():
                 posts_per_platform=posts_per_platform,
                 extra_context=extra_context,
                 use_local=use_local,
+                provider=ai_provider,
+                model=ai_model,
             )
 
             if first_image_bytes and not image_url:
@@ -7278,8 +7311,8 @@ def compose_generate_from_source():
     posts_per_platform = request.form.get('posts_per_platform', 10, type=int)
     extra_context = request.form.get('extra_context', '').strip() or None
     image_url = request.form.get('image_url', '').strip() or None
-    use_local = request.form.get('use_local', 'false').lower() in ('true', '1', 'yes')
-    
+    ai_provider, ai_model, use_local = _parse_ai_provider(request.form)
+
     if not source_id:
         return jsonify({"error": "Source ID is required"}), 400
     
@@ -7320,8 +7353,10 @@ def compose_generate_from_source():
             extra_context=extra_context,
             use_local=use_local,
             source_url=source['url'],
+            provider=ai_provider,
+            model=ai_model,
         )
-        
+
         update_url_source_last_used(source_id)
         
         # Normalize platform names and filter hallucinated platforms

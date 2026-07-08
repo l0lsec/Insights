@@ -331,19 +331,21 @@
             </li>
         </ul>
 
-        <!-- Shared Local / Cloud Toggle (applies to all generation modes) -->
-        <div class="d-flex align-items-center mb-3 gap-2 p-2 rounded" style="background: #f8f9fa;">
+        <!-- Shared AI Provider + Model selector (applies to all generation modes) -->
+        <div class="d-flex align-items-center flex-wrap mb-3 gap-2 p-2 rounded" style="background: #f8f9fa;">
             <span class="fw-bold small">AI Provider:</span>
             <div class="btn-group btn-group-sm" role="group" id="ai-provider-toggle">
+                <input type="radio" class="btn-check" name="aiProvider" id="provider-openai" value="openai" checked>
+                <label class="btn btn-outline-primary" for="provider-openai">OpenAI</label>
+                <input type="radio" class="btn-check" name="aiProvider" id="provider-anthropic" value="anthropic">
+                <label class="btn btn-outline-primary" for="provider-anthropic">Anthropic</label>
                 <input type="radio" class="btn-check" name="aiProvider" id="provider-local" value="local">
                 <label class="btn btn-outline-success" for="provider-local">
                     <span id="ollama-status-dot" class="me-1">●</span> Local (Ollama)
                 </label>
-                <input type="radio" class="btn-check" name="aiProvider" id="provider-cloud" value="cloud" checked>
-                <label class="btn btn-outline-primary" for="provider-cloud">
-                    ☁️ Cloud (OpenAI)
-                </label>
             </div>
+            <label for="model-select" class="fw-bold small mb-0 ms-2">Model:</label>
+            <select id="model-select" class="form-select form-select-sm" style="width:auto;"></select>
             <span id="ollama-status-text" class="small text-muted ms-1"></span>
         </div>
         
@@ -2017,25 +2019,57 @@ function _removeRecalledImage(idx) {
 
 /* ── Ollama status check ─────────────────────────────────── */
 let _ollamaAvailable = false;
+let _ollamaModels = [];  // discovered from the Ollama status endpoint
+const MODEL_OPTIONS = {{ model_options | tojson }};
+
+function currentProvider() {
+    return document.querySelector('input[name="aiProvider"]:checked')?.value || 'openai';
+}
+
+function cloudFallbackButton() {
+    return document.getElementById('provider-' + MODEL_OPTIONS.default_provider)
+        || document.getElementById('provider-openai');
+}
+
+function populateModelDropdown() {
+    const sel = document.getElementById('model-select');
+    if (!sel) return;
+    const provider = currentProvider();
+    let models, def;
+    if (provider === 'local') {
+        models = _ollamaModels.length ? _ollamaModels
+            : [MODEL_OPTIONS.defaults.local].filter(Boolean);
+        def = MODEL_OPTIONS.defaults.local;
+    } else {
+        models = MODEL_OPTIONS.models[provider] || [];
+        def = MODEL_OPTIONS.defaults[provider];
+    }
+    const prev = sel.value;
+    sel.innerHTML = '';
+    models.forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        sel.appendChild(opt);
+    });
+    if (models.includes(prev)) sel.value = prev;
+    else if (def && models.includes(def)) sel.value = def;
+}
 
 function checkOllamaStatus() {
     const dot = document.getElementById('ollama-status-dot');
     const txt = document.getElementById('ollama-status-text');
     const localBtn = document.getElementById('provider-local');
-    const cloudBtn = document.getElementById('provider-cloud');
 
     fetch('{{ url_for("compose_ollama_status") }}')
         .then(r => r.json())
         .then(data => {
             _ollamaAvailable = data.available;
+            _ollamaModels = [...(data.models || []), ...(data.text_models || [])];
             if (data.available) {
                 dot.style.color = '#198754';
-                const allModels = [
-                    ...(data.models || []),
-                    ...(data.text_models || [])
-                ];
-                const label = allModels.length
-                    ? allModels.join(', ')
+                const label = _ollamaModels.length
+                    ? _ollamaModels.join(', ')
                     : [data.configured_model, data.configured_text_model].filter(Boolean).join(', ');
                 txt.textContent = 'Running \u2014 ' + label;
                 localBtn.disabled = false;
@@ -2043,18 +2077,26 @@ function checkOllamaStatus() {
                 dot.style.color = '#dc3545';
                 txt.innerHTML = 'Not detected \u2014 <a href="https://ollama.com" target="_blank" rel="noopener">Install Ollama</a>';
                 localBtn.disabled = true;
-                cloudBtn.checked = true;
+                if (localBtn.checked) cloudFallbackButton().checked = true;
             }
+            populateModelDropdown();
         })
         .catch(() => {
             dot.style.color = '#dc3545';
             txt.textContent = 'Check failed';
             localBtn.disabled = true;
-            cloudBtn.checked = true;
+            if (localBtn.checked) cloudFallbackButton().checked = true;
+            populateModelDropdown();
         });
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+    // Default the provider selection to the server-configured provider.
+    (document.getElementById('provider-' + MODEL_OPTIONS.default_provider)
+        || document.getElementById('provider-openai')).checked = true;
+    document.querySelectorAll('input[name="aiProvider"]').forEach(r =>
+        r.addEventListener('change', populateModelDropdown));
+    populateModelDropdown();
     checkOllamaStatus();
     document.querySelectorAll('#sourceTypeTabs .nav-link').forEach(tab => {
         tab.addEventListener('shown.bs.tab', checkOllamaStatus);
@@ -2123,9 +2165,12 @@ function generatePosts() {
         formData.append('image_url', finalImageUrl);
     }
     
-    // Always send local/cloud preference
-    const useLocal = document.getElementById('provider-local')?.checked ? 'true' : 'false';
-    formData.append('use_local', useLocal);
+    // Send the selected AI provider + model (with legacy use_local for older handlers)
+    const aiProvider = currentProvider();
+    formData.append('provider', aiProvider);
+    const modelSel = document.getElementById('model-select');
+    if (modelSel && modelSel.value) formData.append('model', modelSel.value);
+    formData.append('use_local', aiProvider === 'local' ? 'true' : 'false');
 
     // Use different endpoint for saved sources
     let endpoint;
