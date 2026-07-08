@@ -37,6 +37,12 @@ PLATFORM_GUIDELINES = {
     "instagram": "Visual-focused caption, emojis welcome, 10-15 relevant hashtags at the end",
 }
 
+NO_EM_DASH_RULE = (
+    "Never use em dashes (the long dash) anywhere in the output. "
+    "Use commas, periods, parentheses, or rephrase the sentence instead. "
+    "Do not use en dashes either; only use a normal hyphen when joining words."
+)
+
 # ── Shared LLM helpers ────────────────────────────────────────────────────
 
 def _get_llm_client(use_local: bool = False, vision: bool = False):
@@ -62,6 +68,20 @@ def _get_llm_params(use_local: bool, num_platforms: int = 1, posts_per_call: int
             "extra_body": {"repeat_penalty": 1.3, "top_p": 0.9},
         }
     return {"temperature": 0.8, "max_tokens": 3000}
+
+
+def _meter(fn_name: str, *args, **kwargs) -> None:
+    """Best-effort usage recording; never raises into generation code.
+
+    Delegates to ``usage_meter.<fn_name>``; any failure (including an import error)
+    is logged at debug level and swallowed so metering can never break generation.
+    """
+    try:
+        import usage_meter
+
+        getattr(usage_meter, fn_name)(*args, **kwargs)
+    except Exception:
+        logger.debug("usage metering unavailable", exc_info=True)
 
 
 _LOCAL_BATCH_SIZE = 1
@@ -100,6 +120,8 @@ def _batch_generate(client, model, messages_fn, platforms, posts_per_platform, u
         params = _get_llm_params(use_local, num_platforms=len(plats), posts_per_call=n)
         msgs = messages_fn(plats, n)
         resp = client.chat.completions.create(model=model, messages=msgs, **params)
+        _meter("record_chat", resp, category="social_posts",
+               provider="ollama" if use_local else "openai", model=model)
         return _extract_json_from_llm(resp.choices[0].message.content.strip())
 
     if posts_per_platform <= batch_size:
@@ -364,6 +386,8 @@ def transcribe_audio(audio_path: str) -> str:
             path_or_hf_repo="mlx-community/whisper-base-mlx",
         )
         transcript = result.get("text", "").strip()
+        _meter("record_transcription", audio_path=audio_path,
+               transcript=transcript, provider="local", model="whisper-base-mlx")
         logger.debug("Transcription complete via mlx-whisper")
         return transcript
     except ImportError:
@@ -379,6 +403,8 @@ def transcribe_audio(audio_path: str) -> str:
         segments, _ = model.transcribe(audio_path)
         segments_list = list(segments)
         transcript = " ".join(segment.text.strip() for segment in segments_list)
+        _meter("record_transcription", audio_path=audio_path,
+               transcript=transcript, provider="local", model="faster-whisper-base")
         logger.debug("Transcription finished with %d segments", len(segments_list))
         return transcript
     except ImportError:
@@ -399,6 +425,8 @@ def transcribe_audio(audio_path: str) -> str:
                     file=audio_file,
                 )
             transcript = response.text.strip()
+            _meter("record_transcription", audio_path=audio_path,
+                   transcript=transcript, provider="openai", model="whisper-1")
             logger.debug("Transcription complete via OpenAI API")
             return transcript
         except Exception as exc:
@@ -428,10 +456,12 @@ def summarize_text(text: str) -> str:
         # Ask the language model for a short summary of the transcript
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": f"Summarize the following text:\n{text}"}],
+            messages=[{"role": "user", "content": f"Summarize the following text. {NO_EM_DASH_RULE}\n\n{text}"}],
             temperature=0.2,
         )
         summary = response.choices[0].message.content.strip()
+        _meter("record_chat", response, category="summary",
+               provider="openai", model=OPENAI_MODEL)
         logger.debug("Summary received")
         return summary
     except Exception as exc:
@@ -461,7 +491,7 @@ def extract_action_items(text: str) -> List[str]:
                     "content": (
                         "Extract a concise list of action items from the "
                         "following text. Respond with one item per line "
-                        "and no additional commentary.\n" + text
+                        "and no additional commentary. " + NO_EM_DASH_RULE + "\n" + text
                     ),
                 }
             ],
@@ -470,6 +500,8 @@ def extract_action_items(text: str) -> List[str]:
         # Normalise each returned line into a bare task string
         lines = response.choices[0].message.content.splitlines()
         actions = [ln.lstrip("- ").strip() for ln in lines if ln.strip()]
+        _meter("record_chat", response, category="action_items",
+               provider="openai", model=OPENAI_MODEL)
         logger.debug("Action items received: %d", len(actions))
         return actions
     except Exception as exc:
@@ -573,7 +605,8 @@ def generate_article(
                         "You are an expert tech writer specializing in cybersecurity, privacy, "
                         "and technology topics. You write compelling, well-researched articles "
                         "that inform and engage readers. Use markdown formatting for the article "
-                        "with proper headings, paragraphs, and emphasis where appropriate."
+                        "with proper headings, paragraphs, and emphasis where appropriate. "
+                        + NO_EM_DASH_RULE
                     ),
                 },
                 {
@@ -600,6 +633,8 @@ def generate_article(
             max_tokens=4000,
         )
         article = response.choices[0].message.content.strip()
+        _meter("record_chat", response, category="article",
+               provider="openai", model=OPENAI_MODEL)
         logger.debug("Article generated successfully")
         return article
     except Exception as exc:
@@ -690,7 +725,8 @@ def generate_social_copy(
                         "You create engaging, platform-optimized promotional copy that drives engagement and clicks. "
                         "You understand each platform's unique culture and best practices. "
                         "When asked to create multiple posts, you ensure each one is genuinely unique with different "
-                        "angles, hooks, questions, or perspectives - not just rewording the same message."
+                        "angles, hooks, questions, or perspectives - not just rewording the same message. "
+                        + NO_EM_DASH_RULE
                     ),
                 },
                 {
@@ -713,7 +749,9 @@ def generate_social_copy(
             temperature=0.8,  # Slightly higher for more variety in multiple posts
             max_tokens=3000 if posts_per_platform > 1 else 2000,
         )
-        
+        _meter("record_chat", response, category="social_posts",
+               provider="openai", model=OPENAI_MODEL)
+
         # Parse the JSON response
         content = response.choices[0].message.content.strip()
         # Handle markdown code blocks if present
@@ -773,7 +811,8 @@ def refine_article(
                         "You are an expert editor specializing in tech and cybersecurity content. "
                         "You help refine and improve articles based on user feedback while maintaining "
                         "the article's voice, structure, and key points. Return the complete revised "
-                        "article in markdown format."
+                        "article in markdown format. "
+                        + NO_EM_DASH_RULE
                     ),
                 },
                 {
@@ -792,6 +831,8 @@ def refine_article(
             temperature=0.7,
             max_tokens=4000,
         )
+        _meter("record_chat", response, category="refine",
+               provider="openai", model=OPENAI_MODEL)
         refined = response.choices[0].message.content.strip()
         logger.debug("Article refined successfully")
         return refined
@@ -830,6 +871,7 @@ def generate_posts_from_prompt(
                     "content": (
                         "You are a social media content creator and marketing expert. "
                         "You create engaging, platform-optimized posts that resonate with audiences. "
+                        + NO_EM_DASH_RULE + " "
                         "You ALWAYS reply with valid JSON only."
                     ),
                 },
@@ -978,6 +1020,7 @@ def generate_posts_from_url(
                         "URL verbatim in every single post on every platform. Do not shorten, paraphrase, omit, or "
                         "replace the URL with placeholder text like '[link]' or 'link in bio'. The URL must appear "
                         "as a clickable link in the post body. "
+                        + NO_EM_DASH_RULE + " "
                         "You ALWAYS reply with valid JSON only."
                     ),
                 },
@@ -1078,6 +1121,7 @@ def generate_posts_from_text(
                         "You are a social media content creator. You transform text content into engaging "
                         "social media posts optimized for different platforms."
                         f"{system_url_rule} "
+                        + NO_EM_DASH_RULE + " "
                         "You ALWAYS reply with valid JSON only."
                     ),
                 },
@@ -1274,6 +1318,7 @@ def generate_posts_from_images(
                     "content": (
                         "You are a social media content creator. "
                         "You write engaging posts about images. "
+                        + NO_EM_DASH_RULE + " "
                         "You ALWAYS reply with valid JSON only."
                     ),
                 },
@@ -1281,6 +1326,8 @@ def generate_posts_from_images(
             ],
             **params,
         )
+        _meter("record_chat", response, category="vision_posts",
+               provider="ollama" if use_local else "openai", model=model)
 
         raw_text = response.choices[0].message.content.strip()
         result = _extract_json_from_llm(raw_text)
@@ -1650,6 +1697,8 @@ def generate_youtube_thumbnail(
         if not response.data or not response.data[0].b64_json:
             raise RuntimeError("OpenAI image generation returned no image data")
         image_base64 = response.data[0].b64_json
+        _meter("record_image", response, category="thumbnail",
+               model="gpt-image-1", provider="openai")
 
     return {
         "image_base64": image_base64,

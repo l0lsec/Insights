@@ -1,0 +1,257 @@
+{% extends "base.html" %}
+{% block title %}Usage · Insights{% endblock %}
+{% block header %}Usage &amp; cost{% endblock %}
+
+{% macro money(v) -%}${{ '%.4f'|format(v or 0) }}{%- endmacro %}
+{% macro num(v) -%}{{ '{:,}'.format((v or 0)|int) }}{%- endmacro %}
+{% macro mode_badge(m) -%}
+    {% if m == 'proactive' %}
+        <span class="badge" style="background:#6f42c1;">proactive</span>
+    {% elif m == 'reactive' %}
+        <span class="badge" style="background:#0d6efd;">reactive</span>
+    {% else %}
+        <span class="badge bg-secondary">{{ m }}</span>
+    {% endif %}
+{%- endmacro %}
+
+{% block content %}
+<p class="results-count mb-3">
+    Spend on AI content generation, split by how it was triggered.
+    <strong style="color:#6f42c1;">Proactive</strong> = automated background work (episode
+    transcription, summaries, action items). <strong style="color:#0d6efd;">Reactive</strong> =
+    generation you triggered yourself (Command Center posts, articles, refine, thumbnails).
+    Costs are <em>estimates</em> from a local price table &mdash; token counts are exact.
+    Tune prices with the <code>USAGE_PRICE_*</code> env vars.
+</p>
+
+<div class="filter-bar">
+    <form method="get" action="{{ url_for('usage_page') }}" class="row g-2 align-items-end">
+        <div class="col-md-2">
+            <label class="form-label" for="mode">Mode</label>
+            <select id="mode" name="mode" class="form-select">
+                <option value="">All</option>
+                <option value="proactive" {% if filter_mode == 'proactive' %}selected{% endif %}>Proactive</option>
+                <option value="reactive" {% if filter_mode == 'reactive' %}selected{% endif %}>Reactive</option>
+            </select>
+        </div>
+        <div class="col-md-3">
+            <label class="form-label" for="category">Content type</label>
+            <select id="category" name="category" class="form-select">
+                <option value="">All types</option>
+                {% for c in categories %}
+                <option value="{{ c }}" {% if filter_category == c %}selected{% endif %}>{{ c }}</option>
+                {% endfor %}
+            </select>
+        </div>
+        <div class="col-md-2">
+            <label class="form-label" for="start">From</label>
+            <input type="date" id="start" name="start" class="form-control" value="{{ filter_start }}">
+        </div>
+        <div class="col-md-2">
+            <label class="form-label" for="end">To</label>
+            <input type="date" id="end" name="end" class="form-control" value="{{ filter_end }}">
+        </div>
+        <div class="col-md-3 d-flex gap-2">
+            <button type="submit" class="btn btn-primary">Apply</button>
+            <a href="{{ url_for('usage_page') }}" class="btn btn-outline-secondary">Reset</a>
+            <a href="{{ url_for('usage_csv',
+                                 mode=filter_mode,
+                                 category=filter_category,
+                                 start=filter_start,
+                                 end=filter_end) }}"
+               class="btn btn-outline-success">Export CSV</a>
+        </div>
+    </form>
+    <p class="results-count mt-2 mb-0">
+        Mode &amp; content-type filters apply to the event log below; the tiles and breakdowns
+        always show the full split for the selected date range.
+    </p>
+</div>
+
+<div class="row g-3 mb-4">
+    <div class="col-md-4">
+        <div class="card h-100 shadow-sm">
+            <div class="card-body">
+                <div class="text-uppercase text-muted" style="font-size:0.75rem; letter-spacing:0.5px;">Total spend</div>
+                <div style="font-size:2rem; font-weight:600;">{{ money(totals.cost_usd) }}</div>
+                <div class="results-count">{{ num(totals.total_tokens) }} tokens · {{ num(totals.events) }} calls</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card h-100 shadow-sm" style="border-top:3px solid #6f42c1;">
+            <div class="card-body">
+                <div class="text-uppercase text-muted" style="font-size:0.75rem; letter-spacing:0.5px;">Proactive (automated)</div>
+                <div style="font-size:2rem; font-weight:600; color:#6f42c1;">{{ money(proactive.cost_usd) }}</div>
+                <div class="results-count">{{ num(proactive.total_tokens) }} tokens · {{ num(proactive.events) }} calls</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card h-100 shadow-sm" style="border-top:3px solid #0d6efd;">
+            <div class="card-body">
+                <div class="text-uppercase text-muted" style="font-size:0.75rem; letter-spacing:0.5px;">Reactive (you triggered)</div>
+                <div style="font-size:2rem; font-weight:600; color:#0d6efd;">{{ money(reactive.cost_usd) }}</div>
+                <div class="results-count">{{ num(reactive.total_tokens) }} tokens · {{ num(reactive.events) }} calls</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row g-4">
+    <div class="col-lg-7">
+        <h2 class="h5 mb-2">Spend by content type</h2>
+        <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr>
+                        <th>Content type</th>
+                        <th class="text-end">Proactive</th>
+                        <th class="text-end">Reactive</th>
+                        <th class="text-end">Total</th>
+                        <th class="text-end">Tokens</th>
+                        <th class="text-end">Calls</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for c in by_category %}
+                    <tr>
+                        <td><code>{{ c.category }}</code></td>
+                        <td class="text-end" style="color:#6f42c1;">{{ money(c.proactive_cost) }}</td>
+                        <td class="text-end" style="color:#0d6efd;">{{ money(c.reactive_cost) }}</td>
+                        <td class="text-end fw-semibold">{{ money(c.cost_usd) }}</td>
+                        <td class="text-end" style="font-variant-numeric: tabular-nums;">{{ num(c.total_tokens) }}</td>
+                        <td class="text-end" style="font-variant-numeric: tabular-nums;">{{ num(c.events) }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="6" class="text-center text-muted py-4">No usage recorded yet.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <div class="col-lg-5">
+        <h2 class="h5 mb-2">Spend by model</h2>
+        <div class="table-responsive">
+            <table class="table table-sm table-hover align-middle">
+                <thead>
+                    <tr>
+                        <th>Model</th>
+                        <th>Provider</th>
+                        <th class="text-end">Tokens</th>
+                        <th class="text-end">Cost</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for m in by_model %}
+                    <tr>
+                        <td><code>{{ m.model }}</code></td>
+                        <td>
+                            {% if m.provider == 'openai' %}
+                                <span class="badge bg-dark">openai</span>
+                            {% else %}
+                                <span class="badge bg-secondary">{{ m.provider }} · free</span>
+                            {% endif %}
+                        </td>
+                        <td class="text-end" style="font-variant-numeric: tabular-nums;">{{ num(m.total_tokens) }}</td>
+                        <td class="text-end fw-semibold">{{ money(m.cost_usd) }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="4" class="text-center text-muted py-4">No usage recorded yet.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<h2 class="h5 mb-2 mt-3">Daily spend</h2>
+<div class="table-responsive mb-4">
+    <table class="table table-sm table-hover align-middle">
+        <thead>
+            <tr>
+                <th>Day</th>
+                <th class="text-end">Proactive</th>
+                <th class="text-end">Reactive</th>
+                <th class="text-end">Total</th>
+                <th class="text-end">Tokens</th>
+                <th class="text-end">Calls</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for d in daily %}
+            <tr>
+                <td style="font-variant-numeric: tabular-nums;">{{ d.day }}</td>
+                <td class="text-end" style="color:#6f42c1;">{{ money(d.proactive_cost) }}</td>
+                <td class="text-end" style="color:#0d6efd;">{{ money(d.reactive_cost) }}</td>
+                <td class="text-end fw-semibold">{{ money(d.cost_usd) }}</td>
+                <td class="text-end" style="font-variant-numeric: tabular-nums;">{{ num(d.total_tokens) }}</td>
+                <td class="text-end" style="font-variant-numeric: tabular-nums;">{{ num(d.events) }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="6" class="text-center text-muted py-4">No usage recorded yet.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+<h2 class="h5 mb-2">Event log</h2>
+<p class="results-count mb-2">
+    {{ total_events }} {{ 'event' if total_events == 1 else 'events' }}{% if total_events %} · page {{ page }} of {{ total_pages }}{% endif %}
+</p>
+<div class="table-responsive">
+    <table class="table table-sm table-hover align-middle">
+        <thead>
+            <tr>
+                <th style="white-space: nowrap;">Time</th>
+                <th>Mode</th>
+                <th>Content type</th>
+                <th>Model</th>
+                <th>User</th>
+                <th class="text-end">Volume</th>
+                <th class="text-end">Cost</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for row in rows %}
+            <tr>
+                <td style="white-space: nowrap; font-variant-numeric: tabular-nums; color:#6c757d;">{{ row['ts'] }}</td>
+                <td>{{ mode_badge(row['mode']) }}</td>
+                <td><code>{{ row['category'] }}</code></td>
+                <td style="font-size:0.85em;">
+                    <code>{{ row['model'] }}</code>
+                    {% if row['provider'] != 'openai' %}<span class="text-muted">· {{ row['provider'] }}</span>{% endif %}
+                </td>
+                <td>{{ row['username'] or '—' }}</td>
+                <td class="text-end" style="font-variant-numeric: tabular-nums; color:#6c757d;">
+                    {% if row['total_tokens'] %}{{ num(row['total_tokens']) }} tok
+                    {%- elif row['audio_seconds'] %}{{ '%.1f'|format(row['audio_seconds'] / 60.0) }} min
+                    {%- elif row['images'] %}{{ row['images'] }} img
+                    {%- else %}—{% endif %}
+                </td>
+                <td class="text-end fw-semibold">{{ money(row['cost_usd']) }}</td>
+            </tr>
+            {% else %}
+            <tr><td colspan="7" class="text-center text-muted py-4">No usage matches these filters.</td></tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if total_pages > 1 %}
+{% set qs = {'mode': filter_mode, 'category': filter_category, 'start': filter_start, 'end': filter_end} %}
+<nav aria-label="Usage pagination">
+    <ul class="pagination justify-content-center">
+        <li class="page-item {% if page <= 1 %}disabled{% endif %}">
+            <a class="page-link" href="{{ url_for('usage_page', page=page-1, **qs) }}">Previous</a>
+        </li>
+        <li class="page-item disabled">
+            <span class="page-link">Page {{ page }} of {{ total_pages }}</span>
+        </li>
+        <li class="page-item {% if page >= total_pages %}disabled{% endif %}">
+            <a class="page-link" href="{{ url_for('usage_page', page=page+1, **qs) }}">Next</a>
+        </li>
+    </ul>
+</nav>
+{% endif %}
+{% endblock %}

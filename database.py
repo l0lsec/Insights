@@ -357,6 +357,39 @@ def init_db(db_path: str = DB_PATH) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_activity_log_action ON activity_log(action, ts DESC)"
         )
+        # AI usage metering: one row per paid (or local) generation call, with
+        # tokens + estimated cost and whether it ran proactively or reactively.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS usage_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                mode TEXT NOT NULL,
+                category TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                model TEXT NOT NULL,
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                total_tokens INTEGER NOT NULL DEFAULT 0,
+                audio_seconds REAL NOT NULL DEFAULT 0,
+                images INTEGER NOT NULL DEFAULT 0,
+                cost_usd REAL NOT NULL DEFAULT 0,
+                user_id INTEGER,
+                username TEXT,
+                details TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_ts ON usage_events(ts DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_mode ON usage_events(mode, ts DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_events_category ON usage_events(category, ts DESC)"
+        )
         # Upgrade any existing DB with newer columns
         cur = conn.execute("PRAGMA table_info(episodes)")
         columns = [row[1] for row in cur.fetchall()]
@@ -3638,5 +3671,304 @@ def distinct_activity_actions(db_path: str = DB_PATH) -> List[str]:
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
             "SELECT DISTINCT action FROM activity_log ORDER BY action ASC"
+        )
+        return [row[0] for row in cur.fetchall() if row[0]]
+
+
+# ---------------------------------------------------------------------------
+# AI usage metering
+# ---------------------------------------------------------------------------
+
+
+def log_usage(
+    *,
+    mode: str,
+    category: str,
+    provider: str,
+    model: str,
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+    total_tokens: int = 0,
+    audio_seconds: float = 0.0,
+    images: int = 0,
+    cost_usd: float = 0.0,
+    user_id: Optional[int] = None,
+    username: Optional[str] = None,
+    details: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> int:
+    """Append one row to ``usage_events`` and return its id."""
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO usage_events (
+                mode, category, provider, model,
+                prompt_tokens, completion_tokens, total_tokens,
+                audio_seconds, images, cost_usd,
+                user_id, username, details
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                mode,
+                category,
+                provider,
+                model,
+                int(prompt_tokens),
+                int(completion_tokens),
+                int(total_tokens),
+                float(audio_seconds),
+                int(images),
+                float(cost_usd),
+                user_id,
+                username,
+                details,
+            ),
+        )
+        conn.commit()
+        return int(cur.lastrowid)
+
+
+def _usage_filter_clause(
+    mode: Optional[str],
+    category: Optional[str],
+    start_ts: Optional[str],
+    end_ts: Optional[str],
+) -> tuple[str, list]:
+    clauses: list[str] = []
+    params: list = []
+    if mode:
+        clauses.append("mode = ?")
+        params.append(mode)
+    if category:
+        clauses.append("category = ?")
+        params.append(category)
+    if start_ts:
+        clauses.append("ts >= ?")
+        params.append(start_ts)
+    if end_ts:
+        clauses.append("ts <= ?")
+        params.append(end_ts)
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    return where, params
+
+
+def usage_totals(
+    mode: Optional[str] = None,
+    category: Optional[str] = None,
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> dict:
+    """Return aggregate totals (cost, tokens, counts) for the given filters."""
+    where, params = _usage_filter_clause(mode, category, start_ts, end_ts)
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            f"""
+            SELECT
+                COUNT(*),
+                COALESCE(SUM(cost_usd), 0),
+                COALESCE(SUM(total_tokens), 0),
+                COALESCE(SUM(prompt_tokens), 0),
+                COALESCE(SUM(completion_tokens), 0),
+                COALESCE(SUM(audio_seconds), 0),
+                COALESCE(SUM(images), 0)
+            FROM usage_events{where}
+            """,
+            params,
+        )
+        row = cur.fetchone()
+        return {
+            "events": int(row[0]),
+            "cost_usd": float(row[1]),
+            "total_tokens": int(row[2]),
+            "prompt_tokens": int(row[3]),
+            "completion_tokens": int(row[4]),
+            "audio_seconds": float(row[5]),
+            "images": int(row[6]),
+        }
+
+
+def usage_by_mode(
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> dict:
+    """Return ``{mode: {events, cost_usd, total_tokens}}`` for the range."""
+    where, params = _usage_filter_clause(None, None, start_ts, end_ts)
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            f"""
+            SELECT mode, COUNT(*), COALESCE(SUM(cost_usd), 0), COALESCE(SUM(total_tokens), 0)
+            FROM usage_events{where} GROUP BY mode
+            """,
+            params,
+        )
+        return {
+            r[0]: {"events": int(r[1]), "cost_usd": float(r[2]), "total_tokens": int(r[3])}
+            for r in cur.fetchall()
+        }
+
+
+def usage_by_category(
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> List[dict]:
+    """Return per-category cost split into proactive / reactive / total, plus tokens."""
+    where, params = _usage_filter_clause(None, None, start_ts, end_ts)
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            f"""
+            SELECT category,
+                   COALESCE(SUM(CASE WHEN mode='proactive' THEN cost_usd ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN mode='reactive'  THEN cost_usd ELSE 0 END), 0),
+                   COALESCE(SUM(cost_usd), 0),
+                   COALESCE(SUM(total_tokens), 0),
+                   COUNT(*)
+            FROM usage_events{where}
+            GROUP BY category
+            ORDER BY 4 DESC
+            """,
+            params,
+        )
+        return [
+            {
+                "category": r[0],
+                "proactive_cost": float(r[1]),
+                "reactive_cost": float(r[2]),
+                "cost_usd": float(r[3]),
+                "total_tokens": int(r[4]),
+                "events": int(r[5]),
+            }
+            for r in cur.fetchall()
+        ]
+
+
+def usage_by_model(
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> List[dict]:
+    """Return per-model / per-provider cost and token totals, biggest first."""
+    where, params = _usage_filter_clause(None, None, start_ts, end_ts)
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            f"""
+            SELECT model, provider, COUNT(*), COALESCE(SUM(cost_usd), 0),
+                   COALESCE(SUM(total_tokens), 0)
+            FROM usage_events{where}
+            GROUP BY model, provider
+            ORDER BY 4 DESC
+            """,
+            params,
+        )
+        return [
+            {
+                "model": r[0],
+                "provider": r[1],
+                "events": int(r[2]),
+                "cost_usd": float(r[3]),
+                "total_tokens": int(r[4]),
+            }
+            for r in cur.fetchall()
+        ]
+
+
+def usage_daily(
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> List[dict]:
+    """Return per-day cost split into proactive / reactive / total, newest first."""
+    where, params = _usage_filter_clause(None, None, start_ts, end_ts)
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            f"""
+            SELECT date(ts) AS day,
+                   COALESCE(SUM(CASE WHEN mode='proactive' THEN cost_usd ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN mode='reactive'  THEN cost_usd ELSE 0 END), 0),
+                   COALESCE(SUM(cost_usd), 0),
+                   COALESCE(SUM(total_tokens), 0),
+                   COUNT(*)
+            FROM usage_events{where}
+            GROUP BY day
+            ORDER BY day DESC
+            """,
+            params,
+        )
+        return [
+            {
+                "day": r[0],
+                "proactive_cost": float(r[1]),
+                "reactive_cost": float(r[2]),
+                "cost_usd": float(r[3]),
+                "total_tokens": int(r[4]),
+                "events": int(r[5]),
+            }
+            for r in cur.fetchall()
+        ]
+
+
+def list_usage(
+    mode: Optional[str] = None,
+    category: Optional[str] = None,
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    limit: int = 100,
+    offset: int = 0,
+    db_path: str = DB_PATH,
+) -> List[sqlite3.Row]:
+    """Return a page of usage-event rows matching the filters, newest first."""
+    where, params = _usage_filter_clause(mode, category, start_ts, end_ts)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            f"SELECT * FROM usage_events{where} ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?",
+            (*params, int(limit), int(offset)),
+        )
+        return cur.fetchall()
+
+
+def count_usage(
+    mode: Optional[str] = None,
+    category: Optional[str] = None,
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> int:
+    """Return total number of usage-event rows matching the filters."""
+    where, params = _usage_filter_clause(mode, category, start_ts, end_ts)
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(f"SELECT COUNT(*) FROM usage_events{where}", params)
+        return int(cur.fetchone()[0])
+
+
+def iter_usage_for_export(
+    mode: Optional[str] = None,
+    category: Optional[str] = None,
+    start_ts: Optional[str] = None,
+    end_ts: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> Iterable[sqlite3.Row]:
+    """Yield usage-event rows matching the filters for CSV streaming."""
+    where, params = _usage_filter_clause(mode, category, start_ts, end_ts)
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            f"SELECT * FROM usage_events{where} ORDER BY ts DESC, id DESC",
+            params,
+        )
+        for row in cur:
+            yield row
+    finally:
+        conn.close()
+
+
+def distinct_usage_categories(db_path: str = DB_PATH) -> List[str]:
+    """Return distinct content categories present in the usage log, alphabetical."""
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "SELECT DISTINCT category FROM usage_events ORDER BY category ASC"
         )
         return [row[0] for row in cur.fetchall() if row[0]]

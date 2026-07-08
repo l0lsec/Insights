@@ -46,6 +46,7 @@ from html import unescape
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from flasgger import Swagger
+import usage_meter
 from database import (
     init_db,
     get_episode,
@@ -185,6 +186,16 @@ from database import (
     count_activity,
     iter_activity_for_export,
     distinct_activity_actions,
+    # AI usage metering
+    usage_totals,
+    usage_by_mode,
+    usage_by_category,
+    usage_by_model,
+    usage_daily,
+    list_usage,
+    count_usage,
+    iter_usage_for_export,
+    distinct_usage_categories,
 )
 from insights import (
     transcribe_audio,
@@ -717,6 +728,117 @@ def activity_csv():
     return Response(generate(), mimetype="text/csv", headers=headers)
 
 
+# ── AI usage / cost meters ─────────────────────────────────────────────────
+
+
+def _parse_usage_filters():
+    """Pull and normalize usage-page filter params from the querystring."""
+    mode = (request.args.get("mode") or "").strip() or None
+    if mode not in ("proactive", "reactive"):
+        mode = None
+
+    category = (request.args.get("category") or "").strip() or None
+    start = (request.args.get("start") or "").strip() or None
+    end = (request.args.get("end") or "").strip() or None
+
+    # Accept bare YYYY-MM-DD inputs; broaden them to full-day ranges.
+    if start and len(start) == 10:
+        start = f"{start} 00:00:00"
+    if end and len(end) == 10:
+        end = f"{end} 23:59:59"
+
+    return {"mode": mode, "category": category, "start_ts": start, "end_ts": end}
+
+
+@app.route("/usage")
+def usage_page():
+    filters = _parse_usage_filters()
+    # Headline tiles and breakdowns reflect the date range only, so the
+    # proactive-vs-reactive split stays meaningful; mode/category filter the log.
+    range_filters = {"start_ts": filters["start_ts"], "end_ts": filters["end_ts"]}
+
+    totals = usage_totals(**range_filters)
+    by_mode = usage_by_mode(**range_filters)
+    by_category = usage_by_category(**range_filters)
+    by_model = usage_by_model(**range_filters)
+    daily = usage_daily(**range_filters)
+
+    empty = {"cost_usd": 0.0, "total_tokens": 0, "events": 0}
+    proactive = by_mode.get("proactive", empty)
+    reactive = by_mode.get("reactive", empty)
+
+    try:
+        page = max(1, int(request.args.get("page", "1")))
+    except ValueError:
+        page = 1
+    per_page = 100
+    offset = (page - 1) * per_page
+
+    rows = list_usage(**filters, limit=per_page, offset=offset)
+    total_events = count_usage(**filters)
+    total_pages = max(1, (total_events + per_page - 1) // per_page)
+
+    return render_template(
+        "usage.html",
+        totals=totals,
+        proactive=proactive,
+        reactive=reactive,
+        by_category=by_category,
+        by_model=by_model,
+        daily=daily,
+        rows=rows,
+        total_events=total_events,
+        page=page,
+        per_page=per_page,
+        total_pages=total_pages,
+        categories=distinct_usage_categories(),
+        filter_mode=request.args.get("mode", ""),
+        filter_category=request.args.get("category", ""),
+        filter_start=request.args.get("start", ""),
+        filter_end=request.args.get("end", ""),
+    )
+
+
+@app.route("/usage.csv")
+def usage_csv():
+    filters = _parse_usage_filters()
+
+    def generate():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow(
+            [
+                "id", "ts", "mode", "category", "provider", "model",
+                "prompt_tokens", "completion_tokens", "total_tokens",
+                "audio_seconds", "images", "cost_usd",
+                "user_id", "username", "details",
+            ]
+        )
+        yield buf.getvalue()
+        buf.seek(0)
+        buf.truncate(0)
+
+        for row in iter_usage_for_export(**filters):
+            writer.writerow(
+                [
+                    row["id"], row["ts"], row["mode"], row["category"],
+                    row["provider"], row["model"], row["prompt_tokens"],
+                    row["completion_tokens"], row["total_tokens"],
+                    row["audio_seconds"], row["images"], row["cost_usd"],
+                    row["user_id"], row["username"], row["details"],
+                ]
+            )
+            yield buf.getvalue()
+            buf.seek(0)
+            buf.truncate(0)
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    headers = {
+        "Content-Disposition": f'attachment; filename="usage-{stamp}.csv"'
+    }
+    return Response(generate(), mimetype="text/csv", headers=headers)
+
+
 @app.route("/health")
 def health():
     return jsonify({"status": "ok"})
@@ -1201,6 +1323,17 @@ def worker() -> None:
             update_episode_status(url, "error")
         finally:
             task_queue.task_done()
+
+
+def _proactive_worker() -> None:
+    """Run the episode ``worker`` with every generation tagged as proactive.
+
+    The background queue is automated (non-interactive) work, so all AI usage it
+    incurs — transcription, summaries, action items — is metered as ``proactive``.
+    ContextVars are per-thread, so this override is scoped to the worker thread.
+    """
+    with usage_meter.usage_context("proactive"):
+        worker()
 
 
 # Worker thread will be started in main block to avoid duplicates in debug mode
@@ -7874,8 +8007,8 @@ def _backfill_youtube_channels_bg():
 
 def start_workers():
     """Start all background worker threads."""
-    # Episode processing worker
-    episode_worker = threading.Thread(target=worker, daemon=True)
+    # Episode processing worker (usage metered as proactive/background)
+    episode_worker = threading.Thread(target=_proactive_worker, daemon=True)
     episode_worker.start()
     app.logger.info("Episode processing worker started")
     
