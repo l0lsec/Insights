@@ -31,6 +31,7 @@ What started as a podcast transcription tool has grown into a complete content p
 - **Article Generation** - Transform source content into polished blog posts, news articles, opinion pieces, or technical deep-dives
 - **Article Refinement** - Iteratively improve generated articles with AI-assisted feedback
 - **Social Media Copy** - Auto-generate platform-optimized posts for LinkedIn, Threads, X/Twitter, Facebook, and Instagram
+- **Provider Choice** - Run text and vision generation through OpenAI (default) or Anthropic Claude by setting `LLM_PROVIDER`
 - **Local Model Support** - Optionally route generation through a local Ollama instance (text and vision models) instead of OpenAI
 
 #### Social Media Management
@@ -212,13 +213,16 @@ All variables can be set in a `.env` file in the project root. See `.env.example
 
 | Variable | Description |
 |----------|-------------|
-| `OPENAI_API_KEY` | Your OpenAI API key. Required for all AI features. |
+| `OPENAI_API_KEY` | Your OpenAI API key. Required for all AI features. Still required for audio transcription and thumbnail generation even when `LLM_PROVIDER=anthropic`, since those have no Anthropic equivalent. |
 
 ### Optional (General)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `LLM_PROVIDER` | `openai` | Cloud provider for text/vision generation: `openai` or `anthropic` |
 | `OPENAI_MODEL` | `gpt-4o` | OpenAI model used for summarization, articles, and post generation |
+| `ANTHROPIC_API_KEY` | — | Anthropic (Claude) API key. Required when `LLM_PROVIDER=anthropic` |
+| `ANTHROPIC_MODEL` | `claude-opus-4-8` | Claude model used when `LLM_PROVIDER=anthropic` |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Base URL for an optional local Ollama server |
 | `OLLAMA_TEXT_MODEL` | `llama3.2` | Local text model used when generation is routed through Ollama |
 | `OLLAMA_VISION_MODEL` | `llama3.2-vision` | Local vision model used when image inputs are routed through Ollama |
