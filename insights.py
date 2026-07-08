@@ -24,7 +24,46 @@ OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "llama3.2-vision")
 OLLAMA_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2")
 
+# Selectable models per cloud provider, surfaced in the compose UI's model
+# dropdown. The configured default (OPENAI_MODEL / ANTHROPIC_MODEL) is always
+# offered too, even when it is not listed here. Local (Ollama) models are
+# discovered separately by the browser via the Ollama status endpoint.
+MODEL_CHOICES = {
+    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini"],
+    "anthropic": ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"],
+}
+
 logger = logging.getLogger(__name__)
+
+
+def provider_model_options() -> dict:
+    """Return provider/model options for the compose UI (JSON-serialisable).
+
+    Shape::
+
+        {"default_provider": "openai"|"anthropic",
+         "defaults": {"openai": <model>, "anthropic": <model>, "local": <model>},
+         "models": {"openai": [...], "anthropic": [...]}}
+
+    Each cloud provider's configured default model is kept first in its list so a
+    custom ``OPENAI_MODEL`` / ``ANTHROPIC_MODEL`` is always selectable.
+    """
+    def _with_default(provider: str, default_model: str) -> list:
+        listed = MODEL_CHOICES.get(provider, [])
+        return [default_model] + [m for m in listed if m != default_model]
+
+    return {
+        "default_provider": "anthropic" if LLM_PROVIDER == "anthropic" else "openai",
+        "defaults": {
+            "openai": OPENAI_MODEL,
+            "anthropic": ANTHROPIC_MODEL,
+            "local": OLLAMA_TEXT_MODEL,
+        },
+        "models": {
+            "openai": _with_default("openai", OPENAI_MODEL),
+            "anthropic": _with_default("anthropic", ANTHROPIC_MODEL),
+        },
+    }
 
 # ── Shared constants used by all generation functions ──────────────────────
 
@@ -152,27 +191,43 @@ class _AnthropicChatResponse:
         self.model = message.model
 
 
-def _get_llm_client(use_local: bool = False, vision: bool = False):
-    """Return ``(client, model_name, provider)`` for the configured LLM backend.
+def _get_llm_client(use_local: bool = False, vision: bool = False,
+                    provider: str | None = None, model: str | None = None):
+    """Return ``(client, model_name, provider)`` for the selected LLM backend.
 
-    ``use_local`` selects a local Ollama server (OpenAI-compatible). Otherwise the
-    cloud backend is chosen by ``LLM_PROVIDER`` ("openai" or "anthropic"). The
-    ``vision`` flag only affects the Ollama model choice; the cloud models handle
-    text and vision with a single model.
+    ``use_local`` selects a local Ollama server (OpenAI-compatible). ``provider``
+    and ``model`` are optional per-request overrides (e.g. from the compose UI):
+
+    * ``provider`` may be "openai", "anthropic", or "local"/"ollama"; when omitted
+      the cloud backend falls back to ``LLM_PROVIDER``. "local"/"ollama" is
+      equivalent to ``use_local=True``.
+    * ``model`` overrides the model for the resolved provider. A model that does
+      not belong to the resolved cloud provider is ignored (falls back to that
+      provider's default) so a stale UI value can't send e.g. a Claude model to
+      OpenAI and trigger a 400.
+
+    The ``vision`` flag only affects the Ollama model default; the cloud models
+    handle text and vision with a single model.
     """
     from openai import OpenAI
 
-    if use_local:
-        model = OLLAMA_VISION_MODEL if vision else OLLAMA_TEXT_MODEL
-        return OpenAI(base_url=f"{OLLAMA_BASE_URL}/v1", api_key="ollama"), model, "ollama"
+    if provider in ("local", "ollama"):
+        use_local = True
 
-    if LLM_PROVIDER == "anthropic":
-        return _AnthropicChatClient(os.getenv("ANTHROPIC_API_KEY")), ANTHROPIC_MODEL, "anthropic"
+    if use_local:
+        m = model or (OLLAMA_VISION_MODEL if vision else OLLAMA_TEXT_MODEL)
+        return OpenAI(base_url=f"{OLLAMA_BASE_URL}/v1", api_key="ollama"), m, "ollama"
+
+    resolved = provider or LLM_PROVIDER
+    if resolved == "anthropic":
+        m = model if (model and model.startswith("claude")) else ANTHROPIC_MODEL
+        return _AnthropicChatClient(os.getenv("ANTHROPIC_API_KEY")), m, "anthropic"
 
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     if not client.api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
-    return client, OPENAI_MODEL, "openai"
+    m = model if (model and not model.startswith("claude")) else OPENAI_MODEL
+    return client, m, "openai"
 
 
 def _get_llm_params(use_local: bool, num_platforms: int = 1, posts_per_call: int = 1) -> dict:
@@ -940,6 +995,8 @@ def generate_posts_from_prompt(
     posts_per_platform: int = 10,
     extra_context: str | None = None,
     use_local: bool = False,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> dict:
     """Generate social media posts from a freeform prompt/topic."""
     if platforms is None:
@@ -948,7 +1005,7 @@ def generate_posts_from_prompt(
     posts_per_platform = max(1, min(posts_per_platform, 10))
 
     try:
-        client, model, provider = _get_llm_client(use_local)
+        client, model, provider = _get_llm_client(use_local, provider=provider, model=model)
         tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
 
         platform_list = "\n".join([
@@ -1007,6 +1064,8 @@ def generate_posts_from_url(
     posts_per_platform: int = 10,
     extra_context: str | None = None,
     use_local: bool = False,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> dict:
     """Generate social media posts based on content from a URL."""
     import re
@@ -1093,7 +1152,7 @@ def generate_posts_from_url(
     posts_per_platform = max(1, min(posts_per_platform, 10))
 
     try:
-        client, model, provider = _get_llm_client(use_local)
+        client, model, provider = _get_llm_client(use_local, provider=provider, model=model)
         tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
 
         platform_list = "\n".join([
@@ -1159,6 +1218,8 @@ def generate_posts_from_text(
     extra_context: str | None = None,
     use_local: bool = False,
     source_url: str | None = None,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> dict:
     """Generate social media posts from user-provided text content.
 
@@ -1172,7 +1233,7 @@ def generate_posts_from_text(
     posts_per_platform = max(1, min(posts_per_platform, 10))
 
     try:
-        client, model, provider = _get_llm_client(use_local)
+        client, model, provider = _get_llm_client(use_local, provider=provider, model=model)
         tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
 
         platform_list = "\n".join([
@@ -1349,6 +1410,8 @@ def generate_posts_from_images(
     posts_per_platform: int = 10,
     extra_context: str | None = None,
     use_local: bool = False,
+    provider: str | None = None,
+    model: str | None = None,
 ) -> dict:
     """Generate social media posts by analysing one or more images.
 
@@ -1362,7 +1425,7 @@ def generate_posts_from_images(
     posts_per_platform = max(1, min(posts_per_platform, 10))
 
     try:
-        client, model, provider = _get_llm_client(use_local, vision=True)
+        client, model, provider = _get_llm_client(use_local, vision=True, provider=provider, model=model)
         params = _get_llm_params(use_local, num_platforms=len(platforms),
                                  posts_per_call=posts_per_platform)
         tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
