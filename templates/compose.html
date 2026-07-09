@@ -936,6 +936,11 @@
                 <option value="has-image">🖼️ Has Image</option>
                 <option value="no-image">📝 No Image</option>
             </select>
+            <select class="form-select form-select-sm" style="width: auto;" id="filter-source" onchange="applyPostFilters()">
+                <option value="">All Sources</option>
+                <option value="agent">🤖 Agent</option>
+                <option value="manual">✍️ Manual</option>
+            </select>
             <button class="btn btn-sm btn-outline-secondary" onclick="clearPostFilters()" title="Clear Filters">✕</button>
             <span class="text-muted small ms-2" id="filter-results-count"></span>
         </div>
@@ -958,12 +963,15 @@
                 </div>
                 <div class="social-copy-body" data-platform="{{ platform }}">
                     {% for post in posts %}
-                    <div class="post-item {% if not loop.first %}mt-3 pt-3 border-top{% endif %}{% if loop.index > 3 %} d-none extra-post{% endif %}" data-post-id="{{ post.id }}" data-post-index="{{ loop.index }}">
+                    <div class="post-item {% if not loop.first %}mt-3 pt-3 border-top{% endif %}{% if loop.index > 3 %} d-none extra-post{% endif %}" data-post-id="{{ post.id }}" data-post-index="{{ loop.index }}" data-source="{{ 'agent' if post.source_type == 'agent' else 'manual' }}">
                         <div class="d-flex justify-content-between align-items-center mb-2 post-header">
                             <div class="d-flex align-items-center gap-2">
-                                <input type="checkbox" class="form-check-input post-select-checkbox d-none" 
+                                <input type="checkbox" class="form-check-input post-select-checkbox d-none"
                                        data-post-id="{{ post.id }}" onchange="updateSelectedCount()">
                                 <span class="badge bg-secondary">Post {{ loop.index }}</span>
+                                {% if post.source_type == 'agent' %}
+                                <span class="badge" style="background-color: #7c5cff;" title="Prepared by the content agent">🤖 Agent</span>
+                                {% endif %}
                                 {% if post.used %}
                                 <span class="badge bg-success used-badge">✓ Used</span>
                                 {% endif %}
@@ -4569,7 +4577,9 @@ function applyPostFilters() {
     const queuedFilter = document.getElementById('filter-queued').value;
     const platformFilter = document.getElementById('filter-platform').value;
     const imageFilter = document.getElementById('filter-image').value;
-    
+    const sourceEl = document.getElementById('filter-source');
+    const sourceFilter = sourceEl ? sourceEl.value : '';
+
     const cards = document.querySelectorAll('#saved-posts-container .social-copy-card');
     let visiblePosts = 0;
     let totalPosts = 0;
@@ -4612,7 +4622,13 @@ function applyPostFilters() {
                 if (imageFilter === 'has-image' && !hasImage) show = false;
                 if (imageFilter === 'no-image' && hasImage) show = false;
             }
-            
+
+            // Source filter (agent vs manual)
+            if (sourceFilter && show) {
+                const src = post.dataset.source || 'manual';
+                if (src !== sourceFilter) show = false;
+            }
+
             post.style.display = show ? '' : 'none';
             if (show) {
                 visiblePosts++;
@@ -4626,7 +4642,7 @@ function applyPostFilters() {
         // Update platform count badge
         const countBadge = card.querySelector('.social-copy-header .badge');
         if (countBadge) {
-            if (usedFilter || queuedFilter || platformFilter || imageFilter) {
+            if (usedFilter || queuedFilter || platformFilter || imageFilter || sourceFilter) {
                 countBadge.textContent = `${visibleInCard} of ${totalInCard} posts`;
             } else {
                 countBadge.textContent = `${totalInCard} post${totalInCard !== 1 ? 's' : ''}`;
@@ -4637,7 +4653,7 @@ function applyPostFilters() {
     // Update results count
     const resultsSpan = document.getElementById('filter-results-count');
     if (resultsSpan) {
-        if (usedFilter || queuedFilter || platformFilter || imageFilter) {
+        if (usedFilter || queuedFilter || platformFilter || imageFilter || sourceFilter) {
             resultsSpan.textContent = `Showing ${visiblePosts} of ${totalPosts}`;
         } else {
             resultsSpan.textContent = '';
@@ -4655,6 +4671,8 @@ function clearPostFilters() {
     document.getElementById('filter-queued').value = '';
     document.getElementById('filter-platform').value = '';
     document.getElementById('filter-image').value = '';
+    const sourceEl = document.getElementById('filter-source');
+    if (sourceEl) sourceEl.value = '';
     applyPostFilters();
 }
 

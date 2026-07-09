@@ -6,6 +6,7 @@ web interface. Each function wraps a query so callers don't need to know SQL.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Dict, Iterable, Optional, List
 from datetime import datetime
@@ -390,6 +391,83 @@ def init_db(db_path: str = DB_PATH) -> None:
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_usage_events_category ON usage_events(category, ts DESC)"
         )
+        # Content briefs: reusable "content requests" the agent runs to procure
+        # source material and prepare draft posts/articles for review.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS content_briefs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                instructions TEXT NOT NULL,
+                content_type TEXT NOT NULL DEFAULT 'posts',
+                platforms TEXT,
+                tone TEXT DEFAULT 'professional',
+                posts_per_platform INTEGER DEFAULT 3,
+                article_count INTEGER DEFAULT 0,
+                article_style TEXT DEFAULT 'blog',
+                focus_sources TEXT,
+                must_include_keywords TEXT,
+                audience_persona TEXT,
+                use_web_search INTEGER DEFAULT 1,
+                use_saved_sources INTEGER DEFAULT 1,
+                cadence TEXT NOT NULL DEFAULT 'manual',
+                run_time TEXT,
+                run_days TEXT,
+                next_run_at TEXT,
+                enabled INTEGER DEFAULT 1,
+                auto_queue INTEGER DEFAULT 0,
+                review_window_hours INTEGER DEFAULT 24,
+                max_sources_per_run INTEGER DEFAULT 5,
+                max_cost_usd REAL DEFAULT 0.5,
+                max_drafts_per_run INTEGER DEFAULT 30,
+                last_run_at TEXT,
+                last_run_status TEXT,
+                created_at TEXT,
+                updated_at TEXT,
+                user_id INTEGER,
+                FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE SET NULL
+            )
+            """
+        )
+        # Per-run history / live status for content brief executions.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS content_brief_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                brief_id INTEGER NOT NULL,
+                trigger TEXT NOT NULL DEFAULT 'manual',
+                status TEXT NOT NULL DEFAULT 'running',
+                started_at TEXT,
+                finished_at TEXT,
+                sources_found INTEGER DEFAULT 0,
+                sources_used INTEGER DEFAULT 0,
+                posts_created INTEGER DEFAULT 0,
+                articles_created INTEGER DEFAULT 0,
+                cost_usd REAL DEFAULT 0,
+                error_message TEXT,
+                log TEXT,
+                FOREIGN KEY(brief_id) REFERENCES content_briefs(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_brief_runs_brief ON content_brief_runs(brief_id, started_at DESC)"
+        )
+        # Link agent-generated drafts back to the brief/run that produced them.
+        cur = conn.execute("PRAGMA table_info(standalone_posts)")
+        sp_cols = [row[1] for row in cur.fetchall()]
+        if "brief_id" not in sp_cols:
+            conn.execute("ALTER TABLE standalone_posts ADD COLUMN brief_id INTEGER")
+        if "brief_run_id" not in sp_cols:
+            conn.execute("ALTER TABLE standalone_posts ADD COLUMN brief_run_id INTEGER")
+        cur = conn.execute("PRAGMA table_info(articles)")
+        art_cols = [row[1] for row in cur.fetchall()]
+        if "brief_id" not in art_cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN brief_id INTEGER")
+        if "brief_run_id" not in art_cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN brief_run_id INTEGER")
+        if "source_type" not in art_cols:
+            conn.execute("ALTER TABLE articles ADD COLUMN source_type TEXT")
         # Upgrade any existing DB with newer columns
         cur = conn.execute("PRAGMA table_info(episodes)")
         columns = [row[1] for row in cur.fetchall()]
@@ -783,21 +861,29 @@ def delete_tickets_bulk(ticket_ids: List[int], db_path: str = DB_PATH) -> int:
 
 
 def add_article(
-    episode_id: int,
+    episode_id: Optional[int],
     topic: str,
     style: str,
     content: str,
     db_path: str = DB_PATH,
+    brief_id: Optional[int] = None,
+    brief_run_id: Optional[int] = None,
+    source_type: Optional[str] = None,
 ) -> int:
-    """Save a generated article and return its id."""
+    """Save a generated article and return its id.
+
+    ``episode_id`` may be ``None`` for agent-generated articles that are not
+    tied to a podcast/RSS episode. ``brief_id``/``brief_run_id``/``source_type``
+    tag drafts produced by the content agent.
+    """
     created_at = datetime.utcnow().isoformat(timespec="seconds")
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
             """
-            INSERT INTO articles (episode_id, topic, style, content, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO articles (episode_id, topic, style, content, created_at, brief_id, brief_run_id, source_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (episode_id, topic, style, content, created_at),
+            (episode_id, topic, style, content, created_at, brief_id, brief_run_id, source_type),
         )
         conn.commit()
         return cur.lastrowid
@@ -812,7 +898,7 @@ def get_article(article_id: int, db_path: str = DB_PATH) -> Optional[sqlite3.Row
             SELECT a.*, e.title AS episode_title, e.url AS episode_url, e.feed_id,
                    f.title AS podcast_title, f.url AS podcast_url
             FROM articles a
-            JOIN episodes e ON a.episode_id = e.id
+            LEFT JOIN episodes e ON a.episode_id = e.id
             LEFT JOIN feeds f ON e.feed_id = f.id
             WHERE a.id = ?
             """,
@@ -873,7 +959,7 @@ def list_articles(
                 SELECT a.*, e.title AS episode_title, e.url AS episode_url, e.feed_id,
                        f.title AS podcast_title
                 FROM articles a
-                JOIN episodes e ON a.episode_id = e.id
+                LEFT JOIN episodes e ON a.episode_id = e.id
                 LEFT JOIN feeds f ON e.feed_id = f.id
                 ORDER BY a.created_at DESC
                 """
@@ -884,7 +970,7 @@ def list_articles(
                 SELECT a.*, e.title AS episode_title, e.url AS episode_url, e.feed_id,
                        f.title AS podcast_title
                 FROM articles a
-                JOIN episodes e ON a.episode_id = e.id
+                LEFT JOIN episodes e ON a.episode_id = e.id
                 LEFT JOIN feeds f ON e.feed_id = f.id
                 WHERE a.episode_id = ?
                 ORDER BY a.created_at DESC
@@ -2683,6 +2769,8 @@ def add_standalone_post(
     image_url: Optional[str] = None,
     repost: bool = False,
     db_path: str = DB_PATH,
+    brief_id: Optional[int] = None,
+    brief_run_id: Optional[int] = None,
 ) -> int:
     """Save a standalone post (not tied to an article) and return its id.
     
@@ -2703,10 +2791,10 @@ def add_standalone_post(
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
             """
-            INSERT INTO standalone_posts (source_type, source_content, platform, content, image_url, created_at, used, repost)
-            VALUES (?, ?, ?, ?, ?, ?, 0, ?)
+            INSERT INTO standalone_posts (source_type, source_content, platform, content, image_url, created_at, used, repost, brief_id, brief_run_id)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
             """,
-            (source_type, source_content, platform, content, image_url, created_at, 1 if repost else 0),
+            (source_type, source_content, platform, content, image_url, created_at, 1 if repost else 0, brief_id, brief_run_id),
         )
         conn.commit()
         return cur.lastrowid
@@ -2794,9 +2882,10 @@ def list_standalone_posts_by_source_url(
     """List standalone posts generated from a given saved source URL.
 
     Posts generated from saved sources store the originating URL (truncated to
-    1000 chars) in ``source_content`` with a ``source_type`` of either
-    ``'saved_source'`` (Generate from Saved Source) or ``'url'`` (the URL tab on
-    the Command Center). There is no foreign key, so linkage is by URL string.
+    1000 chars) in ``source_content`` with a ``source_type`` of ``'saved_source'``
+    (Generate from Saved Source), ``'url'`` (the URL tab on the Command Center),
+    or ``'agent'`` (the content agent). There is no foreign key, so linkage is by
+    URL string.
 
     Args:
         url: The source URL to match against.
@@ -2811,7 +2900,7 @@ def list_standalone_posts_by_source_url(
         cur = conn.execute(
             """
             SELECT * FROM standalone_posts
-            WHERE source_type IN ('saved_source', 'url')
+            WHERE source_type IN ('saved_source', 'url', 'agent')
               AND source_content = ?
             ORDER BY created_at DESC
             """,
@@ -2853,7 +2942,7 @@ def count_standalone_posts_by_source_urls(
             f"""
             SELECT source_content, COUNT(*) AS cnt
             FROM standalone_posts
-            WHERE source_type IN ('saved_source', 'url')
+            WHERE source_type IN ('saved_source', 'url', 'agent')
               AND source_content IN ({placeholders})
             GROUP BY source_content
             """,
@@ -3972,3 +4061,274 @@ def distinct_usage_categories(db_path: str = DB_PATH) -> List[str]:
             "SELECT DISTINCT category FROM usage_events ORDER BY category ASC"
         )
         return [row[0] for row in cur.fetchall() if row[0]]
+
+
+# --- Content Brief Functions (agentic content preparation) ---
+
+# List-valued columns are stored as JSON strings; callers pass Python lists.
+_BRIEF_LIST_FIELDS = ("platforms", "focus_sources", "must_include_keywords", "run_days")
+
+# Columns that update_content_brief is allowed to write (guards the dynamic SQL).
+_BRIEF_UPDATABLE = {
+    "name", "instructions", "content_type", "platforms", "tone",
+    "posts_per_platform", "article_count", "article_style", "focus_sources",
+    "must_include_keywords", "audience_persona", "use_web_search",
+    "use_saved_sources", "cadence", "run_time", "run_days", "next_run_at",
+    "enabled", "auto_queue", "review_window_hours", "max_sources_per_run",
+    "max_cost_usd", "max_drafts_per_run", "last_run_at", "last_run_status",
+    "user_id",
+}
+
+
+def _encode_brief_value(key: str, value):
+    """Serialize a brief field for storage: JSON for list fields, 0/1 for bools."""
+    if key in _BRIEF_LIST_FIELDS and isinstance(value, (list, tuple)):
+        return json.dumps(list(value))
+    if isinstance(value, bool):
+        return 1 if value else 0
+    return value
+
+
+def create_content_brief(
+    name: str,
+    instructions: str,
+    content_type: str = "posts",
+    platforms=None,
+    tone: str = "professional",
+    posts_per_platform: int = 3,
+    article_count: int = 0,
+    article_style: str = "blog",
+    focus_sources=None,
+    must_include_keywords=None,
+    audience_persona: Optional[str] = None,
+    use_web_search: bool = True,
+    use_saved_sources: bool = True,
+    cadence: str = "manual",
+    run_time: Optional[str] = None,
+    run_days=None,
+    next_run_at: Optional[str] = None,
+    enabled: bool = True,
+    auto_queue: bool = False,
+    review_window_hours: int = 24,
+    max_sources_per_run: int = 5,
+    max_cost_usd: float = 0.5,
+    max_drafts_per_run: int = 30,
+    user_id: Optional[int] = None,
+    db_path: str = DB_PATH,
+) -> int:
+    """Create a content brief and return its id.
+
+    List-valued arguments (``platforms``, ``focus_sources``,
+    ``must_include_keywords``, ``run_days``) accept Python lists and are stored
+    as JSON strings.
+    """
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO content_briefs (
+                name, instructions, content_type, platforms, tone,
+                posts_per_platform, article_count, article_style, focus_sources,
+                must_include_keywords, audience_persona, use_web_search,
+                use_saved_sources, cadence, run_time, run_days, next_run_at,
+                enabled, auto_queue, review_window_hours, max_sources_per_run,
+                max_cost_usd, max_drafts_per_run, created_at, updated_at, user_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                name, instructions, content_type,
+                json.dumps(list(platforms or [])), tone,
+                posts_per_platform, article_count, article_style,
+                json.dumps(list(focus_sources or [])),
+                json.dumps(list(must_include_keywords or [])),
+                audience_persona, 1 if use_web_search else 0,
+                1 if use_saved_sources else 0, cadence, run_time,
+                json.dumps(list(run_days or [])), next_run_at,
+                1 if enabled else 0, 1 if auto_queue else 0, review_window_hours,
+                max_sources_per_run, max_cost_usd, max_drafts_per_run,
+                now, now, user_id,
+            ),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def update_content_brief(brief_id: int, db_path: str = DB_PATH, **fields) -> None:
+    """Update the given columns of a brief. Unknown keys are ignored.
+
+    List-valued fields accept Python lists (JSON-encoded automatically).
+    """
+    updates = {k: v for k, v in fields.items() if k in _BRIEF_UPDATABLE}
+    if not updates:
+        return
+    cols, params = [], []
+    for key, value in updates.items():
+        cols.append(f"{key} = ?")
+        params.append(_encode_brief_value(key, value))
+    cols.append("updated_at = ?")
+    params.append(datetime.utcnow().isoformat(timespec="seconds"))
+    params.append(brief_id)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE content_briefs SET {', '.join(cols)} WHERE id = ?", params
+        )
+        conn.commit()
+
+
+def get_content_brief(brief_id: int, db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
+    """Return a single content brief row by id."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM content_briefs WHERE id = ?", (brief_id,))
+        return cur.fetchone()
+
+
+def list_content_briefs(db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    """Return all content briefs, most recently created first."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM content_briefs ORDER BY created_at DESC")
+        return cur.fetchall()
+
+
+def delete_content_brief(brief_id: int, db_path: str = DB_PATH) -> None:
+    """Delete a brief and all of its run history."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM content_brief_runs WHERE brief_id = ?", (brief_id,))
+        conn.execute("DELETE FROM content_briefs WHERE id = ?", (brief_id,))
+        conn.commit()
+
+
+def set_content_brief_enabled(brief_id: int, enabled: bool, db_path: str = DB_PATH) -> None:
+    """Enable or disable a brief's recurring schedule."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE content_briefs SET enabled = ?, updated_at = ? WHERE id = ?",
+            (1 if enabled else 0, datetime.utcnow().isoformat(timespec="seconds"), brief_id),
+        )
+        conn.commit()
+
+
+def set_content_brief_schedule(
+    brief_id: int,
+    next_run_at: Optional[str] = None,
+    last_run_at: Optional[str] = None,
+    last_run_status: Optional[str] = None,
+    db_path: str = DB_PATH,
+) -> None:
+    """Update a brief's schedule bookkeeping after a run (or when (re)scheduling).
+
+    ``next_run_at`` is always written (pass ``None`` to clear it, e.g. for a
+    paused/manual brief). ``last_run_at``/``last_run_status`` are written only
+    when provided.
+    """
+    sets, params = ["next_run_at = ?"], [next_run_at]
+    if last_run_at is not None:
+        sets.append("last_run_at = ?")
+        params.append(last_run_at)
+    if last_run_status is not None:
+        sets.append("last_run_status = ?")
+        params.append(last_run_status)
+    params.append(brief_id)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            f"UPDATE content_briefs SET {', '.join(sets)} WHERE id = ?", params
+        )
+        conn.commit()
+
+
+def get_due_content_briefs(now_iso: str, db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    """Return enabled, recurring briefs whose ``next_run_at`` is due (<= now)."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            """
+            SELECT * FROM content_briefs
+            WHERE enabled = 1 AND cadence != 'manual'
+              AND next_run_at IS NOT NULL AND next_run_at <= ?
+            ORDER BY next_run_at ASC
+            """,
+            (now_iso,),
+        )
+        return cur.fetchall()
+
+
+def create_brief_run(brief_id: int, trigger: str = "manual", db_path: str = DB_PATH) -> int:
+    """Insert a 'running' run row for a brief and return its id."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO content_brief_runs (brief_id, trigger, status, started_at)
+            VALUES (?, ?, 'running', ?)
+            """,
+            (brief_id, trigger, now),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def finalize_brief_run(
+    run_id: int,
+    status: str,
+    sources_found: int = 0,
+    sources_used: int = 0,
+    posts_created: int = 0,
+    articles_created: int = 0,
+    cost_usd: float = 0.0,
+    error_message: Optional[str] = None,
+    log=None,
+    db_path: str = DB_PATH,
+) -> None:
+    """Mark a run finished and record its outcome counts. ``log`` may be a list/dict."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    log_str = json.dumps(log) if isinstance(log, (list, dict)) else log
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE content_brief_runs
+            SET status = ?, finished_at = ?, sources_found = ?, sources_used = ?,
+                posts_created = ?, articles_created = ?, cost_usd = ?,
+                error_message = ?, log = ?
+            WHERE id = ?
+            """,
+            (
+                status, now, sources_found, sources_used, posts_created,
+                articles_created, cost_usd, error_message, log_str, run_id,
+            ),
+        )
+        conn.commit()
+
+
+def get_brief_run(run_id: int, db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
+    """Return a single run row by id."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM content_brief_runs WHERE id = ?", (run_id,))
+        return cur.fetchone()
+
+
+def list_brief_runs(brief_id: int, limit: int = 20, db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    """Return recent runs for a brief, newest first."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT * FROM content_brief_runs WHERE brief_id = ? ORDER BY started_at DESC LIMIT ?",
+            (brief_id, limit),
+        )
+        return cur.fetchall()
+
+
+def get_active_brief_run(brief_id: int, db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
+    """Return the brief's currently-running run, if any (concurrency guard)."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            """
+            SELECT * FROM content_brief_runs
+            WHERE brief_id = ? AND status = 'running'
+            ORDER BY started_at DESC LIMIT 1
+            """,
+            (brief_id,),
+        )
+        return cur.fetchone()
