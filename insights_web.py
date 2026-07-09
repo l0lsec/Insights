@@ -196,6 +196,20 @@ from database import (
     count_usage,
     iter_usage_for_export,
     distinct_usage_categories,
+    # Content agent (briefs + runs)
+    create_content_brief,
+    update_content_brief,
+    get_content_brief,
+    list_content_briefs,
+    delete_content_brief,
+    set_content_brief_enabled,
+    set_content_brief_schedule,
+    get_due_content_briefs,
+    create_brief_run,
+    finalize_brief_run,
+    get_brief_run,
+    list_brief_runs,
+    get_active_brief_run,
 )
 from insights import (
     transcribe_audio,
@@ -225,6 +239,10 @@ from insights import (
     generate_youtube_thumbnail,
     suggested_thumbnail_prompt,
 )
+# Content agent orchestrator. Safe to import at top: content_agent (and the
+# research_engine/web_search it pulls in) only late-import insights_web inside
+# functions, so there is no import cycle at module load.
+import content_agent
 from linkedin_client import (
     LinkedInClient,
     get_linkedin_client,
@@ -1481,6 +1499,81 @@ def fetch_article_content(url: str, timeout: int = 15) -> str:
     except Exception as e:
         app.logger.exception("Error extracting content from %s: %s", url, str(e))
         return ""
+
+
+def fetch_article_content_safe(url: str, timeout: int = 12, max_bytes: int = 3_000_000) -> tuple[str, str]:
+    """SSRF-safe article fetch + extraction for agent/automated flows.
+
+    Unlike ``fetch_article_content`` (which calls ``trafilatura.fetch_url``/``requests``
+    directly and bypasses the SSRF guard), this fetches bytes through
+    ``_fetch_safely`` (per-redirect public-IP validation, content-type + size caps)
+    and extracts text from the in-memory HTML. Never performs a second, unguarded
+    network fetch.
+
+    Returns ``(text, final_url)``; ``("", url)`` on any failure.
+    """
+    try:
+        body, ctype, final_url = _fetch_safely(
+            url,
+            max_bytes=max_bytes,
+            timeout=timeout,
+            allowed_content_types=("text/html", "application/xhtml"),
+        )
+    except (UnsafeURLError, RuntimeError, requests.RequestException) as exc:
+        app.logger.info("Safe fetch rejected/failed for %s: %s", url, exc)
+        return "", url
+    except Exception:
+        app.logger.exception("Unexpected error during safe fetch of %s", url)
+        return "", url
+
+    html = body.decode("utf-8", errors="replace")
+
+    # Prefer trafilatura's precision extraction on the already-downloaded HTML.
+    try:
+        import trafilatura
+        text = trafilatura.extract(
+            html,
+            include_comments=False,
+            include_tables=True,
+            favor_precision=True,
+        )
+        if text and len(text) > 200:
+            return text.strip(), final_url
+    except Exception:
+        app.logger.debug("trafilatura.extract failed for %s", final_url, exc_info=True)
+
+    # Fallback: compact BeautifulSoup reader (mirrors fetch_article_content).
+    try:
+        soup = BeautifulSoup(html, "lxml")
+        for element in soup.find_all(["script", "style", "nav", "header", "footer",
+                                       "aside", "iframe", "noscript", "form",
+                                       "button", "input", "select", "textarea"]):
+            element.decompose()
+        container = soup.find("article")
+        if not container:
+            for selector in ['[role="main"]', ".article-content", ".post-content",
+                             ".entry-content", ".content", "#content", ".story-body",
+                             ".article-body", ".post-body", "main"]:
+                found = soup.select_one(selector)
+                if found:
+                    container = found
+                    break
+        if not container:
+            container = soup.find("body") or soup
+        parts = []
+        for p in container.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6",
+                                      "li", "blockquote", "pre", "code"]):
+            t = p.get_text(separator=" ", strip=True)
+            if t and len(t) > 20:
+                parts.append(t)
+        text = "\n\n".join(parts) if parts else container.get_text(separator="\n", strip=True)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+        text = re.sub(r"[ \t]+", " ", text).strip()
+        return text, final_url
+    except Exception:
+        app.logger.exception("BeautifulSoup extraction failed for %s", final_url)
+        return "", final_url
+
 
 def create_jira_issue(summary: str, description: str) -> dict:
     """Create a JIRA issue using credentials from environment variables."""
@@ -8040,17 +8133,238 @@ def _backfill_youtube_channels_bg():
     app.logger.info("YouTube channel backfill complete")
 
 
+# ── Content Agent (agentic content preparation) ──────────────────────────────
+
+def _parse_brief_form(form) -> dict:
+    """Extract + validate content-brief fields from a POST form."""
+    def _b(name: str) -> bool:
+        return form.get(name, 'false').lower() in ('true', '1', 'yes', 'on')
+
+    keywords = [k.strip() for k in re.split(r'[\n,]', form.get('must_include_keywords', '')) if k.strip()]
+    focus = [s.strip() for s in re.split(r'[\n,]', form.get('focus_sources', '')) if s.strip()]
+    run_days = [int(x) for x in form.getlist('run_days') if x.isdigit()]
+    ppp = form.get('posts_per_platform', 3, type=int) or 3
+    return {
+        'name': (form.get('name') or '').strip() or 'Untitled brief',
+        'instructions': (form.get('instructions') or '').strip(),
+        'content_type': form.get('content_type', 'posts'),
+        'platforms': form.getlist('platforms'),
+        'tone': form.get('tone', 'professional'),
+        'posts_per_platform': max(1, min(ppp, 10)),
+        'article_count': max(0, form.get('article_count', 0, type=int) or 0),
+        'article_style': form.get('article_style', 'blog'),
+        'focus_sources': focus,
+        'must_include_keywords': keywords,
+        'audience_persona': (form.get('audience_persona') or '').strip() or None,
+        'use_web_search': _b('use_web_search'),
+        'use_saved_sources': _b('use_saved_sources'),
+        'cadence': form.get('cadence', 'manual'),
+        'run_time': (form.get('run_time') or '').strip() or None,
+        'run_days': run_days,
+        'auto_queue': _b('auto_queue'),
+        'review_window_hours': max(0, form.get('review_window_hours', 24, type=int) or 24),
+        'max_sources_per_run': max(1, form.get('max_sources_per_run', 5, type=int) or 5),
+        'max_cost_usd': max(0.0, form.get('max_cost_usd', 0.5, type=float) or 0.5),
+        'max_drafts_per_run': max(1, form.get('max_drafts_per_run', 30, type=int) or 30),
+    }
+
+
+@app.route('/briefs')
+def briefs_page():
+    """List content briefs with their latest run status."""
+    briefs = []
+    for row in list_content_briefs():
+        d = dict(row)
+        try:
+            d['platforms_list'] = json.loads(d.get('platforms') or '[]')
+        except Exception:
+            d['platforms_list'] = []
+        try:
+            d['keywords_list'] = json.loads(d.get('must_include_keywords') or '[]')
+        except Exception:
+            d['keywords_list'] = []
+        try:
+            d['focus_list'] = json.loads(d.get('focus_sources') or '[]')
+        except Exception:
+            d['focus_list'] = []
+        try:
+            d['run_days_list'] = json.loads(d.get('run_days') or '[]')
+        except Exception:
+            d['run_days_list'] = []
+        runs = list_brief_runs(d['id'], limit=1)
+        d['last_run'] = dict(runs[0]) if runs else None
+        briefs.append(d)
+    return render_template('briefs.html', briefs=briefs)
+
+
+@app.route('/briefs/create', methods=['POST'])
+def brief_create():
+    data = _parse_brief_form(request.form)
+    if not data['instructions']:
+        return jsonify({"error": "Instructions (the prompt) are required"}), 400
+    brief_id = create_content_brief(**data)
+    if data['cadence'] != 'manual':
+        set_content_brief_schedule(brief_id, next_run_at=_compute_next_run_at(get_content_brief(brief_id)))
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return jsonify({"success": True, "id": brief_id})
+    return redirect(url_for('briefs_page'))
+
+
+@app.route('/briefs/<int:brief_id>/edit', methods=['POST'])
+def brief_edit(brief_id):
+    if not get_content_brief(brief_id):
+        return jsonify({"error": "Brief not found"}), 404
+    data = _parse_brief_form(request.form)
+    update_content_brief(brief_id, **data)
+    next_at = _compute_next_run_at(get_content_brief(brief_id)) if data['cadence'] != 'manual' else None
+    set_content_brief_schedule(brief_id, next_run_at=next_at)
+    if request.headers.get('X-Requested-With') == 'XMLHttpRequest':
+        return jsonify({"success": True, "id": brief_id})
+    return redirect(url_for('briefs_page'))
+
+
+@app.route('/briefs/<int:brief_id>/delete', methods=['POST'])
+def brief_delete(brief_id):
+    delete_content_brief(brief_id)
+    return jsonify({"success": True})
+
+
+@app.route('/briefs/<int:brief_id>/toggle', methods=['POST'])
+def brief_toggle(brief_id):
+    brief = get_content_brief(brief_id)
+    if not brief:
+        return jsonify({"error": "Brief not found"}), 404
+    enabled = request.form.get('enabled', 'true').lower() in ('1', 'true', 'yes', 'on')
+    set_content_brief_enabled(brief_id, enabled)
+    if enabled and (dict(brief).get('cadence') or 'manual') != 'manual':
+        set_content_brief_schedule(brief_id, next_run_at=_compute_next_run_at(brief))
+    return jsonify({"success": True, "enabled": enabled})
+
+
+@app.route('/briefs/<int:brief_id>/run', methods=['POST'])
+def brief_run_now(brief_id):
+    """Kick off an on-demand run in a background thread; UI polls for status."""
+    if not get_content_brief(brief_id):
+        return jsonify({"error": "Brief not found"}), 404
+    if get_active_brief_run(brief_id):
+        return jsonify({"error": "A run is already in progress for this brief"}), 409
+    run_id = create_brief_run(brief_id, trigger='manual')
+
+    def _bg():
+        with usage_meter.usage_context("proactive"):
+            try:
+                content_agent.run_brief(brief_id, trigger='manual', run_id=run_id)
+            except Exception:
+                app.logger.exception("Manual brief run %s failed", brief_id)
+                try:
+                    finalize_brief_run(run_id, status='error', error_message='unhandled')
+                except Exception:
+                    pass
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return jsonify({"success": True, "run_id": run_id, "status": "running"})
+
+
+@app.route('/briefs/<int:brief_id>/runs')
+def brief_runs(brief_id):
+    return jsonify({"runs": [dict(r) for r in list_brief_runs(brief_id, limit=20)]})
+
+
+@app.route('/briefs/runs/<int:run_id>')
+def brief_run_status(run_id):
+    run = get_brief_run(run_id)
+    if not run:
+        return jsonify({"error": "Run not found"}), 404
+    return jsonify(dict(run))
+
+
+def _compute_next_run_at(brief) -> "str | None":
+    """Next local ISO run time for a recurring brief, or None for manual/paused.
+
+    ``run_days`` uses Python weekday ints (Monday=0 .. Sunday=6). Local time is
+    used throughout to stay consistent with get_next_available_slot.
+    """
+    d = dict(brief)
+    cadence = (d.get("cadence") or "manual").lower()
+    if cadence == "manual":
+        return None
+    try:
+        hh, mm = (int(x) for x in (d.get("run_time") or "09:00").split(":")[:2])
+    except Exception:
+        hh, mm = 9, 0
+    now = datetime.now()
+    if cadence == "daily":
+        candidate = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        if candidate <= now:
+            candidate += timedelta(days=1)
+        return candidate.isoformat(timespec="seconds")
+    if cadence == "weekly":
+        try:
+            days = [int(x) for x in json.loads(d.get("run_days") or "[]") if 0 <= int(x) <= 6]
+        except Exception:
+            days = []
+        if not days:
+            days = [now.weekday()]
+        for offset in range(0, 8):
+            cand = (now + timedelta(days=offset)).replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if cand.weekday() in days and cand > now:
+                return cand.isoformat(timespec="seconds")
+        return (now + timedelta(days=7)).replace(
+            hour=hh, minute=mm, second=0, microsecond=0
+        ).isoformat(timespec="seconds")
+    return None
+
+
+def content_agent_worker() -> None:
+    """Poll for due content briefs and run them; usage metered as proactive.
+
+    Mirrors scheduled_post_worker: a resilient sleep loop that never dies on a
+    single brief's failure. A per-brief active-run guard prevents a scheduled run
+    from overlapping an in-flight manual run.
+    """
+    tick = int(os.getenv("CONTENT_AGENT_TICK_SECONDS", "60") or 60)
+    with usage_meter.usage_context("proactive"):
+        while True:
+            try:
+                time.sleep(tick)
+                now_iso = datetime.now().isoformat(timespec="seconds")
+                for brief in get_due_content_briefs(now_iso):
+                    bid = brief["id"]
+                    if get_active_brief_run(bid):
+                        continue  # a manual run is already in flight
+                    run_id = create_brief_run(bid, trigger="scheduled")
+                    try:
+                        content_agent.run_brief(bid, trigger="scheduled", run_id=run_id)
+                    except Exception:
+                        app.logger.exception("Scheduled brief %s failed", bid)
+                    finally:
+                        run = get_brief_run(run_id)
+                        status = dict(run)["status"] if run else "error"
+                        set_content_brief_schedule(
+                            bid, next_run_at=_compute_next_run_at(brief),
+                            last_run_at=now_iso, last_run_status=status,
+                        )
+            except Exception:
+                app.logger.exception("content_agent_worker loop error")
+
+
 def start_workers():
     """Start all background worker threads."""
     # Episode processing worker (usage metered as proactive/background)
     episode_worker = threading.Thread(target=_proactive_worker, daemon=True)
     episode_worker.start()
     app.logger.info("Episode processing worker started")
-    
+
     # Scheduled post worker
     scheduled_worker = threading.Thread(target=scheduled_post_worker, daemon=True)
     scheduled_worker.start()
     app.logger.info("Scheduled post worker started")
+
+    # Content agent worker (recurring briefs). On-demand runs work even if disabled.
+    if os.getenv("CONTENT_AGENT_ENABLED", "true").lower() in ("1", "true", "yes"):
+        content_worker = threading.Thread(target=content_agent_worker, daemon=True)
+        content_worker.start()
+        app.logger.info("Content agent worker started")
 
     # One-time backfill for YouTube channel names
     backfill_thread = threading.Thread(target=_backfill_youtube_channels_bg, daemon=True)

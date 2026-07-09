@@ -101,6 +101,12 @@ WHISPER_PER_MIN = _envf("USAGE_WHISPER_PER_MIN", 0.006)
 # gpt-image-1 generation, USD per image (estimate for a large, high-quality image).
 IMAGE_PER_CALL = _envf("USAGE_PRICE_IMAGE", 0.19)
 
+# External web-search API calls, USD per call (estimates; the content agent uses these).
+SEARCH_PER_CALL = {
+    "tavily": _envf("USAGE_PRICE_SEARCH_TAVILY", 0.008),
+    "brave": _envf("USAGE_PRICE_SEARCH_BRAVE", 0.005),
+}
+
 
 def _match_price(model: str, table: dict, default: dict) -> dict:
     """Return the {in, out} per-1M-token price for ``model`` (longest-prefix match)."""
@@ -292,6 +298,30 @@ def record_transcription(
         )
     except Exception:
         logger.warning("record_transcription failed (non-fatal)", exc_info=True)
+
+
+def record_search(
+    provider: str,
+    *,
+    calls: int = 1,
+    category: str = "research_search",
+    model: str = "",
+) -> None:
+    """Record external web-search API calls at a flat per-call estimate.
+
+    Only paid SERP providers (Tavily, Brave) are billed here; OpenAI web-search
+    cost is captured through ``record_chat`` on its underlying model call.
+    """
+    try:
+        per = SEARCH_PER_CALL.get((provider or "").lower(), 0.0)
+        _record(
+            category=category,
+            provider=provider or "search",
+            model=model or (provider or "search"),
+            cost_usd=per * max(0, int(calls)),
+        )
+    except Exception:
+        logger.warning("record_search failed (non-fatal)", exc_info=True)
 
 
 def record_image(

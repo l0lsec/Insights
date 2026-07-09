@@ -1,0 +1,410 @@
+{% extends "base.html" %}
+{% block title %}Content Agent | Insights{% endblock %}
+{% block header %}🤖 Content Agent{% endblock %}
+{% block content %}
+<p class="lead text-muted mb-4">
+    Declare a <strong>content brief</strong> once. The agent researches source material
+    (web search + your saved sources) and prepares draft posts and articles for you to
+    review in <a href="{{ url_for('compose_page') }}">Compose</a> and
+    <a href="{{ url_for('view_articles') }}">Articles</a>. Nothing posts without you.
+</p>
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <span class="text-muted small">{{ briefs|length }} brief{% if briefs|length != 1 %}s{% endif %}</span>
+    <button class="btn btn-primary" onclick="openBriefModal()">➕ New Brief</button>
+</div>
+
+{% if briefs %}
+<div class="table-responsive">
+<table class="table align-middle">
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Makes</th>
+            <th>Platforms</th>
+            <th>Schedule</th>
+            <th>Last run</th>
+            <th class="text-end">Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+    {% for b in briefs %}
+        <tr data-brief-id="{{ b.id }}">
+            <td>
+                <div class="fw-semibold">{{ b.name }}</div>
+                <div class="text-muted small">{{ b.instructions[:70] }}{% if b.instructions|length > 70 %}…{% endif %}</div>
+            </td>
+            <td><span class="badge bg-secondary text-capitalize">{{ b.content_type }}</span></td>
+            <td>
+                {% for p in b.platforms_list %}
+                    <span title="{{ p }}">{% if p == 'linkedin' %}💼{% elif p == 'threads' %}🧵{% elif p == 'facebook' %}📘{% elif p == 'twitter' %}𝕏{% else %}📱{% endif %}</span>
+                {% endfor %}
+            </td>
+            <td>
+                {% if b.cadence == 'manual' %}
+                    <span class="badge bg-light text-dark">Manual</span>
+                {% else %}
+                    <div class="form-check form-switch d-inline-block me-1 align-middle">
+                        <input class="form-check-input brief-toggle" type="checkbox" role="switch"
+                               {% if b.enabled %}checked{% endif %} data-brief-id="{{ b.id }}"
+                               onchange="toggleBrief({{ b.id }}, this.checked)">
+                    </div>
+                    <span class="text-capitalize">{{ b.cadence }}</span>
+                    {% if b.run_time %}<span class="text-muted small">@ {{ b.run_time }}</span>{% endif %}
+                    {% if b.next_run_at %}<div class="text-muted small">next: {{ b.next_run_at.replace('T', ' ') }}</div>{% endif %}
+                {% endif %}
+            </td>
+            <td>
+                {% if b.last_run %}
+                    {% set s = b.last_run.status %}
+                    <span class="badge {% if s == 'success' %}bg-success{% elif s == 'partial' %}bg-warning text-dark{% elif s == 'running' %}bg-info text-dark{% else %}bg-danger{% endif %}"
+                          id="run-status-{{ b.id }}">{{ s }}</span>
+                    <div class="text-muted small">
+                        {{ b.last_run.posts_created }} posts · {{ b.last_run.articles_created }} articles
+                    </div>
+                {% else %}
+                    <span class="text-muted small" id="run-status-{{ b.id }}">never run</span>
+                {% endif %}
+            </td>
+            <td class="text-end text-nowrap">
+                <button class="btn btn-sm btn-success" onclick="runBrief({{ b.id }})" id="run-btn-{{ b.id }}" title="Run now">▶ Run</button>
+                <button class="btn btn-sm btn-outline-secondary" onclick="editBrief({{ b.id }})" title="Edit">✎</button>
+                <button class="btn btn-sm btn-outline-secondary" onclick="showRuns({{ b.id }})" title="Run history">🕑</button>
+                <button class="btn btn-sm btn-outline-danger" onclick="deleteBrief({{ b.id }})" title="Delete">×</button>
+            </td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<div class="text-center text-muted py-5 border rounded">
+    <div style="font-size:2.5rem;">🤖</div>
+    <p class="mt-2">No content briefs yet. Create one to have the agent prepare drafts for you.</p>
+    <button class="btn btn-primary" onclick="openBriefModal()">➕ Create your first brief</button>
+</div>
+{% endif %}
+
+<!-- Create/Edit modal -->
+<div class="modal fade" id="briefModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <form id="briefForm" method="post" action="{{ url_for('brief_create') }}">
+        <div class="modal-header">
+          <h5 class="modal-title" id="briefModalTitle">New Content Brief</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <div class="mb-3">
+            <label class="form-label">Name</label>
+            <input type="text" class="form-control" name="name" id="f-name" placeholder="e.g. Weekly AI security roundup" required>
+          </div>
+          <div class="mb-3">
+            <label class="form-label">Prompt / instructions</label>
+            <textarea class="form-control" name="instructions" id="f-instructions" rows="3" required
+                      placeholder="What should the agent write about? e.g. 'Latest developments in AI security and LLM jailbreaks, aimed at security engineers.'"></textarea>
+          </div>
+
+          <div class="row g-3 mb-3">
+            <div class="col-md-4">
+              <label class="form-label">Makes</label>
+              <select class="form-select" name="content_type" id="f-content_type" onchange="syncFormVisibility()">
+                <option value="posts">Social posts</option>
+                <option value="both">Posts + articles</option>
+                <option value="articles">Articles only</option>
+              </select>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Tone</label>
+              <select class="form-select" name="tone" id="f-tone">
+                <option value="professional">Professional</option>
+                <option value="casual">Casual</option>
+                <option value="witty">Witty</option>
+                <option value="educational">Educational</option>
+                <option value="promotional">Promotional</option>
+              </select>
+            </div>
+            <div class="col-md-4">
+              <label class="form-label">Posts per platform</label>
+              <input type="number" class="form-control" name="posts_per_platform" id="f-ppp" min="1" max="10" value="3">
+            </div>
+          </div>
+
+          <div class="mb-3" id="platforms-group">
+            <label class="form-label">Platforms</label>
+            <div>
+              {% for p, icon in [('linkedin','💼 LinkedIn'), ('threads','🧵 Threads'), ('twitter','𝕏 Twitter'), ('facebook','📘 Facebook')] %}
+              <div class="form-check form-check-inline">
+                <input class="form-check-input plat-check" type="checkbox" name="platforms" value="{{ p }}" id="f-plat-{{ p }}">
+                <label class="form-check-label" for="f-plat-{{ p }}">{{ icon }}</label>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+
+          <div class="row g-3 mb-3" id="article-opts">
+            <div class="col-md-6">
+              <label class="form-label">Articles per run</label>
+              <input type="number" class="form-control" name="article_count" id="f-article_count" min="0" max="10" value="1">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Article style</label>
+              <select class="form-select" name="article_style" id="f-article_style">
+                <option value="blog">Blog</option>
+                <option value="news">News</option>
+                <option value="opinion">Opinion</option>
+                <option value="technical">Technical</option>
+              </select>
+            </div>
+          </div>
+
+          <hr>
+          <h6 class="text-muted">Sourcing</h6>
+          <div class="mb-2 d-flex gap-4">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" name="use_web_search" id="f-web" value="true" checked onchange="syncFormVisibility()">
+              <label class="form-check-label" for="f-web">Web search</label>
+            </div>
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" name="use_saved_sources" id="f-saved" value="true" checked>
+              <label class="form-check-label" for="f-saved">My saved sources</label>
+            </div>
+          </div>
+          <div class="mb-3" id="focus-group">
+            <label class="form-label">Focus sources / domains <span class="text-muted small">(optional, comma or newline separated)</span></label>
+            <textarea class="form-control" name="focus_sources" id="f-focus" rows="2" placeholder="arstechnica.com, https://stratechery.com"></textarea>
+          </div>
+          <div class="row g-3 mb-3">
+            <div class="col-md-6">
+              <label class="form-label">Must-include keywords / hashtags <span class="text-muted small">(optional)</span></label>
+              <input type="text" class="form-control" name="must_include_keywords" id="f-keywords" placeholder="#AIsecurity, read more →">
+            </div>
+            <div class="col-md-6">
+              <label class="form-label">Audience / persona <span class="text-muted small">(optional)</span></label>
+              <input type="text" class="form-control" name="audience_persona" id="f-audience" placeholder="Security engineers at mid-size SaaS">
+            </div>
+          </div>
+
+          <hr>
+          <h6 class="text-muted">Schedule &amp; automation</h6>
+          <div class="row g-3 mb-3">
+            <div class="col-md-4">
+              <label class="form-label">Cadence</label>
+              <select class="form-select" name="cadence" id="f-cadence" onchange="syncFormVisibility()">
+                <option value="manual">Manual (run on demand)</option>
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+              </select>
+            </div>
+            <div class="col-md-4" id="runtime-group">
+              <label class="form-label">Run at</label>
+              <input type="time" class="form-control" name="run_time" id="f-runtime" value="09:00">
+            </div>
+          </div>
+          <div class="mb-3" id="rundays-group">
+            <label class="form-label">On days</label>
+            <div>
+              {% for i, day in [(0,'Mon'), (1,'Tue'), (2,'Wed'), (3,'Thu'), (4,'Fri'), (5,'Sat'), (6,'Sun')] %}
+              <div class="form-check form-check-inline">
+                <input class="form-check-input day-check" type="checkbox" name="run_days" value="{{ i }}" id="f-day-{{ i }}">
+                <label class="form-check-label" for="f-day-{{ i }}">{{ day }}</label>
+              </div>
+              {% endfor %}
+            </div>
+          </div>
+          <div class="mb-3">
+            <div class="form-check form-switch">
+              <input class="form-check-input" type="checkbox" name="auto_queue" id="f-autoqueue" value="true" onchange="syncFormVisibility()">
+              <label class="form-check-label" for="f-autoqueue">Auto-queue approved drafts into my posting slots</label>
+            </div>
+            <div class="mt-2" id="review-group" style="max-width:320px;">
+              <label class="form-label small">Minimum review window before an auto-queued draft can post (hours)</label>
+              <input type="number" class="form-control form-control-sm" name="review_window_hours" id="f-review" min="0" value="24">
+              <div class="form-text">Drafts still show in Compose as unused and can be edited or unqueued during this window.</div>
+            </div>
+          </div>
+
+          <details>
+            <summary class="text-muted small mb-2">Advanced limits</summary>
+            <div class="row g-3 mt-1">
+              <div class="col-md-4">
+                <label class="form-label small">Max sources / run</label>
+                <input type="number" class="form-control form-control-sm" name="max_sources_per_run" id="f-maxsrc" min="1" value="5">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label small">Max cost / run (USD)</label>
+                <input type="number" step="0.05" class="form-control form-control-sm" name="max_cost_usd" id="f-maxcost" min="0" value="0.50">
+              </div>
+              <div class="col-md-4">
+                <label class="form-label small">Max drafts / run</label>
+                <input type="number" class="form-control form-control-sm" name="max_drafts_per_run" id="f-maxdrafts" min="1" value="30">
+              </div>
+            </div>
+          </details>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary">Save brief</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Runs history modal -->
+<div class="modal fade" id="runsModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-scrollable">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Run history</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body" id="runsBody"><div class="text-muted">Loading…</div></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const BRIEFS = {{ briefs|tojson }};
+const CREATE_URL = "{{ url_for('brief_create') }}";
+let briefModal, runsModal;
+
+document.addEventListener('DOMContentLoaded', () => {
+    briefModal = new bootstrap.Modal(document.getElementById('briefModal'));
+    runsModal = new bootstrap.Modal(document.getElementById('runsModal'));
+});
+
+function syncFormVisibility() {
+    const ct = document.getElementById('f-content_type').value;
+    document.getElementById('article-opts').style.display = (ct === 'posts') ? 'none' : '';
+    document.getElementById('platforms-group').style.display = (ct === 'articles') ? 'none' : '';
+    const cadence = document.getElementById('f-cadence').value;
+    document.getElementById('runtime-group').style.display = (cadence === 'manual') ? 'none' : '';
+    document.getElementById('rundays-group').style.display = (cadence === 'weekly') ? '' : 'none';
+    document.getElementById('focus-group').style.display =
+        document.getElementById('f-web').checked ? '' : '';
+    document.getElementById('review-group').style.display =
+        document.getElementById('f-autoqueue').checked ? '' : 'none';
+}
+
+function resetForm() {
+    const f = document.getElementById('briefForm');
+    f.reset();
+    document.querySelectorAll('.plat-check').forEach(c => c.checked = false);
+    document.querySelectorAll('.day-check').forEach(c => c.checked = false);
+    document.getElementById('f-web').checked = true;
+    document.getElementById('f-saved').checked = true;
+}
+
+function openBriefModal() {
+    resetForm();
+    document.getElementById('briefForm').action = CREATE_URL;
+    document.getElementById('briefModalTitle').textContent = 'New Content Brief';
+    syncFormVisibility();
+    briefModal.show();
+}
+
+function editBrief(id) {
+    const b = BRIEFS.find(x => x.id === id);
+    if (!b) return;
+    resetForm();
+    document.getElementById('briefForm').action = `/briefs/${id}/edit`;
+    document.getElementById('briefModalTitle').textContent = 'Edit Content Brief';
+    document.getElementById('f-name').value = b.name || '';
+    document.getElementById('f-instructions').value = b.instructions || '';
+    document.getElementById('f-content_type').value = b.content_type || 'posts';
+    document.getElementById('f-tone').value = b.tone || 'professional';
+    document.getElementById('f-ppp').value = b.posts_per_platform || 3;
+    document.getElementById('f-article_count').value = b.article_count || 0;
+    document.getElementById('f-article_style').value = b.article_style || 'blog';
+    (b.platforms_list || []).forEach(p => { const el = document.getElementById('f-plat-' + p); if (el) el.checked = true; });
+    document.getElementById('f-focus').value = (b.focus_list || []).join(', ');
+    document.getElementById('f-keywords').value = (b.keywords_list || []).join(', ');
+    document.getElementById('f-audience').value = b.audience_persona || '';
+    document.getElementById('f-web').checked = !!b.use_web_search;
+    document.getElementById('f-saved').checked = !!b.use_saved_sources;
+    document.getElementById('f-cadence').value = b.cadence || 'manual';
+    document.getElementById('f-runtime').value = b.run_time || '09:00';
+    (b.run_days_list || []).forEach(d => { const el = document.getElementById('f-day-' + d); if (el) el.checked = true; });
+    document.getElementById('f-autoqueue').checked = !!b.auto_queue;
+    document.getElementById('f-review').value = b.review_window_hours || 24;
+    document.getElementById('f-maxsrc').value = b.max_sources_per_run || 5;
+    document.getElementById('f-maxcost').value = b.max_cost_usd || 0.5;
+    document.getElementById('f-maxdrafts').value = b.max_drafts_per_run || 30;
+    syncFormVisibility();
+    briefModal.show();
+}
+
+async function runBrief(id) {
+    const btn = document.getElementById('run-btn-' + id);
+    const statusEl = document.getElementById('run-status-' + id);
+    btn.disabled = true;
+    btn.textContent = '⏳ Running';
+    try {
+        const resp = await fetch(`/briefs/${id}/run`, {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}});
+        const data = await resp.json();
+        if (!resp.ok) { alert(data.error || 'Failed to start run'); btn.disabled = false; btn.textContent = '▶ Run'; return; }
+        pollRun(id, data.run_id);
+    } catch (e) {
+        alert('Failed to start run'); btn.disabled = false; btn.textContent = '▶ Run';
+    }
+}
+
+async function pollRun(briefId, runId) {
+    const btn = document.getElementById('run-btn-' + briefId);
+    const statusEl = document.getElementById('run-status-' + briefId);
+    try {
+        const resp = await fetch(`/briefs/runs/${runId}`);
+        const run = await resp.json();
+        if (run.status === 'running') {
+            if (statusEl) { statusEl.textContent = 'running'; statusEl.className = 'badge bg-info text-dark'; }
+            setTimeout(() => pollRun(briefId, runId), 2500);
+            return;
+        }
+        // finished
+        btn.disabled = false; btn.textContent = '▶ Run';
+        const created = (run.posts_created || 0) + (run.articles_created || 0);
+        if (statusEl) {
+            statusEl.textContent = run.status;
+            statusEl.className = 'badge ' + (run.status === 'success' ? 'bg-success' : run.status === 'partial' ? 'bg-warning text-dark' : 'bg-danger');
+        }
+        // Reload to show updated counts + surface drafts link.
+        setTimeout(() => window.location.reload(), 800);
+    } catch (e) {
+        btn.disabled = false; btn.textContent = '▶ Run';
+    }
+}
+
+async function toggleBrief(id, enabled) {
+    const fd = new FormData(); fd.append('enabled', enabled ? 'true' : 'false');
+    await fetch(`/briefs/${id}/toggle`, {method: 'POST', body: fd});
+}
+
+async function deleteBrief(id) {
+    const b = BRIEFS.find(x => x.id === id);
+    const name = b ? b.name : ('brief ' + id);
+    if (!confirm(`Delete brief "${name}"? This removes its run history too.`)) return;
+    const resp = await fetch(`/briefs/${id}/delete`, {method: 'POST'});
+    if (resp.ok) window.location.reload();
+}
+
+async function showRuns(id) {
+    document.getElementById('runsBody').innerHTML = '<div class="text-muted">Loading…</div>';
+    runsModal.show();
+    const resp = await fetch(`/briefs/${id}/runs`);
+    const data = await resp.json();
+    const runs = data.runs || [];
+    if (!runs.length) { document.getElementById('runsBody').innerHTML = '<div class="text-muted">No runs yet.</div>'; return; }
+    let html = '<div class="table-responsive"><table class="table table-sm"><thead><tr><th>Started</th><th>Trigger</th><th>Status</th><th>Posts</th><th>Articles</th><th>Cost</th></tr></thead><tbody>';
+    for (const r of runs) {
+        const badge = r.status === 'success' ? 'bg-success' : r.status === 'partial' ? 'bg-warning text-dark' : r.status === 'running' ? 'bg-info text-dark' : 'bg-danger';
+        html += `<tr><td class="small">${(r.started_at||'').replace('T',' ')}</td><td class="small">${r.trigger||''}</td>` +
+                `<td><span class="badge ${badge}">${r.status}</span></td><td>${r.posts_created||0}</td>` +
+                `<td>${r.articles_created||0}</td><td class="small">$${(r.cost_usd||0).toFixed(3)}</td></tr>`;
+        if (r.error_message) html += `<tr><td colspan="6" class="small text-danger">${r.error_message}</td></tr>`;
+    }
+    html += '</tbody></table></div>';
+    document.getElementById('runsBody').innerHTML = html;
+}
+</script>
+{% endblock %}
