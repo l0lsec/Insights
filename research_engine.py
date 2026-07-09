@@ -182,11 +182,26 @@ def _relevant(blob: str, topic_tokens: set, kw_norms: list) -> bool:
 
 # ── Stage 1: query planning ─────────────────────────────────────────────────
 
+def _concise_query(text: str, max_words: int = 14) -> str:
+    """Reduce a long brief/topic to a short search query (first sentence, capped).
+
+    Content briefs can be long multi-paragraph prompts; search providers reject
+    very long queries, so the heuristic fallback must not use the raw brief.
+    """
+    text = (text or "").strip()
+    if not text:
+        return ""
+    first = re.split(r"[.!?\n]", text, maxsplit=1)[0].strip()
+    words = (first or text).split()
+    return " ".join(words[:max_words])
+
+
 def _build_query_plan(brief: ResearchBrief, use_local: bool, max_queries: int) -> List[str]:
     base = (brief.topic or "").strip()
-    heuristic = [base]
+    short = _concise_query(base)
+    heuristic = [short] if short else []
     if brief.keywords:
-        heuristic.append(f"{base} {' '.join(brief.keywords[:3])}")
+        heuristic.append(f"{short} {' '.join(str(k) for k in brief.keywords[:3])}".strip())
 
     try:
         import insights
@@ -200,8 +215,8 @@ def _build_query_plan(brief: ResearchBrief, use_local: bool, max_queries: int) -
                 "Reply with a JSON array of short query strings only."
             )},
             {"role": "user", "content": (
-                f"Topic: {base}{aud}.{kw} Produce {max_queries} distinct search "
-                "queries that together cover the topic broadly. "
+                f"Topic: {base[:1000]}{aud}.{kw} Produce {max_queries} distinct search "
+                "queries, each under 12 words, that together cover the topic broadly. "
                 "Reply with a JSON array of strings only."
             )},
         ]
@@ -223,7 +238,7 @@ def _build_query_plan(brief: ResearchBrief, use_local: bool, max_queries: int) -
     except Exception:
         logger.debug("query plan LLM failed; using heuristic", exc_info=True)
 
-    return _dedupe_str(heuristic)[:max_queries]
+    return _dedupe_str([q for q in heuristic if q])[:max_queries]
 
 
 def _dedupe_str(items: List[str]) -> List[str]:

@@ -228,6 +228,8 @@ def run_brief(brief_id: int, *, trigger: str = "manual", run_id: int | None = No
     sources_used = 0
     queued = 0
     query_plan: list = []
+    gen_errors = 0
+    last_gen_error = None
 
     try:
         platforms = brief["platforms"] or DEFAULT_PLATFORMS
@@ -279,8 +281,10 @@ def run_brief(brief_id: int, *, trigger: str = "manual", run_id: int | None = No
                         topic=item.title, posts_per_platform=ppp,
                         extra_context=ctx, source_url=item.url,
                     )
-                except Exception:
+                except Exception as exc:
                     logger.exception("post generation failed for %s", item.url)
+                    gen_errors += 1
+                    last_gen_error = str(exc)
                     continue
                 ids = _persist_posts(
                     generated, platforms,
@@ -328,8 +332,10 @@ def run_brief(brief_id: int, *, trigger: str = "manual", run_id: int | None = No
                         style=brief.get("article_style") or "blog",
                         extra_context=ctx, is_text_source=True,
                     )
-                except Exception:
+                except Exception as exc:
                     logger.exception("article generation failed for %s", item.url)
+                    gen_errors += 1
+                    last_gen_error = str(exc)
                     continue
                 if not content:
                     continue
@@ -340,6 +346,14 @@ def run_brief(brief_id: int, *, trigger: str = "manual", run_id: int | None = No
                 )
                 article_ids.append(aid)
                 sources_used += 1
+
+        # If sources were found but every generation attempt failed (e.g. a bad
+        # model/provider config), surface it rather than reporting a silent
+        # "success" with zero drafts.
+        if items and gen_errors and not post_ids and not article_ids:
+            status = "error"
+            err = (f"All content generation failed ({gen_errors} attempt(s)). "
+                   f"Last error: {last_gen_error}")
 
         # ── Auto-queue ───────────────────────────────────────────────────
         if brief.get("auto_queue") and post_ids:

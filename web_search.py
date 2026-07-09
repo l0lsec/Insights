@@ -77,6 +77,11 @@ def search(
     query = (query or "").strip()
     if not query:
         return []
+    # Providers (Tavily especially) reject over-long queries with a 400 Bad
+    # Request; cap length and avoid cutting mid-word.
+    max_chars = int(os.getenv("WEB_SEARCH_MAX_QUERY_CHARS", "380") or 380)
+    if len(query) > max_chars:
+        query = query[:max_chars].rsplit(" ", 1)[0]
 
     provider = get_provider()
     if provider == "none":
