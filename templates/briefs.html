@@ -88,8 +88,7 @@
 <!-- Create/Edit modal -->
 <div class="modal fade" id="briefModal" tabindex="-1" aria-hidden="true">
   <div class="modal-dialog modal-lg modal-dialog-scrollable">
-    <div class="modal-content">
-      <form id="briefForm" method="post" action="{{ url_for('brief_create') }}">
+      <form id="briefForm" class="modal-content" method="post" action="{{ url_for('brief_create') }}">
         <div class="modal-header">
           <h5 class="modal-title" id="briefModalTitle">New Content Brief</h5>
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
@@ -247,7 +246,6 @@
           <button type="submit" class="btn btn-primary">Save brief</button>
         </div>
       </form>
-    </div>
   </div>
 </div>
 
