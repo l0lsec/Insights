@@ -1134,8 +1134,6 @@ def generate_posts_from_url(
                 if og_image_match:
                     og_image = og_image_match.group(1)
 
-        extracted_content = f"TITLE: {title}\n\nDESCRIPTION: {description}\n\nCONTENT: {body_content}"
-
         source_data = {
             "url": url,
             "title": title,
@@ -1154,6 +1152,14 @@ def generate_posts_from_url(
     try:
         client, model, provider = _get_llm_client(use_local, provider=provider, model=model)
         tone_instruction = TONE_GUIDES.get(tone, TONE_GUIDES["professional"])
+
+        # Condense long article bodies (map-reduce) rather than sending the full
+        # text, so a very long page doesn't blow up the prompt and the whole
+        # article still informs the posts.
+        condensed_body, condense_meta = condense_document_text(
+            body_content, provider=provider, model=model, use_local=use_local,
+        )
+        extracted_content = f"TITLE: {title}\n\nDESCRIPTION: {description}\n\nCONTENT: {condensed_body}"
 
         platform_list = "\n".join([
             f"- {p.upper()}: {PLATFORM_GUIDELINES.get(p, 'Standard social media post with hashtags')}"
@@ -1200,10 +1206,10 @@ def generate_posts_from_url(
                                  posts_per_platform, use_local, provider)
         if result:
             logger.debug("Generated posts for %d platforms from URL", len(result))
-            return {"posts": result, "source_data": source_data}
+            return {"posts": result, "source_data": source_data, "condense_meta": condense_meta}
 
         logger.warning("Could not extract JSON from URL generation")
-        return {"posts": {p: "" for p in platforms}, "source_data": source_data}
+        return {"posts": {p: "" for p in platforms}, "source_data": source_data, "condense_meta": condense_meta}
     except Exception as exc:
         logger.exception("Post generation from URL failed")
         raise RuntimeError("Failed to generate posts from URL") from exc
