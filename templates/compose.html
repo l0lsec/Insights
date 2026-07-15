@@ -318,6 +318,11 @@
                     📷 From Image(s)
                 </button>
             </li>
+            <li class="nav-item me-2" role="presentation">
+                <button class="nav-link" id="file-tab" data-bs-toggle="pill" data-bs-target="#file-content" type="button" role="tab">
+                    📄 From File
+                </button>
+            </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link {% if selected_source %}active{% endif %}" id="saved-tab" data-bs-toggle="pill" data-bs-target="#saved-content" type="button" role="tab">
                     📚 From Saved Source
@@ -458,6 +463,50 @@
                     <textarea class="form-control" id="image-prompt" rows="2"
                               placeholder="Describe what to focus on, e.g. 'Write about the product shown' or leave blank to let AI decide..."></textarea>
                 </div>
+            </div>
+
+            <!-- From File Tab -->
+            <div class="tab-pane fade" id="file-content" role="tabpanel">
+                <!-- Drop Zone -->
+                <div id="doc-drop-zone" class="rounded-3 text-center p-4 mb-3"
+                     style="cursor:pointer; transition: background .15s; border: 2px dashed #dee2e6;">
+                    <div id="doc-drop-placeholder">
+                        <div class="fs-1 mb-2">📄</div>
+                        <p class="mb-1 fw-bold">Drop a document here or click to browse</p>
+                        <p class="text-muted small mb-0">
+                            PDF, Word, PowerPoint, Excel, CSV, Text, Markdown &amp; HTML &bull; 16 MB max
+                        </p>
+                    </div>
+                    <div id="doc-selected" class="d-none">
+                        <div class="fs-1 mb-2">📎</div>
+                        <p class="mb-1 fw-bold" id="doc-file-name"></p>
+                        <p class="text-muted small mb-2" id="doc-file-meta"></p>
+                        <button type="button" class="btn btn-sm btn-outline-danger" onclick="clearDocFile(event)">
+                            ✕ Remove
+                        </button>
+                    </div>
+                    <input type="file" id="doc-file-input"
+                           accept="{{ file_accept }}" class="d-none">
+                </div>
+
+                <!-- Optional topic -->
+                <div class="mb-3">
+                    <label class="form-label fw-bold" for="file-topic">Topic / Focus (optional)</label>
+                    <input type="text" class="form-control" id="file-topic"
+                           placeholder="Brief title or angle for this content (defaults to the file name)">
+                    <div class="form-text">
+                        We read the text from your document and use it as source material to generate posts.
+                        Long documents are automatically summarized (not truncated) so the whole file informs the posts.
+                        Add specific guidance in <strong>Additional Instructions</strong> below.
+                    </div>
+                </div>
+
+                {% if file_formats %}
+                <div class="small text-muted">
+                    <span class="fw-bold">Supported:</span>
+                    {% for f in file_formats %}<span class="badge bg-light text-dark border me-1 mb-1">{{ f.label }}</span>{% endfor %}
+                </div>
+                {% endif %}
             </div>
 
             <!-- Saved Source Tab -->
@@ -1775,6 +1824,7 @@ function getActiveSourceType() {
     if (activeTab.id === 'url-tab') return 'url';
     if (activeTab.id === 'text-tab') return 'text';
     if (activeTab.id === 'image-tab') return 'image';
+    if (activeTab.id === 'file-tab') return 'file';
     if (activeTab.id === 'saved-tab') return 'saved_source';
     if (activeTab.id === 'import-tab') return 'import';
     return 'freeform';
@@ -1786,6 +1836,7 @@ function getContent() {
     if (sourceType === 'url') return document.getElementById('url-input').value.trim();
     if (sourceType === 'text') return document.getElementById('text-input').value.trim();
     if (sourceType === 'image') return document.getElementById('image-prompt').value.trim();
+    if (sourceType === 'file') return document.getElementById('file-topic').value.trim();
     if (sourceType === 'saved_source') {
         const select = document.getElementById('saved-source-select');
         return select ? select.value : '';
@@ -1892,6 +1943,62 @@ function _removeRecalledImage(idx) {
         e.preventDefault();
         zone.style.background = '';
         _addImageFiles(e.dataTransfer.files);
+    });
+})();
+
+/* ── From File tab: document handling ────────────────────── */
+let _docFile = null;
+const MAX_DOC_BYTES = 16 * 1024 * 1024;
+// Accepted extensions come from the server (only formats with an installed parser).
+const DOC_ACCEPT_EXTS = "{{ file_accept }}".split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
+
+function _formatBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+}
+
+function _setDocFile(file) {
+    if (!file) return;
+    const ext = '.' + (file.name.split('.').pop() || '').toLowerCase();
+    if (DOC_ACCEPT_EXTS.length && !DOC_ACCEPT_EXTS.includes(ext)) {
+        showToast('Unsupported file type: ' + file.name, 'error');
+        return;
+    }
+    if (file.size > MAX_DOC_BYTES) {
+        showToast('File too large: ' + file.name + ' (max 16MB)', 'error');
+        return;
+    }
+    _docFile = file;
+    document.getElementById('doc-drop-placeholder').classList.add('d-none');
+    const sel = document.getElementById('doc-selected');
+    sel.classList.remove('d-none');
+    document.getElementById('doc-file-name').textContent = file.name;
+    document.getElementById('doc-file-meta').textContent = _formatBytes(file.size);
+}
+
+function clearDocFile(evt) {
+    if (evt) evt.stopPropagation();
+    _docFile = null;
+    document.getElementById('doc-file-input').value = '';
+    document.getElementById('doc-selected').classList.add('d-none');
+    document.getElementById('doc-drop-placeholder').classList.remove('d-none');
+}
+
+(function initFileTab() {
+    const zone = document.getElementById('doc-drop-zone');
+    const inp = document.getElementById('doc-file-input');
+    if (!zone || !inp) return;
+
+    zone.addEventListener('click', () => inp.click());
+    inp.addEventListener('change', () => { if (inp.files[0]) _setDocFile(inp.files[0]); });
+
+    zone.addEventListener('dragover', e => { e.preventDefault(); zone.style.background = 'rgba(var(--bs-primary-rgb),.08)'; });
+    zone.addEventListener('dragleave', () => { zone.style.background = ''; });
+    zone.addEventListener('drop', e => {
+        e.preventDefault();
+        zone.style.background = '';
+        if (e.dataTransfer.files[0]) _setDocFile(e.dataTransfer.files[0]);
     });
 })();
 
@@ -2006,6 +2113,11 @@ function generatePosts() {
             alert('Please add at least one image');
             return;
         }
+    } else if (sourceType === 'file') {
+        if (!_docFile) {
+            alert('Please choose a document to upload');
+            return;
+        }
     } else if (!content) {
         if (sourceType === 'saved_source') {
             alert('Please select a saved source');
@@ -2064,6 +2176,12 @@ function generatePosts() {
             _recalledImageUrls.forEach(u => formData.append('recall_image_urls', u));
         }
         endpoint = '{{ url_for("compose_generate") }}';
+    } else if (sourceType === 'file') {
+        formData.append('source_type', 'file');
+        formData.append('file', _docFile);
+        const fileTopic = document.getElementById('file-topic').value.trim();
+        if (fileTopic) formData.append('topic', fileTopic);
+        endpoint = '{{ url_for("compose_generate") }}';
     } else {
         formData.append('source_type', sourceType);
         formData.append('content', content);
@@ -2081,8 +2199,14 @@ function generatePosts() {
         document.getElementById('generate-btn').disabled = false;
         
         if (data.success) {
-            showToast('Posts generated and saved! Refreshing...', 'success');
-            setTimeout(() => location.reload(), 1000);
+            if (data.notice) {
+                showToast(data.notice, 'info');
+                setTimeout(() => showToast('Posts generated and saved! Refreshing...', 'success'), 2600);
+                setTimeout(() => location.reload(), 3300);
+            } else {
+                showToast('Posts generated and saved! Refreshing...', 'success');
+                setTimeout(() => location.reload(), 1000);
+            }
         } else {
             alert('Error: ' + (data.error || 'Failed to generate posts'));
         }

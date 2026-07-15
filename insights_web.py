@@ -34,6 +34,7 @@ from flask import (
     g,
 )
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.utils import secure_filename
 from PIL import Image
 import cloudinary
 import cloudinary.uploader
@@ -231,6 +232,7 @@ from insights import (
     generate_posts_from_url,
     generate_posts_from_text,
     generate_posts_from_images,
+    condense_document_text,
     check_ollama_status,
     provider_model_options,
     # YouTube functions
@@ -249,6 +251,7 @@ from insights import (
 # research_engine/web_search it pulls in) only late-import insights_web inside
 # functions, so there is no import cycle at module load.
 import content_agent
+import document_extractor
 from starter_prompts import grouped_starter_prompts
 from linkedin_client import (
     LinkedInClient,
@@ -5464,6 +5467,8 @@ def compose_page():
         library_prompts=library_prompts_list,
         starter_prompt_groups=grouped_starter_prompts(),
         model_options=provider_model_options(),
+        file_formats=[f for f in document_extractor.supported_formats() if f['available']],
+        file_accept=document_extractor.accept_attribute(),
     )
 
 
@@ -5679,9 +5684,9 @@ def compose_generate():
     image_url = request.form.get('image_url', '').strip() or None
     ai_provider, ai_model, use_local = _parse_ai_provider(request.form)
 
-    if source_type != 'image' and not content:
+    if source_type not in ('image', 'file') and not content:
         return jsonify({"error": "Content is required"}), 400
-    
+
     if not platforms:
         platforms = ['linkedin', 'threads', 'twitter']
     
@@ -5690,6 +5695,7 @@ def compose_generate():
     try:
         # Generate posts based on source type
         source_data = None
+        notice = None
         if source_type == 'freeform':
             generated = generate_posts_from_prompt(
                 prompt=content,
@@ -5767,6 +5773,51 @@ def compose_generate():
                 platforms=platforms,
                 tone=tone,
                 topic=topic,
+                posts_per_platform=posts_per_platform,
+                extra_context=extra_context,
+                use_local=use_local,
+                provider=ai_provider,
+                model=ai_model,
+            )
+        elif source_type == 'file':
+            upload = request.files.get('file')
+            if not upload or not upload.filename:
+                return jsonify({"error": "Please choose a document to upload"}), 400
+            if not document_extractor.is_supported(upload.filename):
+                return jsonify({
+                    "error": f"Unsupported file type. Supported formats: "
+                             f"{document_extractor.accept_attribute()}"
+                }), 400
+            try:
+                file_bytes = upload.read()
+                extracted_text = document_extractor.extract_text(file_bytes, upload.filename)
+            except document_extractor.ExtractionError as exc:
+                return jsonify({"error": str(exc)}), 400
+
+            file_display_name = secure_filename(upload.filename) or upload.filename
+            # Use the document's name as the topic unless the user gave one.
+            file_topic = topic or os.path.splitext(file_display_name)[0].replace('_', ' ').replace('-', ' ')
+            # Long documents are condensed (map-reduce) rather than truncated, so
+            # the whole document informs generation instead of just the first page.
+            condensed_text, condense_meta = condense_document_text(
+                extracted_text,
+                provider=ai_provider,
+                model=ai_model,
+                use_local=use_local,
+            )
+            if condense_meta.get('condensed'):
+                notice = (
+                    f"Condensed a long document ({condense_meta['original_chars']:,} characters) "
+                    f"into {condense_meta['chunks']} section summar"
+                    f"{'y' if condense_meta['chunks'] == 1 else 'ies'} before generating."
+                )
+                if condense_meta.get('chunks_dropped'):
+                    notice += " Only the first part of a very large document was used."
+            generated = generate_posts_from_text(
+                text=condensed_text,
+                platforms=platforms,
+                tone=tone,
+                topic=file_topic,
                 posts_per_platform=posts_per_platform,
                 extra_context=extra_context,
                 use_local=use_local,
@@ -5865,7 +5916,12 @@ def compose_generate():
             return jsonify({"error": f"Unknown source type: {source_type}"}), 400
         
         # Save generated posts to database
-        source_label = content[:1000] if content else f"[{len(request.files.getlist('images'))} image(s)]"
+        if source_type == 'file':
+            source_label = f"[File: {file_display_name}]"
+        elif content:
+            source_label = content[:1000]
+        else:
+            source_label = f"[{len(request.files.getlist('images'))} image(s)]"
         requested_platforms = {p.lower() for p in platforms}
         saved_posts = {}
         for platform, post_data in generated.items():
@@ -5908,7 +5964,9 @@ def compose_generate():
         }
         if source_data:
             response_data["source_data"] = source_data
-        
+        if notice:
+            response_data["notice"] = notice
+
         return jsonify(response_data)
         
     except Exception as e:
