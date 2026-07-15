@@ -5376,6 +5376,10 @@ def compose_page():
     scheduled_info = get_pending_schedules_for_standalone_posts(post_ids) if post_ids else {}
     posted_info = get_posted_info_for_standalone_posts(post_ids) if post_ids else {}
     
+    # Map brief ids -> names so agent-curated posts can show/filter by their brief
+    brief_names = {brief['id']: brief['name'] for brief in list_content_briefs()}
+    briefs_in_posts = {}
+
     posts_by_platform = {}
     for post in posts:
         platform = post['platform']
@@ -5386,7 +5390,19 @@ def compose_page():
         post_dict['scheduled'] = scheduled_info.get(post['id'], {})
         # Add posted info (with URL) to each post
         post_dict['posted'] = posted_info.get(post['id'], {})
+        # Attach the originating brief's name (agent-curated posts only)
+        brief_id = post_dict.get('brief_id')
+        brief_name = brief_names.get(brief_id) if brief_id else None
+        post_dict['brief_name'] = brief_name
+        if brief_id and brief_name:
+            briefs_in_posts[brief_id] = brief_name
         posts_by_platform[platform].append(post_dict)
+
+    # Distinct briefs that have at least one saved post, for the filter dropdown
+    brief_filter_options = [
+        {'id': bid, 'name': name}
+        for bid, name in sorted(briefs_in_posts.items(), key=lambda kv: kv[1].lower())
+    ]
     
     # Get next available slots for display
     next_slots = {
@@ -5437,6 +5453,7 @@ def compose_page():
     return render_template(
         'compose.html',
         posts_by_platform=posts_by_platform,
+        brief_filter_options=brief_filter_options,
         next_slots=next_slots,
         saved_sources=saved_sources,
         selected_source=selected_source,
