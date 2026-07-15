@@ -168,6 +168,12 @@ from database import (
     clear_recent_prompts,
     delete_prompt_by_content,
     delete_prompts_bulk,
+    # Prompt library (curated, named reusable prompts)
+    add_library_prompt,
+    list_library_prompts,
+    get_library_prompt,
+    update_library_prompt,
+    delete_library_prompt,
     # Generated thumbnails
     add_generated_thumbnail,
     list_generated_thumbnails,
@@ -243,6 +249,7 @@ from insights import (
 # research_engine/web_search it pulls in) only late-import insights_web inside
 # functions, so there is no import cycle at module load.
 import content_agent
+from starter_prompts import grouped_starter_prompts
 from linkedin_client import (
     LinkedInClient,
     get_linkedin_client,
@@ -5424,6 +5431,9 @@ def compose_page():
         for r in recent_img
     ]
 
+    # Curated, named prompts from the reusable library
+    library_prompts_list = _serialize_library_prompts()
+
     return render_template(
         'compose.html',
         posts_by_platform=posts_by_platform,
@@ -5434,6 +5444,8 @@ def compose_page():
         threads_connected=threads_connected,
         recent_prompts=recent_prompts_list,
         recent_image_prompts=recent_image_prompts_list,
+        library_prompts=library_prompts_list,
+        starter_prompt_groups=grouped_starter_prompts(),
         model_options=provider_model_options(),
     )
 
@@ -5509,6 +5521,110 @@ def compose_delete_prompts_bulk():
         })
     except Exception as e:
         app.logger.exception("Failed to delete prompts")
+        return jsonify({"error": str(e)}), 500
+
+
+# ---------------------------------------------------------------------------
+# Prompt Library (curated, named reusable prompts)
+# ---------------------------------------------------------------------------
+
+
+def _serialize_library_prompts():
+    """Return the saved library prompts as plain dicts for JSON / templates."""
+    result = []
+    for p in list_library_prompts():
+        content = p['content'] or ''
+        result.append({
+            'id': p['id'],
+            'title': p['title'],
+            'content': content,
+            'preview': content[:80] + ('...' if len(content) > 80 else ''),
+            'updated_at': p['updated_at'],
+        })
+    return result
+
+
+@app.route('/compose/library')
+def compose_library_list():
+    """Return all saved library prompts as JSON."""
+    return jsonify({"success": True, "prompts": _serialize_library_prompts()})
+
+
+@app.route('/compose/library/save', methods=['POST'])
+def compose_library_save():
+    """Create a new named prompt in the library."""
+    data = request.get_json(silent=True) or request.form
+    title = (data.get('title') or '').strip()
+    content = (data.get('content') or '').strip()
+
+    if not title:
+        return jsonify({"error": "A name for the prompt is required"}), 400
+    if not content:
+        return jsonify({"error": "Prompt text cannot be empty"}), 400
+
+    try:
+        prompt_id = add_library_prompt(title, content)
+        return jsonify({
+            "success": True,
+            "message": "Prompt saved to library",
+            "prompts": _serialize_library_prompts(),
+            "id": prompt_id,
+        })
+    except Exception as e:
+        app.logger.exception("Failed to save library prompt")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/compose/library/update', methods=['POST'])
+def compose_library_update():
+    """Update an existing library prompt's name and/or text."""
+    data = request.get_json(silent=True) or request.form
+    try:
+        prompt_id = int(data.get('id'))
+    except (TypeError, ValueError):
+        return jsonify({"error": "A valid prompt id is required"}), 400
+    title = (data.get('title') or '').strip()
+    content = (data.get('content') or '').strip()
+
+    if not title:
+        return jsonify({"error": "A name for the prompt is required"}), 400
+    if not content:
+        return jsonify({"error": "Prompt text cannot be empty"}), 400
+
+    if not get_library_prompt(prompt_id):
+        return jsonify({"error": "Prompt not found"}), 404
+
+    try:
+        update_library_prompt(prompt_id, title, content)
+        return jsonify({
+            "success": True,
+            "message": "Prompt updated",
+            "prompts": _serialize_library_prompts(),
+        })
+    except Exception as e:
+        app.logger.exception("Failed to update library prompt")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/compose/library/delete', methods=['POST'])
+def compose_library_delete():
+    """Delete a library prompt by id."""
+    data = request.get_json(silent=True) or request.form
+    try:
+        prompt_id = int(data.get('id'))
+    except (TypeError, ValueError):
+        return jsonify({"error": "A valid prompt id is required"}), 400
+
+    try:
+        count = delete_library_prompt(prompt_id)
+        return jsonify({
+            "success": True,
+            "message": "Prompt deleted from library",
+            "prompts": _serialize_library_prompts(),
+            "count": count,
+        })
+    except Exception as e:
+        app.logger.exception("Failed to delete library prompt")
         return jsonify({"error": str(e)}), 500
 
 
