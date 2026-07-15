@@ -800,6 +800,14 @@
                 <option value="agent">🤖 Agent</option>
                 <option value="manual">✍️ Manual</option>
             </select>
+            {% if brief_filter_options %}
+            <select class="form-select form-select-sm" style="width: auto;" id="filter-brief" onchange="applyPostFilters()" title="Filter by the agent brief that produced these posts">
+                <option value="">All Briefs</option>
+                {% for brief in brief_filter_options %}
+                <option value="{{ brief.id }}">📋 {{ brief.name }}</option>
+                {% endfor %}
+            </select>
+            {% endif %}
             <button class="btn btn-sm btn-outline-secondary" onclick="clearPostFilters()" title="Clear Filters">✕</button>
             <span class="text-muted small ms-2" id="filter-results-count"></span>
         </div>
@@ -822,7 +830,7 @@
                 </div>
                 <div class="social-copy-body" data-platform="{{ platform }}">
                     {% for post in posts %}
-                    <div class="post-item {% if not loop.first %}mt-3 pt-3 border-top{% endif %}{% if loop.index > 3 %} d-none extra-post{% endif %}" data-post-id="{{ post.id }}" data-post-index="{{ loop.index }}" data-source="{{ 'agent' if post.source_type == 'agent' else 'manual' }}">
+                    <div class="post-item {% if not loop.first %}mt-3 pt-3 border-top{% endif %}{% if loop.index > 3 %} d-none extra-post{% endif %}" data-post-id="{{ post.id }}" data-post-index="{{ loop.index }}" data-source="{{ 'agent' if post.source_type == 'agent' else 'manual' }}" data-brief="{{ post.brief_id if post.brief_id else '' }}">
                         <div class="d-flex justify-content-between align-items-center mb-2 post-header">
                             <div class="d-flex align-items-center gap-2">
                                 <input type="checkbox" class="form-check-input post-select-checkbox d-none"
@@ -830,6 +838,9 @@
                                 <span class="badge bg-secondary">Post {{ loop.index }}</span>
                                 {% if post.source_type == 'agent' %}
                                 <span class="badge" style="background-color: #7c5cff;" title="Prepared by the content agent">🤖 Agent</span>
+                                {% endif %}
+                                {% if post.source_type == 'agent' and post.brief_name %}
+                                <a href="/briefs#brief-{{ post.brief_id }}" class="badge text-decoration-none" style="background-color: #ede9ff; color: #5a4bd1;" title="From agent brief: {{ post.brief_name }}">📋 {{ post.brief_name }}</a>
                                 {% endif %}
                                 {% if post.used %}
                                 <span class="badge bg-success used-badge">✓ Used</span>
@@ -4438,6 +4449,8 @@ function applyPostFilters() {
     const imageFilter = document.getElementById('filter-image').value;
     const sourceEl = document.getElementById('filter-source');
     const sourceFilter = sourceEl ? sourceEl.value : '';
+    const briefEl = document.getElementById('filter-brief');
+    const briefFilter = briefEl ? briefEl.value : '';
 
     const cards = document.querySelectorAll('#saved-posts-container .social-copy-card');
     let visiblePosts = 0;
@@ -4488,6 +4501,12 @@ function applyPostFilters() {
                 if (src !== sourceFilter) show = false;
             }
 
+            // Brief filter (which agent brief produced the post)
+            if (briefFilter && show) {
+                const brief = post.dataset.brief || '';
+                if (brief !== briefFilter) show = false;
+            }
+
             post.style.display = show ? '' : 'none';
             if (show) {
                 visiblePosts++;
@@ -4501,7 +4520,7 @@ function applyPostFilters() {
         // Update platform count badge
         const countBadge = card.querySelector('.social-copy-header .badge');
         if (countBadge) {
-            if (usedFilter || queuedFilter || platformFilter || imageFilter || sourceFilter) {
+            if (usedFilter || queuedFilter || platformFilter || imageFilter || sourceFilter || briefFilter) {
                 countBadge.textContent = `${visibleInCard} of ${totalInCard} posts`;
             } else {
                 countBadge.textContent = `${totalInCard} post${totalInCard !== 1 ? 's' : ''}`;
@@ -4512,7 +4531,7 @@ function applyPostFilters() {
     // Update results count
     const resultsSpan = document.getElementById('filter-results-count');
     if (resultsSpan) {
-        if (usedFilter || queuedFilter || platformFilter || imageFilter || sourceFilter) {
+        if (usedFilter || queuedFilter || platformFilter || imageFilter || sourceFilter || briefFilter) {
             resultsSpan.textContent = `Showing ${visiblePosts} of ${totalPosts}`;
         } else {
             resultsSpan.textContent = '';
@@ -4532,6 +4551,8 @@ function clearPostFilters() {
     document.getElementById('filter-image').value = '';
     const sourceEl = document.getElementById('filter-source');
     if (sourceEl) sourceEl.value = '';
+    const briefEl = document.getElementById('filter-brief');
+    if (briefEl) briefEl.value = '';
     applyPostFilters();
 }
 

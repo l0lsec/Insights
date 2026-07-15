@@ -29,7 +29,7 @@
     </thead>
     <tbody>
     {% for b in briefs %}
-        <tr data-brief-id="{{ b.id }}">
+        <tr id="brief-{{ b.id }}" data-brief-id="{{ b.id }}">
             <td>
                 <div class="fw-semibold">{{ b.name }}</div>
                 <div class="text-muted small">{{ b.instructions[:70] }}{% if b.instructions|length > 70 %}…{% endif %}</div>
