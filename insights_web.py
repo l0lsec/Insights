@@ -5671,6 +5671,25 @@ def _parse_ai_provider(form):
     return provider, model, use_local
 
 
+def _condense_notice(meta):
+    """Build a user-facing notice when long source content was condensed.
+
+    ``meta`` is the dict returned by ``condense_document_text``; returns ``None``
+    when no condensation happened (short input) so callers can skip the toast.
+    """
+    if not meta or not meta.get('condensed'):
+        return None
+    chunks = meta.get('chunks', 0)
+    notice = (
+        f"Condensed {meta.get('original_chars', 0):,} characters of source content into "
+        f"{chunks} section summar{'y' if chunks == 1 else 'ies'} before generating, "
+        "so the whole thing informs the posts."
+    )
+    if meta.get('chunks_dropped'):
+        notice += " Only the first part of a very large source was used."
+    return notice
+
+
 @app.route('/compose/generate', methods=['POST'])
 def compose_generate():
     """Generate social media posts using LLM based on source type."""
@@ -5713,8 +5732,16 @@ def compose_generate():
                 repo_data = fetch_github_repo(owner, repo_name)
                 gh_extra = extra_context or ""
                 gh_extra = f"This content is from the GitHub repository {repo_data['title']}. Include the repo URL ({content}) as credit.\n{gh_extra}".strip()
+                # Condense long repo content (README, etc.) instead of truncating.
+                gh_text, condense_meta = condense_document_text(
+                    repo_data['content'],
+                    provider=ai_provider,
+                    model=ai_model,
+                    use_local=use_local,
+                )
+                notice = _condense_notice(condense_meta)
                 generated = generate_posts_from_text(
-                    text=repo_data['content'],
+                    text=gh_text,
                     platforms=platforms,
                     tone=tone,
                     topic=repo_data['title'],
@@ -5754,7 +5781,8 @@ def compose_generate():
                 # New structure: {"posts": {...}, "source_data": {...}}
                 generated = result.get("posts", result)
                 source_data = result.get("source_data")
-                
+                notice = _condense_notice(result.get("condense_meta"))
+
                 # Auto-save URL content to url_sources
                 if source_data:
                     source_id = add_url_source(
@@ -5768,8 +5796,17 @@ def compose_generate():
                 if not image_url and source_data and source_data.get("og_image"):
                     image_url = source_data["og_image"]
         elif source_type == 'text':
+            # Long pasted text is condensed (map-reduce) rather than truncated to
+            # the first ~5000 chars, so the whole thing informs generation.
+            text_for_gen, condense_meta = condense_document_text(
+                content,
+                provider=ai_provider,
+                model=ai_model,
+                use_local=use_local,
+            )
+            notice = _condense_notice(condense_meta)
             generated = generate_posts_from_text(
-                text=content,
+                text=text_for_gen,
                 platforms=platforms,
                 tone=tone,
                 topic=topic,
@@ -5805,14 +5842,7 @@ def compose_generate():
                 model=ai_model,
                 use_local=use_local,
             )
-            if condense_meta.get('condensed'):
-                notice = (
-                    f"Condensed a long document ({condense_meta['original_chars']:,} characters) "
-                    f"into {condense_meta['chunks']} section summar"
-                    f"{'y' if condense_meta['chunks'] == 1 else 'ies'} before generating."
-                )
-                if condense_meta.get('chunks_dropped'):
-                    notice += " Only the first part of a very large document was used."
+            notice = _condense_notice(condense_meta)
             generated = generate_posts_from_text(
                 text=condensed_text,
                 platforms=platforms,
