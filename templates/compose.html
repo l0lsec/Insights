@@ -683,10 +683,16 @@
         
         <!-- Additional Context -->
         <div class="mb-4">
-            <label class="form-label fw-bold" for="extra-context">Additional Instructions (optional)</label>
-            <textarea class="form-control" id="extra-context" rows="2" 
-                placeholder="Add any specific instructions, tone preferences, target audience details, key points to emphasize, or hashtags to include..."></textarea>
-            <small class="text-muted">This context will be included in the AI prompt to guide post generation</small>
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <label class="form-label fw-bold mb-0" for="extra-context">Additional Instructions (optional)</label>
+                <div class="btn-group btn-group-sm" role="group" aria-label="Prompt library">
+                    <button type="button" class="btn btn-outline-primary" onclick="openPromptLibrary('extra-context')" title="Browse and insert saved prompts or starter templates">📚 Library</button>
+                    <button type="button" class="btn btn-outline-secondary" onclick="savePromptToLibrary('extra-context')" title="Save this text as a reusable prompt">💾 Save</button>
+                </div>
+            </div>
+            <textarea class="form-control" id="extra-context" rows="2"
+                placeholder="Add any specific instructions, tone preferences, target audience details, key points to emphasize, or hashtags to include... or click 📚 Library to insert a saved prompt or starter template."></textarea>
+            <small class="text-muted">Works with every tab — including From URL and From Saved Source. This context is added to the AI prompt to guide generation.</small>
         </div>
         
         <!-- Generate Button -->
@@ -5187,6 +5193,7 @@ function importFile() {
         'freeform-input': 'Topic or Prompt',
         'image-prompt': 'Image Focus / Prompt',
         'text-input': 'Text Content',
+        'extra-context': 'Additional Instructions',
     };
 
     function updateTargetNote() {
