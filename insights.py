@@ -1209,6 +1209,163 @@ def generate_posts_from_url(
         raise RuntimeError("Failed to generate posts from URL") from exc
 
 
+# ── Long-document condensation (map-reduce) ─────────────────────────────────
+# ``generate_posts_from_text`` only feeds the first ~5000 chars of its input to
+# the model. For long uploaded documents that would silently drop most of the
+# content, so we first condense the full text into a compact digest that fits
+# the prompt — extracting key points from each chunk (map) and, if the merged
+# result is still too long, condensing again (reduce).
+
+CONDENSE_THRESHOLD = 6000     # chars; at or below this, pass text through unchanged
+CONDENSE_CHUNK_SIZE = 8000    # chars per map chunk
+CONDENSE_CHUNK_OVERLAP = 200  # chars of overlap so ideas aren't split mid-sentence
+CONDENSE_MAX_CHUNKS = 30      # safety cap on map chunks (~240k chars covered)
+CONDENSE_TARGET_CHARS = 4500  # aim to land the digest at/under this
+CONDENSE_HARD_CAP = 4800      # never return a digest longer than this
+CONDENSE_MAX_REDUCE_PASSES = 3
+CONDENSE_SUMMARY_MAX_TOKENS = 500
+
+
+def _split_text_into_chunks(text: str, chunk_size: int, overlap: int) -> list[str]:
+    """Split ``text`` into ~``chunk_size`` pieces, preferring paragraph breaks.
+
+    Overlap carries a little context across boundaries so a point spanning two
+    chunks isn't lost. Never splits a single word.
+    """
+    text = text.strip()
+    if len(text) <= chunk_size:
+        return [text] if text else []
+
+    chunks: list[str] = []
+    start = 0
+    n = len(text)
+    while start < n:
+        end = min(start + chunk_size, n)
+        if end < n:
+            # Prefer to break on a paragraph, then a newline, then a space.
+            window = text[start:end]
+            for sep in ("\n\n", "\n", ". ", " "):
+                idx = window.rfind(sep)
+                if idx > chunk_size // 2:  # only break late enough to stay efficient
+                    end = start + idx + len(sep)
+                    break
+        chunks.append(text[start:end].strip())
+        if end >= n:
+            break
+        start = max(end - overlap, start + 1)
+    return [c for c in chunks if c]
+
+
+def _summarize_chunk(client, model, chunk: str, use_local: bool, provider: str) -> str:
+    """Extract the key points from one chunk as a tight bulleted list."""
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You extract the key facts, insights, statistics, quotes, and takeaways "
+                "from an excerpt of a longer document. Reply with a tight bulleted list. "
+                "Preserve concrete details (numbers, names, findings, direct quotes) that "
+                "would make strong social media content. Do not add commentary, intros, or "
+                "conclusions — only the extracted points."
+            ),
+        },
+        {
+            "role": "user",
+            "content": f"Extract the key points from this excerpt:\n\n{chunk}",
+        },
+    ]
+    params = {"temperature": 0.2, "max_tokens": CONDENSE_SUMMARY_MAX_TOKENS}
+    resp = client.chat.completions.create(model=model, messages=messages, **params)
+    _meter("record_chat", resp, category="document_condense",
+           provider=provider, model=model)
+    return (resp.choices[0].message.content or "").strip()
+
+
+def condense_document_text(
+    text: str,
+    provider: str | None = None,
+    model: str | None = None,
+    use_local: bool = False,
+) -> tuple[str, dict]:
+    """Condense a long document into a prompt-sized digest via map-reduce.
+
+    Short inputs (<= ``CONDENSE_THRESHOLD``) are returned unchanged. Longer text
+    is chunked and each chunk is summarized (map); if the merged summary is still
+    too long it is condensed again (reduce), up to ``CONDENSE_MAX_REDUCE_PASSES``.
+
+    Returns ``(digest, meta)`` where ``meta`` records what happened. Per-chunk LLM
+    failures are tolerated (that chunk is skipped); only if *every* chunk fails do
+    we fall back to the truncated original so generation can still proceed.
+    """
+    text = (text or "").strip()
+    original_len = len(text)
+    meta = {
+        "condensed": False,
+        "original_chars": original_len,
+        "final_chars": original_len,
+        "chunks": 0,
+        "reduce_passes": 0,
+        "chunks_dropped": False,
+    }
+    if original_len <= CONDENSE_THRESHOLD:
+        return text, meta
+
+    client, model, provider = _get_llm_client(use_local, provider=provider, model=model)
+
+    chunks = _split_text_into_chunks(text, CONDENSE_CHUNK_SIZE, CONDENSE_CHUNK_OVERLAP)
+    if len(chunks) > CONDENSE_MAX_CHUNKS:
+        chunks = chunks[:CONDENSE_MAX_CHUNKS]
+        meta["chunks_dropped"] = True
+    meta["chunks"] = len(chunks)
+
+    def _summarize_all(pieces: list[str]) -> list[str]:
+        out = []
+        for piece in pieces:
+            try:
+                summary = _summarize_chunk(client, model, piece, use_local, provider)
+                if summary:
+                    out.append(summary)
+            except Exception:
+                logger.warning("Chunk summarization failed; skipping a section", exc_info=True)
+        return out
+
+    summaries = _summarize_all(chunks)
+    if not summaries:
+        # Every summarization failed — fall back to the truncated original.
+        logger.warning("Document condensation produced no summaries; falling back to truncation")
+        fallback = text[:CONDENSE_HARD_CAP]
+        meta["final_chars"] = len(fallback)
+        meta["failed"] = True
+        return fallback, meta
+
+    digest = "\n\n".join(f"[Section {i + 1}]\n{s}" for i, s in enumerate(summaries))
+
+    # Reduce: keep condensing until the digest fits or we hit the pass cap.
+    passes = 0
+    while len(digest) > CONDENSE_TARGET_CHARS and passes < CONDENSE_MAX_REDUCE_PASSES:
+        sub_chunks = _split_text_into_chunks(digest, CONDENSE_CHUNK_SIZE, CONDENSE_CHUNK_OVERLAP)
+        if len(sub_chunks) <= 1:
+            break  # can't reduce a single chunk further
+        reduced = _summarize_all(sub_chunks)
+        if not reduced:
+            break
+        digest = "\n\n".join(reduced)
+        passes += 1
+    meta["reduce_passes"] = passes
+
+    if len(digest) > CONDENSE_HARD_CAP:
+        # Trim on a line boundary so we don't cut mid-point.
+        digest = digest[:CONDENSE_HARD_CAP].rsplit("\n", 1)[0].rstrip()
+
+    meta["condensed"] = True
+    meta["final_chars"] = len(digest)
+    logger.info(
+        "Condensed document: %d chars -> %d chars across %d chunk(s), %d reduce pass(es)",
+        original_len, len(digest), meta["chunks"], passes,
+    )
+    return digest, meta
+
+
 def generate_posts_from_text(
     text: str,
     platforms: List[str] | None = None,
