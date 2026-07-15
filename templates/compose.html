@@ -356,176 +356,17 @@
                 <div class="mb-3">
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <label class="form-label fw-bold mb-0">Topic or Prompt</label>
-                        {% if recent_prompts %}
-                        <div class="dropdown">
-                            <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" id="recent-prompts-btn" data-bs-toggle="dropdown" aria-expanded="false" data-bs-auto-close="outside">
-                                📜 Recent Prompts
-                            </button>
-                            <div class="dropdown-menu dropdown-menu-end p-0" id="recent-prompts-menu" style="min-width: 420px; max-height: 400px;">
-                                <!-- Header with bulk actions -->
-                                <div class="px-3 py-2 bg-light border-bottom d-flex justify-content-between align-items-center">
-                                    <div class="form-check mb-0">
-                                        <input type="checkbox" class="form-check-input" id="select-all-prompts" onchange="toggleAllPrompts(this)">
-                                        <label class="form-check-label small" for="select-all-prompts">Select All</label>
-                                    </div>
-                                    <button class="btn btn-sm btn-outline-danger d-none" id="delete-selected-prompts-btn" onclick="deleteSelectedPrompts()">
-                                        🗑️ Delete Selected (<span id="selected-prompts-count">0</span>)
-                                    </button>
-                                </div>
-                                
-                                <!-- Scrollable prompts list -->
-                                <div style="max-height: 280px; overflow-y: auto;">
-                                    {% for prompt in recent_prompts %}
-                                    <div class="dropdown-item d-flex align-items-start gap-2 py-2 prompt-item" data-index="{{ loop.index0 }}">
-                                        <input type="checkbox" class="form-check-input mt-1 prompt-checkbox" data-index="{{ loop.index0 }}" onchange="updateSelectedPromptsCount()" onclick="event.stopPropagation()">
-                                        <span class="flex-grow-1 small text-wrap" style="cursor: pointer; white-space: normal; word-wrap: break-word;" onclick="useRecentPrompt({{ loop.index0 }})">
-                                            {{ prompt.preview }}
-                                        </span>
-                                        <button class="btn btn-sm btn-link text-danger p-0" onclick="deletePrompt({{ loop.index0 }}); event.stopPropagation();" title="Delete this prompt">
-                                            ✕
-                                        </button>
-                                    </div>
-                                    {% endfor %}
-                                </div>
-                                
-                                <!-- Footer with Clear All -->
-                                <div class="border-top">
-                                    <a class="dropdown-item small text-danger py-2" href="#" onclick="clearRecentPrompts(); return false;">
-                                        🗑️ Clear All Prompts
-                                    </a>
-                                </div>
-                            </div>
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Prompt library">
+                            <button type="button" class="btn btn-outline-primary" onclick="openPromptLibrary('freeform-input')" title="Browse and insert saved or recent prompts">📚 Library</button>
+                            <button type="button" class="btn btn-outline-secondary" onclick="savePromptToLibrary('freeform-input')" title="Save this text as a reusable prompt">💾 Save</button>
                         </div>
-                        {% endif %}
                     </div>
                     <textarea class="form-control" id="freeform-input" rows="4" 
                               placeholder="Enter a topic, idea, or prompt to generate posts about...&#10;&#10;Example: The importance of multi-factor authentication in 2026"></textarea>
                     <script>
-                        // Store recent prompts for JavaScript access
+                        // Recent freeform prompts, consumed by the Prompt Library modal
+                        // (see the "Recent History" section in #promptLibraryModal).
                         const recentPrompts = {{ recent_prompts|default([])|tojson|safe }};
-                        
-                        function useRecentPrompt(index) {
-                            if (recentPrompts[index]) {
-                                const textarea = document.getElementById('freeform-input');
-                                textarea.value = recentPrompts[index].content;
-                                textarea.focus();
-                                // Close dropdown
-                                const dropdown = bootstrap.Dropdown.getInstance(document.getElementById('recent-prompts-btn'));
-                                if (dropdown) dropdown.hide();
-                            }
-                        }
-                        
-                        function toggleAllPrompts(checkbox) {
-                            const checkboxes = document.querySelectorAll('.prompt-checkbox');
-                            checkboxes.forEach(cb => cb.checked = checkbox.checked);
-                            updateSelectedPromptsCount();
-                        }
-                        
-                        function updateSelectedPromptsCount() {
-                            const checked = document.querySelectorAll('.prompt-checkbox:checked').length;
-                            const countSpan = document.getElementById('selected-prompts-count');
-                            const deleteBtn = document.getElementById('delete-selected-prompts-btn');
-                            const selectAllCheckbox = document.getElementById('select-all-prompts');
-                            const totalCheckboxes = document.querySelectorAll('.prompt-checkbox').length;
-                            
-                            countSpan.textContent = checked;
-                            
-                            if (checked > 0) {
-                                deleteBtn.classList.remove('d-none');
-                            } else {
-                                deleteBtn.classList.add('d-none');
-                            }
-                            
-                            // Update select all checkbox state
-                            selectAllCheckbox.checked = checked === totalCheckboxes && totalCheckboxes > 0;
-                            selectAllCheckbox.indeterminate = checked > 0 && checked < totalCheckboxes;
-                        }
-                        
-                        function deletePrompt(index) {
-                            if (!recentPrompts[index]) return;
-                            
-                            const formData = new FormData();
-                            formData.append('prompt', recentPrompts[index].content);
-                            
-                            fetch('{{ url_for("compose_delete_prompt") }}', {
-                                method: 'POST',
-                                body: formData,
-                            })
-                            .then(response => response.json())
-                            .then(data => {
-                                if (data.success) {
-                                    // Remove the item from the UI
-                                    const item = document.querySelector(`.prompt-item[data-index="${index}"]`);
-                                    if (item) item.remove();
-                                    // Update the prompts array
-                                    recentPrompts.splice(index, 1);
-                                    // If no more prompts, reload to hide dropdown
-                                    if (recentPrompts.length === 0) {
-                                        location.reload();
-                                    }
-                                } else {
-                                    alert('Error: ' + (data.error || 'Failed to delete prompt'));
-                                }
-                            })
-                            .catch(error => {
-                                alert('Error: ' + error.message);
-                            });
-                        }
-                        
-                        function deleteSelectedPrompts() {
-                            const checked = document.querySelectorAll('.prompt-checkbox:checked');
-                            if (checked.length === 0) return;
-                            
-                            if (!confirm(`Delete ${checked.length} selected prompt(s)? This cannot be undone.`)) {
-                                return;
-                            }
-                            
-                            const promptsToDelete = Array.from(checked).map(cb => {
-                                const index = parseInt(cb.dataset.index);
-                                return recentPrompts[index]?.content;
-                            }).filter(Boolean);
-                            
-                            fetch('{{ url_for("compose_delete_prompts_bulk") }}', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({ prompts: promptsToDelete }),
-                            })
-                            .then(response => response.json())
-                            .then(data => {
-                                if (data.success) {
-                                    location.reload();
-                                } else {
-                                    alert('Error: ' + (data.error || 'Failed to delete prompts'));
-                                }
-                            })
-                            .catch(error => {
-                                alert('Error: ' + error.message);
-                            });
-                        }
-                        
-                        function clearRecentPrompts() {
-                            if (!confirm('Clear all recent prompts from history? This cannot be undone.')) {
-                                return;
-                            }
-                            
-                            fetch('{{ url_for("compose_clear_prompts") }}', {
-                                method: 'POST',
-                            })
-                            .then(response => response.json())
-                            .then(data => {
-                                if (data.success) {
-                                    // Close dropdown and reload to update UI
-                                    const dropdown = bootstrap.Dropdown.getInstance(document.getElementById('recent-prompts-btn'));
-                                    if (dropdown) dropdown.hide();
-                                    location.reload();
-                                } else {
-                                    alert('Error: ' + (data.error || 'Failed to clear prompts'));
-                                }
-                            })
-                            .catch(error => {
-                                alert('Error: ' + error.message);
-                            });
-                        }
                     </script>
                 </div>
             </div>
@@ -548,8 +389,14 @@
                            placeholder="Brief title or topic for this content">
                 </div>
                 <div class="mb-3">
-                    <label class="form-label fw-bold">Text Content</label>
-                    <textarea class="form-control" id="text-input" rows="6" 
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <label class="form-label fw-bold mb-0">Text Content</label>
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Prompt library">
+                            <button type="button" class="btn btn-outline-primary" onclick="openPromptLibrary('text-input')" title="Browse and insert saved or recent prompts">📚 Library</button>
+                            <button type="button" class="btn btn-outline-secondary" onclick="savePromptToLibrary('text-input')" title="Save this text as a reusable prompt">💾 Save</button>
+                        </div>
+                    </div>
+                    <textarea class="form-control" id="text-input" rows="6"
                               placeholder="Paste or write the content you want to transform into social media posts..."></textarea>
                 </div>
             </div>
@@ -575,6 +422,11 @@
                 <div class="mb-3">
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <label class="form-label fw-bold mb-0">Focus / Prompt (Optional)</label>
+                        <div class="d-flex align-items-center gap-2">
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Prompt library">
+                            <button type="button" class="btn btn-outline-primary" onclick="openPromptLibrary('image-prompt')" title="Browse and insert saved or recent prompts">📚 Library</button>
+                            <button type="button" class="btn btn-outline-secondary" onclick="savePromptToLibrary('image-prompt')" title="Save this text as a reusable prompt">💾 Save</button>
+                        </div>
                         {% if recent_image_prompts %}
                         <div class="dropdown">
                             <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button"
@@ -601,6 +453,7 @@
                             </div>
                         </div>
                         {% endif %}
+                        </div>
                     </div>
                     <textarea class="form-control" id="image-prompt" rows="2"
                               placeholder="Describe what to focus on, e.g. 'Write about the product shown' or leave blank to let AI decide..."></textarea>
@@ -5245,5 +5098,341 @@ function importFile() {
         btn.disabled = false;
     });
 }
+</script>
+
+<!-- ============================================================= -->
+<!-- Prompt Library Modal (curated saved prompts + recent history) -->
+<!-- ============================================================= -->
+<div class="modal fade" id="promptLibraryModal" tabindex="-1" aria-labelledby="promptLibraryModalLabel" aria-hidden="true">
+  <div class="modal-dialog modal-lg modal-dialog-centered modal-dialog-scrollable">
+    <div class="modal-content" style="border-radius: 12px; overflow: hidden;">
+      <div class="modal-header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
+        <h5 class="modal-title" id="promptLibraryModalLabel">📚 Prompt Library</h5>
+        <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <!-- Save / edit form -->
+        <div class="card mb-3 border-primary">
+          <div class="card-body py-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <h6 class="mb-0" id="lib-form-title">➕ Save a new prompt</h6>
+              <button type="button" class="btn btn-sm btn-link text-muted p-0 d-none" id="lib-form-cancel" onclick="resetLibraryForm()">Cancel edit</button>
+            </div>
+            <input type="hidden" id="lib-edit-id" value="">
+            <input type="text" class="form-control form-control-sm mb-2" id="lib-title-input" placeholder="Name this prompt (e.g. 'MFA awareness angle')" maxlength="120">
+            <textarea class="form-control form-control-sm mb-2" id="lib-content-input" rows="3" placeholder="Prompt text to save and reuse..."></textarea>
+            <div class="d-flex justify-content-between align-items-center flex-wrap gap-1">
+              <button type="button" class="btn btn-sm btn-primary" id="lib-save-btn" onclick="submitLibraryForm()">💾 Save to Library</button>
+              <span class="small text-muted" id="lib-insert-target-note"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Search -->
+        <input type="text" class="form-control form-control-sm mb-3" id="lib-search" placeholder="🔍 Search starter, saved &amp; recent prompts..." oninput="renderLibraryLists()">
+
+        <!-- Starter templates (built-in, insert or save a copy) -->
+        <h6 class="text-muted small text-uppercase fw-bold mb-1">🚀 Starter Templates</h6>
+        <p class="text-muted small mb-2">Ready-to-use prompts for your practice areas. Insert one and fill the <span class="badge bg-light text-dark border">[BRACKETS]</span>, or save a copy to make it yours.</p>
+        <div id="lib-starter-list" class="mb-3"></div>
+
+        <!-- Saved prompts -->
+        <h6 class="text-muted small text-uppercase fw-bold mb-2">⭐ Saved Prompts</h6>
+        <div id="lib-saved-list" class="mb-3"></div>
+
+        <!-- Recent history -->
+        <h6 class="text-muted small text-uppercase fw-bold mb-2 d-flex justify-content-between align-items-center">
+          <span>🕘 Recent History</span>
+          <button type="button" class="btn btn-sm btn-link text-danger p-0 d-none" id="lib-clear-recent" onclick="clearRecentFromLibrary()">Clear all</button>
+        </h6>
+        <div id="lib-recent-list"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+    // Curated, named prompts saved to the library (server-provided)
+    const libraryPrompts = {{ library_prompts|default([])|tojson|safe }};
+    // Built-in starter templates, grouped by category (server-provided, read-only)
+    const starterPromptGroups = {{ starter_prompt_groups|default([])|tojson|safe }};
+    // Flat lookup by stable idx for insert / copy actions
+    const starterById = {};
+    starterPromptGroups.forEach(function (g) {
+        g.prompts.forEach(function (p) { starterById[p.idx] = p; });
+    });
+    let currentTarget = 'freeform-input';
+    let modalInstance = null;
+
+    // recentPrompts is defined in the Freeform tab's inline script; fall back to []
+    function getRecent() {
+        return (typeof recentPrompts !== 'undefined' && Array.isArray(recentPrompts)) ? recentPrompts : [];
+    }
+
+    function esc(s) {
+        const d = document.createElement('div');
+        d.textContent = (s === null || s === undefined) ? '' : s;
+        return d.innerHTML;
+    }
+
+    function getModal() {
+        if (!modalInstance) {
+            modalInstance = new bootstrap.Modal(document.getElementById('promptLibraryModal'));
+        }
+        return modalInstance;
+    }
+
+    const TARGET_LABELS = {
+        'freeform-input': 'Topic or Prompt',
+        'image-prompt': 'Image Focus / Prompt',
+        'text-input': 'Text Content',
+    };
+
+    function updateTargetNote() {
+        const note = document.getElementById('lib-insert-target-note');
+        note.textContent = 'Inserts into: ' + (TARGET_LABELS[currentTarget] || currentTarget);
+    }
+
+    window.openPromptLibrary = function (targetId) {
+        currentTarget = targetId || 'freeform-input';
+        resetLibraryForm();
+        updateTargetNote();
+        renderLibraryLists();
+        document.getElementById('lib-search').value = '';
+        getModal().show();
+    };
+
+    window.savePromptToLibrary = function (targetId) {
+        currentTarget = targetId || 'freeform-input';
+        const field = document.getElementById(currentTarget);
+        const text = field ? field.value.trim() : '';
+        resetLibraryForm();
+        document.getElementById('lib-content-input').value = text;
+        updateTargetNote();
+        renderLibraryLists();
+        getModal().show();
+        setTimeout(function () { document.getElementById('lib-title-input').focus(); }, 300);
+    };
+
+    window.insertIntoTarget = function (content) {
+        const field = document.getElementById(currentTarget);
+        if (field) {
+            field.value = content;
+            field.dispatchEvent(new Event('input', { bubbles: true }));
+            field.focus();
+        }
+        getModal().hide();
+    };
+
+    window.insertLibraryById = function (id) {
+        const p = libraryPrompts.find(function (x) { return x.id === id; });
+        if (p) insertIntoTarget(p.content);
+    };
+
+    // Insert a built-in starter template into the target field
+    window.insertStarter = function (idx) {
+        const p = starterById[idx];
+        if (p) insertIntoTarget(p.content);
+    };
+
+    // Load a starter into the save form so the user can name/edit and keep it
+    window.copyStarterToForm = function (idx) {
+        const p = starterById[idx];
+        if (!p) return;
+        resetLibraryForm();
+        document.getElementById('lib-title-input').value = p.title;
+        document.getElementById('lib-content-input').value = p.content;
+        const modalBody = document.querySelector('#promptLibraryModal .modal-body');
+        if (modalBody) modalBody.scrollTop = 0;
+        document.getElementById('lib-title-input').focus();
+    };
+
+    window.insertRecentByIndex = function (i) {
+        const arr = getRecent();
+        if (arr[i]) insertIntoTarget(arr[i].content);
+    };
+
+    window.resetLibraryForm = function () {
+        document.getElementById('lib-edit-id').value = '';
+        document.getElementById('lib-title-input').value = '';
+        document.getElementById('lib-content-input').value = '';
+        document.getElementById('lib-form-title').textContent = '➕ Save a new prompt';
+        document.getElementById('lib-save-btn').textContent = '💾 Save to Library';
+        document.getElementById('lib-form-cancel').classList.add('d-none');
+    };
+
+    function syncLibrary(prompts) {
+        libraryPrompts.length = 0;
+        (prompts || []).forEach(function (p) { libraryPrompts.push(p); });
+    }
+
+    window.submitLibraryForm = function () {
+        const id = document.getElementById('lib-edit-id').value;
+        const title = document.getElementById('lib-title-input').value.trim();
+        const content = document.getElementById('lib-content-input').value.trim();
+        if (!title) { alert('Please give the prompt a name.'); return; }
+        if (!content) { alert('Prompt text cannot be empty.'); return; }
+        const url = id ? '{{ url_for("compose_library_update") }}' : '{{ url_for("compose_library_save") }}';
+        const payload = id ? { id: parseInt(id, 10), title: title, content: content } : { title: title, content: content };
+        const btn = document.getElementById('lib-save-btn');
+        btn.disabled = true;
+        fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                btn.disabled = false;
+                if (data.success) {
+                    syncLibrary(data.prompts);
+                    resetLibraryForm();
+                    renderLibraryLists();
+                } else {
+                    alert('Error: ' + (data.error || 'Failed to save prompt'));
+                }
+            })
+            .catch(function (e) { btn.disabled = false; alert('Error: ' + e.message); });
+    };
+
+    window.editLibraryPrompt = function (id) {
+        const p = libraryPrompts.find(function (x) { return x.id === id; });
+        if (!p) return;
+        document.getElementById('lib-edit-id').value = p.id;
+        document.getElementById('lib-title-input').value = p.title;
+        document.getElementById('lib-content-input').value = p.content;
+        document.getElementById('lib-form-title').textContent = '✏️ Edit prompt';
+        document.getElementById('lib-save-btn').textContent = '💾 Update';
+        document.getElementById('lib-form-cancel').classList.remove('d-none');
+        document.getElementById('lib-title-input').focus();
+    };
+
+    window.deleteLibraryPrompt = function (id) {
+        if (!confirm('Delete this saved prompt? This cannot be undone.')) return;
+        fetch('{{ url_for("compose_library_delete") }}', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: id }),
+        })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data.success) {
+                    syncLibrary(data.prompts);
+                    renderLibraryLists();
+                } else {
+                    alert('Error: ' + (data.error || 'Failed to delete'));
+                }
+            })
+            .catch(function (e) { alert('Error: ' + e.message); });
+    };
+
+    window.deleteRecentByIndex = function (i) {
+        const arr = getRecent();
+        if (!arr[i]) return;
+        const content = arr[i].content;
+        const fd = new FormData();
+        fd.append('prompt', content);
+        fetch('{{ url_for("compose_delete_prompt") }}', { method: 'POST', body: fd })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data.success) {
+                    const idx = arr.findIndex(function (x) { return x.content === content; });
+                    if (idx > -1) arr.splice(idx, 1);
+                    renderLibraryLists();
+                }
+            });
+    };
+
+    window.clearRecentFromLibrary = function () {
+        if (!confirm('Clear all recent prompt history? This cannot be undone.')) return;
+        fetch('{{ url_for("compose_clear_prompts") }}', { method: 'POST' })
+            .then(function (r) { return r.json(); })
+            .then(function (data) {
+                if (data.success) { getRecent().length = 0; renderLibraryLists(); }
+            });
+    };
+
+    window.renderLibraryLists = function () {
+        const q = (document.getElementById('lib-search').value || '').toLowerCase().trim();
+
+        // --- Starter templates (grouped, built-in) ---
+        const starterEl = document.getElementById('lib-starter-list');
+        let starterHtml = '';
+        starterPromptGroups.forEach(function (g) {
+            const matches = g.prompts.filter(function (p) {
+                return !q || (p.title + ' ' + p.content).toLowerCase().indexOf(q) !== -1;
+            });
+            if (matches.length === 0) return;
+            starterHtml += '<div class="small fw-bold text-secondary mt-2 mb-1">' + esc(g.emoji) + ' ' + esc(g.category) + '</div>';
+            starterHtml += matches.map(function (p) {
+                return '<div class="border rounded p-2 mb-2 d-flex align-items-start gap-2" style="background:#f8f9fa;">'
+                    + '<div class="flex-grow-1" style="min-width:0; cursor:pointer;" onclick="insertStarter(' + p.idx + ')" title="Click to insert">'
+                    + '<div class="fw-bold small">' + esc(p.title) + '</div>'
+                    + '<div class="small text-muted" style="white-space:normal; word-break:break-word;">' + esc(p.preview) + '</div>'
+                    + '</div>'
+                    + '<button class="btn btn-sm btn-primary flex-shrink-0" onclick="insertStarter(' + p.idx + ')" title="Insert into the field">Insert</button>'
+                    + '<button class="btn btn-sm btn-outline-secondary flex-shrink-0" onclick="copyStarterToForm(' + p.idx + ')" title="Save an editable copy to your library">Save a copy</button>'
+                    + '</div>';
+            }).join('');
+        });
+        if (starterHtml === '') {
+            starterEl.innerHTML = '<p class="text-muted small mb-3">No starter templates match your search.</p>';
+        } else {
+            starterEl.innerHTML = starterHtml;
+        }
+
+        // --- Saved prompts ---
+        const savedEl = document.getElementById('lib-saved-list');
+        const saved = libraryPrompts.filter(function (p) {
+            return !q || (p.title + ' ' + p.content).toLowerCase().indexOf(q) !== -1;
+        });
+        if (saved.length === 0) {
+            savedEl.innerHTML = '<p class="text-muted small mb-3">'
+                + (q ? 'No saved prompts match your search.'
+                     : 'No saved prompts yet. Type one above and click <strong>Save to Library</strong> to reuse it anywhere.')
+                + '</p>';
+        } else {
+            savedEl.innerHTML = saved.map(function (p) {
+                return '<div class="border rounded p-2 mb-2 d-flex align-items-start gap-2">'
+                    + '<div class="flex-grow-1" style="min-width:0; cursor:pointer;" onclick="insertLibraryById(' + p.id + ')" title="Click to insert">'
+                    + '<div class="fw-bold small">' + esc(p.title) + '</div>'
+                    + '<div class="small text-muted" style="white-space:normal; word-break:break-word;">' + esc(p.preview) + '</div>'
+                    + '</div>'
+                    + '<button class="btn btn-sm btn-outline-primary flex-shrink-0" onclick="insertLibraryById(' + p.id + ')" title="Insert">Insert</button>'
+                    + '<button class="btn btn-sm btn-outline-secondary flex-shrink-0" onclick="editLibraryPrompt(' + p.id + ')" title="Edit">✏️</button>'
+                    + '<button class="btn btn-sm btn-outline-danger flex-shrink-0" onclick="deleteLibraryPrompt(' + p.id + ')" title="Delete">🗑️</button>'
+                    + '</div>';
+            }).join('');
+        }
+
+        // --- Recent history ---
+        const recentEl = document.getElementById('lib-recent-list');
+        const recent = getRecent();
+        const clearBtn = document.getElementById('lib-clear-recent');
+        const filteredRecent = recent
+            .map(function (r, i) { return { r: r, i: i }; })
+            .filter(function (o) { return !q || (o.r.content || '').toLowerCase().indexOf(q) !== -1; });
+        if (recent.length === 0) {
+            clearBtn.classList.add('d-none');
+        } else {
+            clearBtn.classList.remove('d-none');
+        }
+        if (filteredRecent.length === 0) {
+            recentEl.innerHTML = '<p class="text-muted small mb-0">'
+                + (recent.length === 0 ? 'No recent prompts yet.' : 'No recent prompts match your search.')
+                + '</p>';
+        } else {
+            recentEl.innerHTML = filteredRecent.map(function (o) {
+                return '<div class="border rounded p-2 mb-2 d-flex align-items-start gap-2">'
+                    + '<div class="flex-grow-1 small" style="min-width:0; cursor:pointer; white-space:normal; word-break:break-word;" onclick="insertRecentByIndex(' + o.i + ')" title="Click to insert">'
+                    + esc(o.r.preview || o.r.content) + '</div>'
+                    + '<button class="btn btn-sm btn-outline-primary flex-shrink-0" onclick="insertRecentByIndex(' + o.i + ')" title="Insert">Insert</button>'
+                    + '<button class="btn btn-sm btn-outline-danger flex-shrink-0" onclick="deleteRecentByIndex(' + o.i + ')" title="Remove from history">✕</button>'
+                    + '</div>';
+            }).join('');
+        }
+    };
+})();
 </script>
 {% endblock %}

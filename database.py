@@ -298,6 +298,18 @@ def init_db(db_path: str = DB_PATH) -> None:
             )
             """
         )
+        # Prompt library - curated, named prompts the user can reuse anywhere
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS prompt_library (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT NOT NULL,
+                content TEXT NOT NULL,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
         # Generated YouTube thumbnails
         conn.execute(
             """
@@ -3472,6 +3484,77 @@ def delete_prompts_bulk(prompt_contents: List[str], db_path: str = DB_PATH) -> i
             AND source_content IN ({placeholders})
             """,
             prompt_contents,
+        )
+        conn.commit()
+        return cur.rowcount
+
+
+# =============================================================================
+# Prompt Library Functions
+# =============================================================================
+
+
+def add_library_prompt(title: str, content: str, db_path: str = DB_PATH) -> int:
+    """Save a named, reusable prompt to the library and return its id."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            INSERT INTO prompt_library (title, content, created_at, updated_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (title.strip(), content, now, now),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_library_prompts(db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    """Return all saved library prompts, most recently updated first."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT * FROM prompt_library ORDER BY updated_at DESC, id DESC"
+        )
+        return cur.fetchall()
+
+
+def get_library_prompt(prompt_id: int, db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
+    """Return a single library prompt by id, or ``None`` if it does not exist."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            "SELECT * FROM prompt_library WHERE id = ?", (prompt_id,)
+        )
+        return cur.fetchone()
+
+
+def update_library_prompt(
+    prompt_id: int,
+    title: str,
+    content: str,
+    db_path: str = DB_PATH,
+) -> int:
+    """Update a library prompt's title and content. Returns rows affected."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            UPDATE prompt_library
+            SET title = ?, content = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (title.strip(), content, now, prompt_id),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
+def delete_library_prompt(prompt_id: int, db_path: str = DB_PATH) -> int:
+    """Delete a library prompt by id. Returns rows affected."""
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "DELETE FROM prompt_library WHERE id = ?", (prompt_id,)
         )
         conn.commit()
         return cur.rowcount
