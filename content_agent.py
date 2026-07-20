@@ -34,8 +34,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_PLATFORMS = ["linkedin", "threads", "twitter"]
 _PLATFORM_ALIASES = {"x": "twitter"}
-# Platforms the scheduler can auto-queue (instagram is generable but not schedulable).
-SCHEDULABLE = {"linkedin", "threads", "facebook", "twitter"}
+# Platforms the scheduler can auto-queue. Instagram requires an image, so
+# _auto_queue only queues instagram drafts it can attach an image to.
+SCHEDULABLE = {"linkedin", "threads", "facebook", "twitter", "instagram"}
 
 
 # ── Brief parsing ───────────────────────────────────────────────────────────
@@ -178,6 +179,24 @@ def _auto_queue(brief: dict, post_ids: list) -> int:
         platform = dict(row).get("platform")
         if platform not in SCHEDULABLE:
             continue
+        if platform == "instagram":
+            # Instagram posts cannot publish without an image; attach a stock
+            # image now or leave the draft unqueued for manual review.
+            if not dict(row).get("image_url"):
+                try:
+                    from insights_web import _ensure_instagram_image  # late import: avoid cycle
+                    _, image_err = _ensure_instagram_image(
+                        dict(row).get("content"), None, standalone_post_id=pid,
+                    )
+                except Exception:
+                    logger.debug("instagram image attach unavailable", exc_info=True)
+                    image_err = "image attach unavailable"
+                if image_err:
+                    logger.warning(
+                        "Skipping auto-queue for instagram draft %s (no image: %s); "
+                        "draft remains reviewable in Compose", pid, image_err,
+                    )
+                    continue
         slot = database.get_next_available_slot(platform)
         if not slot:
             continue

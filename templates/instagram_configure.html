@@ -1,0 +1,258 @@
+{% extends "base.html" %}
+{% block title %}Configure Instagram - Insights{% endblock %}
+{% block header %}Configure Instagram{% endblock %}
+{% block content %}
+
+<div class="row justify-content-center">
+    <div class="col-lg-8">
+        {% if is_new %}
+        <div class="alert alert-info mb-4">
+            <h5 class="alert-heading"><i class="bi bi-info-circle"></i> Instagram Connected Successfully!</h5>
+            <p class="mb-0">
+                Your Instagram account is connected. You can review and update your account details below.
+            </p>
+        </div>
+        {% endif %}
+
+        <div class="alert alert-warning mb-4">
+            <strong>Requirements:</strong> Instagram publishing needs a <strong>professional account</strong>
+            (Business or Creator &mdash; switch in the Instagram app under
+            <em>Settings &rarr; Account type and tools</em>). Feed posts also <strong>require an image</strong>
+            (JPEG, publicly hosted, aspect ratio between 4:5 and 1.91:1) &mdash; text-only posts are not supported
+            by the Instagram API.
+        </div>
+
+        <!-- Section 1: How to Create an Instagram / Meta App -->
+        <div class="card mb-4">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #833AB4 0%, #E4405F 100%);">
+                <h5 class="mb-0">Step 1: Create a Meta Developer App</h5>
+            </div>
+            <div class="card-body">
+                <p>To connect Instagram you need a <strong>Meta Developer App</strong> with the <strong>Instagram</strong> product enabled (the "Instagram API with Instagram Login" setup &mdash; no Facebook Page required).</p>
+                <ol>
+                    <li>Go to the <a href="https://developers.facebook.com/apps/" target="_blank">Meta Developer Portal</a> and log in with your Facebook account.</li>
+                    <li>Click <strong>"Create App"</strong>.</li>
+                    <li>
+                        Choose a <strong>Use Case</strong>:
+                        <ul>
+                            <li>Select <strong>"Other"</strong>, then click <strong>Next</strong>.</li>
+                            <li>Select <strong>"Business"</strong> as the app type, then click <strong>Next</strong>.</li>
+                        </ul>
+                    </li>
+                    <li>Give your app a name (e.g. <em>"Insights Instagram"</em>) and click <strong>"Create App"</strong>.</li>
+                    <li>On the app dashboard, scroll to <strong>"Add Products"</strong>, find <strong>"Instagram"</strong> and click <strong>"Set Up"</strong>.</li>
+                    <li>Under the Instagram product, choose <strong>"API setup with Instagram login"</strong>.</li>
+                </ol>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #E4405F 0%, #F77737 100%);">
+                <h5 class="mb-0">Step 2: Configure Your App Settings</h5>
+            </div>
+            <div class="card-body">
+                <ol>
+                    <li>
+                        In the left sidebar, go to <strong>Instagram &gt; API setup with Instagram login</strong>:
+                        <ul>
+                            <li>Copy the <strong>Instagram App ID</strong> &mdash; this is your <code>INSTAGRAM_APP_ID</code>.</li>
+                            <li>Copy the <strong>Instagram App Secret</strong> &mdash; this is your <code>INSTAGRAM_APP_SECRET</code>.</li>
+                            <li>Note: these differ from the Meta app's own ID/secret &mdash; use the ones shown under the Instagram product.</li>
+                        </ul>
+                    </li>
+                    <li>
+                        In <strong>"Set up business login"</strong>, add your OAuth redirect URL (must be HTTPS):<br>
+                        <code>{{ request.url_root }}instagram/callback</code>
+                    </li>
+                </ol>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #F77737 0%, #FCAF45 100%);">
+                <h5 class="mb-0">Step 3: Add Yourself as a Tester</h5>
+            </div>
+            <div class="card-body">
+                <p>While the app is in <strong>Development</strong> mode, only invited testers can authorize. For a single-user tool this is all you need &mdash; no App Review required:</p>
+                <ol>
+                    <li>In the Meta Developer dashboard, go to <strong>Instagram &gt; Roles</strong> (or <strong>App Roles &gt; Roles</strong>).</li>
+                    <li>Click <strong>"Add People"</strong>, choose <strong>Instagram Tester</strong>, and enter your <strong>Instagram username</strong>.</li>
+                    <li>
+                        Accept the tester invitation from the <strong>Instagram app or website</strong>:
+                        <ul>
+                            <li>Open Instagram &rarr; <strong>Settings</strong> &rarr; <strong>Website Permissions</strong> &rarr; <strong>Apps and Websites</strong> &rarr; <strong>Tester Invites</strong>.</li>
+                            <li>Accept the pending invite.</li>
+                        </ul>
+                    </li>
+                </ol>
+            </div>
+        </div>
+
+        <div class="card mb-4">
+            <div class="card-header text-white" style="background: linear-gradient(135deg, #FCAF45 0%, #E4405F 100%);">
+                <h5 class="mb-0">Step 4: Set Environment Variables &amp; Connect</h5>
+            </div>
+            <div class="card-body">
+                <ol>
+                    <li>
+                        Add the following to your <code>.env</code> file:
+                        <pre class="bg-light p-2 rounded mt-2 mb-2"><code>INSTAGRAM_APP_ID=your_instagram_app_id_here
+INSTAGRAM_APP_SECRET=your_instagram_app_secret_here
+INSTAGRAM_REDIRECT_URI={{ request.url_root }}instagram/callback</code></pre>
+                    </li>
+                    <li>Restart Insights so the new variables are loaded.</li>
+                    <li>Return to the <a href="{{ url_for('schedule_list') }}">Schedule</a> page and click <strong>"Connect Instagram"</strong>.</li>
+                    <li>Authorize the app when prompted &mdash; you will be redirected back automatically.</li>
+                </ol>
+            </div>
+        </div>
+
+        {% if token %}
+        <!-- Section 2: Manual Configuration -->
+        <div class="card mb-4">
+            <div class="card-header bg-secondary text-white">
+                <h5 class="mb-0">Configure Account Details Manually</h5>
+            </div>
+            <div class="card-body">
+                <p>These values were filled automatically during connection. Edit them if they are incorrect.</p>
+
+                {% if error %}
+                <div class="alert alert-danger">{{ error }}</div>
+                {% endif %}
+
+                <form method="POST" action="{{ url_for('instagram_configure') }}">
+                    <div class="mb-3">
+                        <label for="user_id" class="form-label"><strong>Instagram User ID</strong></label>
+                        <input type="text" class="form-control" id="user_id" name="user_id"
+                               value="{{ token['user_id'] or '' }}"
+                               placeholder="e.g., 12345678901234" required>
+                        <div class="form-text">
+                            Your app-scoped Instagram user ID (filled automatically after connecting).
+                        </div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="ig_user_id" class="form-label"><strong>Professional Account ID</strong> (optional)</label>
+                        <input type="text" class="form-control" id="ig_user_id" name="ig_user_id"
+                               value="{{ token['ig_user_id'] or '' }}"
+                               placeholder="e.g., 17841400000000000">
+                        <div class="form-text">The Instagram professional account ID returned by the API</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="username" class="form-label"><strong>Username</strong> (optional)</label>
+                        <input type="text" class="form-control" id="username" name="username"
+                               value="{{ token['username'] or '' }}"
+                               placeholder="e.g., ivenza.app">
+                        <div class="form-text">Your Instagram handle without the @ symbol</div>
+                    </div>
+                    <div class="mb-3">
+                        <label for="display_name" class="form-label"><strong>Display Name</strong> (optional)</label>
+                        <input type="text" class="form-control" id="display_name" name="display_name"
+                               value="{{ token['display_name'] or '' }}"
+                               placeholder="e.g., Sedric Louissaint">
+                        <div class="form-text">Your name as it will appear in the app</div>
+                    </div>
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                        <a href="{{ url_for('schedule_list') }}" class="btn btn-outline-secondary">Cancel</a>
+                        <button type="submit" class="btn btn-dark">Save Configuration</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Section 3: Current Connection Status -->
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">Current Connection Status</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-sm mb-0">
+                    <tr>
+                        <th>Access Token</th>
+                        <td><span class="text-success">&#10003; Valid</span></td>
+                    </tr>
+                    <tr>
+                        <th>Expires</th>
+                        <td>{{ token['expires_at'] }}</td>
+                    </tr>
+                    <tr>
+                        <th>User ID</th>
+                        <td>
+                            {% if token['user_id'] %}
+                                <code>{{ token['user_id'] }}</code>
+                            {% else %}
+                                <span class="text-warning">Not configured</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Account Type</th>
+                        <td>
+                            {% if token['account_type'] %}
+                                <code>{{ token['account_type'] }}</code>
+                                {% if token['account_type']|upper not in ['BUSINESS', 'MEDIA_CREATOR', 'CREATOR'] %}
+                                    <span class="text-danger ms-2">Publishing requires a Business/Creator account</span>
+                                {% endif %}
+                            {% else %}
+                                <span class="text-muted">Unknown</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Username</th>
+                        <td>
+                            {% if token['username'] %}
+                                <code>@{{ token['username'] }}</code>
+                            {% else %}
+                                <span class="text-warning">Not configured</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Display Name</th>
+                        <td>{{ token['display_name'] or 'Not set' }}</td>
+                    </tr>
+                    <tr>
+                        <th>Profile Picture</th>
+                        <td>
+                            {% if token['profile_picture_url'] %}
+                                <img src="{{ token['profile_picture_url'] }}" class="rounded-circle" width="40" height="40" alt="Profile">
+                                <span class="text-success ms-2">Saved locally</span>
+                            {% else %}
+                                <span class="text-muted">None</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                </table>
+                <hr>
+                <p class="mb-0 text-muted small">
+                    To refresh your profile info and token,
+                    <a href="#" onclick="disconnectAndReconnect(); return false;" class="text-primary">disconnect and reconnect</a> your Instagram account.
+                </p>
+            </div>
+        </div>
+        {% endif %}
+    </div>
+</div>
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+<script>
+function disconnectAndReconnect() {
+    if (confirm('This will disconnect your Instagram account. You will need to reconnect to refresh your token. Continue?')) {
+        fetch('{{ url_for("instagram_disconnect") }}', { method: 'POST' })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    window.location.href = '{{ url_for("instagram_auth") }}';
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('Failed to disconnect. Please try again.');
+            });
+    }
+}
+</script>
+
+{% endblock %}

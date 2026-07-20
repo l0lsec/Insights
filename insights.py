@@ -80,7 +80,13 @@ PLATFORM_GUIDELINES = {
     "linkedin": "Professional tone, 1-3 paragraphs, thought leadership angle, 3-5 professional hashtags",
     "facebook": "Conversational, can be longer, engaging question or hook, 2-3 hashtags",
     "threads": "Casual and authentic, similar to Twitter but can be slightly longer, 3-5 hashtags",
-    "instagram": "Visual-focused caption, emojis welcome, 10-15 relevant hashtags at the end",
+    "instagram": (
+        "Caption up to 2200 characters. The first line is the hook and must be "
+        "under 125 characters (Instagram truncates the preview). Short paragraphs "
+        "separated by line breaks, emojis welcome. End with 8-15 relevant hashtags "
+        "on their own lines. Links in captions are not clickable, so keep at most "
+        "one short URL and lead with the message, not the link"
+    ),
 }
 
 NO_EM_DASH_RULE = (
@@ -841,7 +847,13 @@ def generate_social_copy(
             "linkedin": "Professional tone, 1-3 paragraphs, thought leadership angle, 3-5 professional hashtags",
             "facebook": "Conversational, can be longer, engaging question or hook, 2-3 hashtags",
             "threads": "Casual and authentic, similar to Twitter but can be slightly longer, 3-5 hashtags",
-            "instagram": "Visual-focused caption, emojis welcome, 10-15 relevant hashtags at the end",
+            "instagram": (
+        "Caption up to 2200 characters. The first line is the hook and must be "
+        "under 125 characters (Instagram truncates the preview). Short paragraphs "
+        "separated by line breaks, emojis welcome. End with 8-15 relevant hashtags "
+        "on their own lines. Links in captions are not clickable, so keep at most "
+        "one short URL and lead with the message, not the link"
+    ),
         }
 
         platform_list = "\n".join([
