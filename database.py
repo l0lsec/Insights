@@ -174,6 +174,24 @@ def init_db(db_path: str = DB_PATH) -> None:
             )
             """
         )
+        # Instagram OAuth tokens storage (Instagram Login flavor)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS instagram_tokens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                access_token TEXT,
+                expires_at TEXT,
+                user_id TEXT,
+                ig_user_id TEXT,
+                username TEXT,
+                display_name TEXT,
+                profile_picture_url TEXT,
+                account_type TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
         # Scheduled posts queue for LinkedIn and other platforms
         conn.execute(
             """
@@ -1502,6 +1520,155 @@ def update_threads_user_info(
             WHERE id = ?
             """,
             (user_id, username, display_name, now, existing[0]),
+        )
+        conn.commit()
+        return True
+
+
+# --- Instagram Token Functions ---
+
+
+def save_instagram_token(
+    access_token: str,
+    expires_at: str,
+    user_id: str,
+    username: str,
+    ig_user_id: str | None = None,
+    display_name: str | None = None,
+    profile_picture_url: str | None = None,
+    account_type: str | None = None,
+    db_path: str = DB_PATH,
+) -> int:
+    """Save or update Instagram OAuth tokens. Returns the token record id."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        # Check if we already have a token (single user mode)
+        cur = conn.execute("SELECT id FROM instagram_tokens LIMIT 1")
+        existing = cur.fetchone()
+
+        if existing:
+            # Update existing token
+            conn.execute(
+                """
+                UPDATE instagram_tokens SET
+                    access_token = ?,
+                    expires_at = ?,
+                    user_id = ?,
+                    ig_user_id = ?,
+                    username = ?,
+                    display_name = ?,
+                    profile_picture_url = ?,
+                    account_type = ?,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    access_token,
+                    expires_at,
+                    user_id,
+                    ig_user_id,
+                    username,
+                    display_name,
+                    profile_picture_url,
+                    account_type,
+                    now,
+                    existing[0],
+                ),
+            )
+            conn.commit()
+            return existing[0]
+        else:
+            # Insert new token
+            cur = conn.execute(
+                """
+                INSERT INTO instagram_tokens
+                    (access_token, expires_at, user_id, ig_user_id, username,
+                     display_name, profile_picture_url, account_type,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    access_token,
+                    expires_at,
+                    user_id,
+                    ig_user_id,
+                    username,
+                    display_name,
+                    profile_picture_url,
+                    account_type,
+                    now,
+                    now,
+                ),
+            )
+            conn.commit()
+            return cur.lastrowid
+
+
+def get_instagram_token(db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
+    """Get the stored Instagram token (single user mode)."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM instagram_tokens LIMIT 1")
+        return cur.fetchone()
+
+
+def delete_instagram_token(db_path: str = DB_PATH) -> None:
+    """Delete all Instagram tokens (disconnect)."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM instagram_tokens")
+        conn.commit()
+
+
+def update_instagram_token(
+    access_token: str,
+    expires_at: str,
+    db_path: str = DB_PATH,
+) -> None:
+    """Update the access token after a refresh."""
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            UPDATE instagram_tokens SET
+                access_token = ?,
+                expires_at = ?,
+                updated_at = ?
+            WHERE id = (SELECT id FROM instagram_tokens LIMIT 1)
+            """,
+            (access_token, expires_at, now),
+        )
+        conn.commit()
+
+
+def update_instagram_user_info(
+    user_id: str,
+    username: str | None = None,
+    display_name: str | None = None,
+    ig_user_id: str | None = None,
+    db_path: str = DB_PATH,
+) -> bool:
+    """Update Instagram user info fields manually.
+
+    Returns True if a record was updated, False if no token exists.
+    """
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute("SELECT id FROM instagram_tokens LIMIT 1")
+        existing = cur.fetchone()
+        if not existing:
+            return False
+
+        conn.execute(
+            """
+            UPDATE instagram_tokens SET
+                user_id = ?,
+                username = COALESCE(?, username),
+                display_name = COALESCE(?, display_name),
+                ig_user_id = COALESCE(?, ig_user_id),
+                updated_at = ?
+            WHERE id = ?
+            """,
+            (user_id, username, display_name, ig_user_id, now, existing[0]),
         )
         conn.commit()
         return True

@@ -107,6 +107,12 @@ from database import (
     get_twitter_token,
     delete_twitter_token,
     update_twitter_token,
+    # Instagram token functions
+    save_instagram_token,
+    get_instagram_token,
+    delete_instagram_token,
+    update_instagram_token,
+    update_instagram_user_info,
     # Scheduled posts functions
     add_scheduled_post,
     get_scheduled_post,
@@ -276,6 +282,12 @@ from twitter_client import (
     get_twitter_client,
     calculate_token_expiry as twitter_calculate_token_expiry,
     is_token_expired as twitter_is_token_expired,
+)
+from instagram_client import (
+    InstagramClient,
+    get_instagram_client,
+    calculate_token_expiry as instagram_calculate_token_expiry,
+    is_token_expired as instagram_is_token_expired,
 )
 from stock_images import (
     search_stock_images,
@@ -3586,6 +3598,248 @@ def threads_configure():
     )
 
 
+@app.route('/instagram/status')
+def instagram_status():
+    """Check Instagram connection status."""
+    client = get_instagram_client()
+    token = get_instagram_token()
+
+    if not client.is_configured():
+        return jsonify({
+            "connected": False,
+            "configured": False,
+            "message": "Instagram credentials not configured. Set INSTAGRAM_APP_ID and INSTAGRAM_APP_SECRET.",
+        })
+
+    if not token:
+        return jsonify({
+            "connected": False,
+            "configured": True,
+            "message": "Not connected to Instagram",
+        })
+
+    account_type = token['account_type'] if 'account_type' in token.keys() else None
+    warning = None
+    if account_type and account_type.upper() not in ('BUSINESS', 'MEDIA_CREATOR', 'CREATOR'):
+        warning = (
+            "Connected account is not a professional (Business/Creator) account. "
+            "Instagram content publishing requires one."
+        )
+
+    # Check if token is expired
+    if instagram_is_token_expired(token['expires_at']):
+        # Try to refresh the token
+        try:
+            new_token = client.refresh_access_token(token['access_token'])
+            expires_at = instagram_calculate_token_expiry(new_token.get('expires_in', 5184000))
+            update_instagram_token(
+                access_token=new_token['access_token'],
+                expires_at=expires_at,
+            )
+            return jsonify({
+                "connected": True,
+                "configured": True,
+                "username": token['username'],
+                "display_name": token['display_name'],
+                "profile_picture_url": token['profile_picture_url'],
+                "account_type": account_type,
+                "warning": warning,
+                "expires_at": expires_at,
+                "message": "Connected (token refreshed)",
+            })
+        except Exception as e:
+            app.logger.warning("Failed to refresh Instagram token: %s", e)
+            return jsonify({
+                "connected": False,
+                "configured": True,
+                "message": "Token expired. Please reconnect.",
+            })
+
+    return jsonify({
+        "connected": True,
+        "configured": True,
+        "username": token['username'],
+        "display_name": token['display_name'],
+        "profile_picture_url": token['profile_picture_url'],
+        "account_type": account_type,
+        "warning": warning,
+        "user_id": token['user_id'],
+        "expires_at": token['expires_at'],
+    })
+
+
+@app.route('/instagram/auth')
+def instagram_auth():
+    """Start Instagram OAuth flow."""
+    client = get_instagram_client()
+
+    if not client.is_configured():
+        return jsonify({"error": "Instagram not configured"}), 400
+
+    auth_url, state = client.get_authorization_url()
+    session['instagram_oauth_state'] = state
+
+    return redirect(auth_url)
+
+
+@app.route('/instagram/callback')
+def instagram_callback():
+    """Handle Instagram OAuth callback."""
+    error = request.args.get('error')
+    if error:
+        error_desc = request.args.get('error_description', 'Unknown error')
+        app.logger.error("Instagram OAuth error: %s - %s", error, error_desc)
+        return render_template(
+            'article_error.html',
+            error=f"Instagram authorization failed: {error_desc}",
+        )
+
+    code = request.args.get('code')
+    state = request.args.get('state')
+
+    # Verify state to prevent CSRF
+    stored_state = session.pop('instagram_oauth_state', None)
+    if not stored_state or stored_state != state:
+        app.logger.warning("Instagram OAuth state mismatch")
+        return render_template(
+            'article_error.html',
+            error="Security verification failed. Please try again.",
+        )
+
+    if not code:
+        return render_template(
+            'article_error.html',
+            error="No authorization code received from Instagram.",
+        )
+
+    client = get_instagram_client()
+
+    try:
+        # Step 1: Exchange code for short-lived token
+        token_data = client.exchange_code_for_token(code)
+        short_lived_token = token_data['access_token']
+        user_id = str(token_data.get('user_id', ''))
+
+        # Step 2: Exchange for long-lived token (60 days)
+        long_lived_data = client.get_long_lived_token(short_lived_token)
+        access_token = long_lived_data['access_token']
+        expires_in = long_lived_data.get('expires_in', 5184000)  # Default 60 days
+
+        # Calculate expiry
+        expires_at = instagram_calculate_token_expiry(expires_in)
+
+        # Get user profile
+        user_info = client.get_user_profile(access_token)
+
+        if user_info:
+            user_id = str(user_info.get('id', user_id))
+            ig_user_id = str(user_info.get('user_id', '') or '')
+            username = user_info.get('username', '')
+            display_name = user_info.get('name', '') or username
+            account_type = user_info.get('account_type', '')
+            remote_picture_url = user_info.get('profile_picture_url', '')
+        else:
+            ig_user_id = ''
+            username = ''
+            display_name = 'Instagram User'
+            account_type = ''
+            remote_picture_url = ''
+
+        # Download and store profile picture locally (CDN URLs expire)
+        profile_picture_url = ''
+        if remote_picture_url:
+            try:
+                img_resp = requests.get(remote_picture_url, timeout=15)
+                if img_resp.status_code == 200:
+                    pic_filename = f"instagram_profile_{user_id}.jpg"
+                    pic_path = os.path.join(app.static_folder, pic_filename)
+                    with open(pic_path, 'wb') as f:
+                        f.write(img_resp.content)
+                    profile_picture_url = url_for('static', filename=pic_filename)
+                    app.logger.info("Saved Instagram profile picture to %s", pic_path)
+                else:
+                    app.logger.warning("Failed to download Instagram profile picture: %s", img_resp.status_code)
+            except Exception as pic_err:
+                app.logger.warning("Could not save Instagram profile picture: %s", pic_err)
+
+        # Save token
+        save_instagram_token(
+            access_token=access_token,
+            expires_at=expires_at,
+            user_id=user_id,
+            username=username,
+            ig_user_id=ig_user_id or None,
+            display_name=display_name,
+            profile_picture_url=profile_picture_url,
+            account_type=account_type or None,
+        )
+
+        app.logger.info("Instagram connected for user: @%s (%s)", username, account_type or 'unknown type')
+
+        # Redirect to schedule page with success message
+        return redirect(url_for('schedule_list') + '?instagram=connected')
+
+    except Exception as e:
+        app.logger.exception("Instagram OAuth exchange failed")
+        return render_template(
+            'article_error.html',
+            error=f"Failed to connect to Instagram: {str(e)}",
+        )
+
+
+@app.route('/instagram/disconnect', methods=['POST'])
+def instagram_disconnect():
+    """Disconnect Instagram account."""
+    delete_instagram_token()
+    return jsonify({"success": True, "message": "Instagram disconnected"})
+
+
+@app.route('/instagram/configure', methods=['GET', 'POST'])
+def instagram_configure():
+    """Configure Instagram user info manually or view setup instructions."""
+    token = get_instagram_token()
+
+    if request.method == 'POST':
+        if not token:
+            return redirect(url_for('schedule_list') + '?error=instagram_not_connected')
+
+        user_id = request.form.get('user_id', '').strip()
+        username = request.form.get('username', '').strip()
+        display_name = request.form.get('display_name', '').strip() or 'Instagram User'
+        ig_user_id = request.form.get('ig_user_id', '').strip()
+
+        if not user_id:
+            return render_template(
+                'instagram_configure.html',
+                token=token,
+                error="User ID is required",
+            )
+
+        success = update_instagram_user_info(
+            user_id=user_id,
+            username=username or None,
+            display_name=display_name,
+            ig_user_id=ig_user_id or None,
+        )
+
+        if success:
+            app.logger.info("Instagram user info configured manually: %s (@%s)", user_id, username)
+            return redirect(url_for('schedule_list') + '?instagram=configured')
+        else:
+            return render_template(
+                'instagram_configure.html',
+                token=token,
+                error="Failed to save configuration. Make sure Instagram is connected first.",
+            )
+
+    # GET request – show configuration / setup instructions
+    return render_template(
+        'instagram_configure.html',
+        token=token,
+        is_new=request.args.get('new') == '1',
+    )
+
+
 @app.route('/threads/post/<int:post_id>', methods=['POST'])
 def threads_post_social(post_id: int):
     """Post a social media post to Threads immediately."""
@@ -4461,7 +4715,7 @@ def schedule_list():
     
     # Get next available slot for each platform
     next_slots = {}
-    for plat in ['linkedin', 'threads', 'facebook']:
+    for plat in ['linkedin', 'threads', 'facebook', 'twitter', 'instagram']:
         slot = get_next_available_slot(platform=plat)
         if slot:
             try:
@@ -4764,6 +5018,62 @@ def schedule_post_now(scheduled_id: int):
                 error_msg = result.get('error', 'Unknown error') if result else 'No response'
                 return jsonify({"error": f"Failed: {error_msg}"}), 400
 
+        elif platform == 'instagram':
+            ig_token = get_instagram_token()
+            if not ig_token:
+                return jsonify({"error": "Instagram not connected"}), 400
+
+            ig_client = get_instagram_client()
+
+            if instagram_is_token_expired(ig_token['expires_at']):
+                try:
+                    new_token = ig_client.refresh_access_token(ig_token['access_token'])
+                    expires_at = instagram_calculate_token_expiry(new_token.get('expires_in', 5184000))
+                    update_instagram_token(
+                        access_token=new_token['access_token'],
+                        expires_at=expires_at,
+                    )
+                    ig_token = get_instagram_token()
+                except Exception as e:
+                    return jsonify({"error": f"Instagram token expired: {e}"}), 400
+
+            # Instagram feed posts require an image
+            image_url, image_err = _ensure_instagram_image(
+                content,
+                image_url,
+                standalone_post_id=post['standalone_post_id'],
+                social_post_id=post['social_post_id'],
+            )
+            if image_err:
+                return jsonify({"error": image_err}), 400
+
+            app.logger.info("Posting to Instagram with image: %s", image_url)
+            result = ig_client.publish_image_post(
+                ig_token['access_token'],
+                content[:2200],
+                image_url,
+            )
+
+            if result and result.get('success'):
+                update_scheduled_post_status(
+                    scheduled_id,
+                    status='posted',
+                    linkedin_post_urn=result.get('permalink'),
+                )
+                if post['social_post_id']:
+                    mark_social_post_used(post['social_post_id'], True)
+                if post['standalone_post_id']:
+                    mark_standalone_post_used(post['standalone_post_id'], True)
+
+                scheduled_time = datetime.fromisoformat(post['scheduled_for'])
+                if datetime.now() < scheduled_time:
+                    redistribute_scheduled_posts(platform)
+
+                return jsonify({"success": True, "message": "Posted to Instagram!"})
+            else:
+                error_msg = (result.get('friendly') or result.get('error', 'Unknown error')) if result else 'No response'
+                return jsonify({"error": f"Failed: {error_msg}"}), 400
+
         else:
             # Handle LinkedIn posting (default)
             token = get_linkedin_token()
@@ -4901,7 +5211,7 @@ def schedule_retry(scheduled_id: int):
             fb_token = get_facebook_token()
             if not fb_token:
                 return jsonify({"error": "Facebook not connected"}), 400
-            
+
             fb_client = get_facebook_client()
             result = fb_client.publish_smart_post(
                 page_access_token=fb_token['page_access_token'],
@@ -4911,11 +5221,49 @@ def schedule_retry(scheduled_id: int):
             )
             urn_key = 'permalink'
 
+        elif platform == 'instagram':
+            ig_token = get_instagram_token()
+            if not ig_token:
+                return jsonify({"error": "Instagram not connected"}), 400
+
+            ig_client = get_instagram_client()
+
+            if instagram_is_token_expired(ig_token['expires_at']):
+                try:
+                    new_token = ig_client.refresh_access_token(ig_token['access_token'])
+                    expires_at = instagram_calculate_token_expiry(new_token.get('expires_in', 5184000))
+                    update_instagram_token(
+                        access_token=new_token['access_token'],
+                        expires_at=expires_at,
+                    )
+                    ig_token = get_instagram_token()
+                except Exception as e:
+                    return jsonify({"error": f"Instagram token expired: {e}"}), 400
+
+            # Instagram feed posts require an image
+            image_url, image_err = _ensure_instagram_image(
+                content,
+                image_url,
+                standalone_post_id=post['standalone_post_id'],
+                social_post_id=post['social_post_id'],
+            )
+            if image_err:
+                return jsonify({"error": image_err}), 400
+
+            result = ig_client.publish_image_post(
+                ig_token['access_token'],
+                content[:2200],
+                image_url,
+            )
+            if result and not result.get('success') and result.get('friendly'):
+                result = dict(result, error=result['friendly'])
+            urn_key = 'permalink'
+
         else:
             token = get_linkedin_token()
             if not token:
                 return jsonify({"error": "LinkedIn not connected"}), 400
-            
+
             client = get_linkedin_client()
             result = client.create_smart_post(
                 token['access_token'],
@@ -4923,7 +5271,7 @@ def schedule_retry(scheduled_id: int):
                 content[:3000],
                 article_title=article_topic,
             )
-        
+
         if result and result.get('success'):
             update_scheduled_post_status(
                 scheduled_id,
@@ -5135,7 +5483,7 @@ def schedule_slot_add():
         return jsonify({"error": "Invalid day of week"}), 400
     
     # Validate platforms (empty list = all platforms)
-    valid_platforms = {'linkedin', 'threads', 'facebook', 'twitter'}
+    valid_platforms = {'linkedin', 'threads', 'facebook', 'twitter', 'instagram'}
     platforms = [p for p in platforms if p in valid_platforms]
     
     slot_id = add_time_slot(
@@ -5216,7 +5564,7 @@ def schedule_slot_edit(slot_id: int):
         return jsonify({"error": "Invalid day of week"}), 400
     
     # Validate platforms (empty list = all platforms)
-    valid_platforms = {'linkedin', 'threads', 'facebook', 'twitter'}
+    valid_platforms = {'linkedin', 'threads', 'facebook', 'twitter', 'instagram'}
     platforms = [p for p in platforms if p in valid_platforms]
     
     # Update the slot (pass empty list to clear platform restrictions)
@@ -5258,14 +5606,17 @@ def schedule_daily_limits():
         return jsonify({
             "linkedin": limits.get('linkedin', 0),
             "threads": limits.get('threads', 0),
+            "facebook": limits.get('facebook', 0),
+            "twitter": limits.get('twitter', 0),
+            "instagram": limits.get('instagram', 0),
         })
-    
+
     # POST - update limits
     platform = request.form.get('platform', '').strip().lower()
     limit = request.form.get('limit', type=int, default=0)
-    
-    if platform not in ('linkedin', 'threads'):
-        return jsonify({"error": "Invalid platform. Must be 'linkedin' or 'threads'"}), 400
+
+    if platform not in ('linkedin', 'threads', 'facebook', 'twitter', 'instagram'):
+        return jsonify({"error": "Invalid platform. Must be one of: linkedin, threads, facebook, twitter, instagram"}), 400
     
     if limit < 0:
         return jsonify({"error": "Limit must be 0 or greater (0 = unlimited)"}), 400
@@ -6031,7 +6382,7 @@ def compose_create_post():
     if not content:
         return jsonify({"error": "Content is required"}), 400
 
-    valid_platforms = ['linkedin', 'threads', 'twitter', 'facebook']
+    valid_platforms = ['linkedin', 'threads', 'twitter', 'facebook', 'instagram']
     if platform not in valid_platforms:
         return jsonify({"error": f"Invalid platform. Must be one of: {', '.join(valid_platforms)}"}), 400
 
@@ -6062,7 +6413,7 @@ def compose_import_file():
     """Import posts from a CSV or XLSX file into the Command Center."""
     import csv as csv_mod
 
-    IMPORT_PLATFORMS = {'threads', 'linkedin', 'facebook', 'twitter'}
+    IMPORT_PLATFORMS = {'threads', 'linkedin', 'facebook', 'twitter', 'instagram'}
     TRUTHY = {'true', '1', 'yes', 'y', 't'}
 
     def _is_truthy(val) -> bool:
@@ -6171,7 +6522,7 @@ def compose_import_file():
                 "row": i,
                 "reason": "unsupported_platform",
                 "message": f"Unsupported platform '{raw_platform}'",
-                "fix": "Change the Platform value to one of: Threads, LinkedIn, Facebook, Twitter/X. Use commas to list multiple (e.g. 'Twitter,Threads').",
+                "fix": "Change the Platform value to one of: Threads, LinkedIn, Facebook, Twitter/X, Instagram. Use commas to list multiple (e.g. 'Twitter,Threads').",
                 "platform": raw_platform or "(blank)",
                 "preview": content_preview,
             })
@@ -6190,7 +6541,7 @@ def compose_import_file():
                     "row": i,
                     "reason": "unsupported_platform",
                     "message": f"Unsupported platform '{original_token}'",
-                    "fix": "Change the Platform value to one of: Threads, LinkedIn, Facebook, Twitter/X. Use commas to list multiple (e.g. 'Twitter,Threads').",
+                    "fix": "Change the Platform value to one of: Threads, LinkedIn, Facebook, Twitter/X, Instagram. Use commas to list multiple (e.g. 'Twitter,Threads').",
                     "platform": original_token or "(blank)",
                     "preview": content_preview,
                 })
@@ -6590,6 +6941,45 @@ def _maybe_attach_link_image(post_id: int, content: str | None, kind: str = 'sta
     except RuntimeError:
         # Executor shut down (e.g. during reload); run inline as a best effort
         _worker(post_id, urls)
+
+
+def _ensure_instagram_image(
+    content: str | None,
+    image_url: str | None,
+    *,
+    standalone_post_id: int | None = None,
+    social_post_id: int | None = None,
+) -> tuple[str | None, str | None]:
+    """Instagram feed posts require an image; return (image_url, error).
+
+    If the post has no image, try to attach a stock image based on the content
+    and persist it back to the source post so the record reflects what gets
+    published. error is set only when no image could be obtained.
+    """
+    if image_url:
+        return image_url, None
+
+    stock_url = None
+    if content:
+        try:
+            stock_url = get_image_for_post(content)
+        except Exception as exc:
+            app.logger.warning("Stock image lookup for Instagram post failed: %s", exc)
+
+    if stock_url:
+        try:
+            if standalone_post_id:
+                update_standalone_post_image(standalone_post_id, stock_url)
+            elif social_post_id:
+                update_social_post_image(social_post_id, stock_url)
+        except Exception as exc:
+            app.logger.warning("Could not persist auto-attached Instagram image: %s", exc)
+        return stock_url, None
+
+    return None, (
+        "Instagram requires an image and no stock image could be found. "
+        "Attach an image to the post and retry."
+    )
 
 
 @app.route('/compose/stock-images/search', methods=['GET'])
@@ -7076,6 +7466,87 @@ def compose_post_to_threads(post_id: int):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route('/compose/post/<int:post_id>/instagram', methods=['POST'])
+def compose_post_to_instagram(post_id: int):
+    """Post a standalone post to Instagram immediately."""
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    # Get Instagram token
+    token = get_instagram_token()
+    if not token:
+        return jsonify({"error": "Instagram not connected. Please connect your account first."}), 401
+
+    # Check if token is expired and try to refresh
+    if instagram_is_token_expired(token['expires_at']):
+        client = get_instagram_client()
+        try:
+            new_token = client.refresh_access_token(token['access_token'])
+            expires_at = instagram_calculate_token_expiry(new_token.get('expires_in', 5184000))
+            update_instagram_token(
+                access_token=new_token['access_token'],
+                expires_at=expires_at,
+            )
+            token = get_instagram_token()
+        except Exception as e:
+            app.logger.warning("Failed to refresh Instagram token: %s", e)
+            return jsonify({"error": "Instagram token expired. Please reconnect."}), 401
+
+    client = get_instagram_client()
+
+    try:
+        # Instagram feed posts require an image
+        image_url = post['image_url'] if 'image_url' in post.keys() else None
+        image_url, image_err = _ensure_instagram_image(
+            post['content'],
+            image_url,
+            standalone_post_id=post_id,
+        )
+        if image_err:
+            return jsonify({"error": image_err}), 400
+
+        app.logger.info("Posting to Instagram with image: %s", image_url)
+        result = client.publish_image_post(
+            access_token=token['access_token'],
+            caption=post['content'],
+            image_url=image_url,
+        )
+
+        if result['success']:
+            # Mark the post as used
+            mark_standalone_post_used(post_id, True)
+
+            # Record in scheduled_posts for history tracking
+            now = datetime.now().isoformat(timespec='seconds')
+            add_scheduled_post(
+                social_post_id=None,
+                article_id=None,
+                standalone_post_id=post_id,
+                post_type='standalone',
+                platform='instagram',
+                scheduled_for=now,
+                status='posted',
+                linkedin_post_urn=result.get('permalink'),  # Store permalink for view link
+            )
+
+            return jsonify({
+                "success": True,
+                "post_id": result.get('post_id'),
+                "permalink": result.get('permalink'),
+                "message": "Posted to Instagram successfully!",
+            })
+        else:
+            return jsonify({
+                "success": False,
+                "error": result.get('friendly') or result.get('error', 'Unknown error'),
+            }), 400
+
+    except Exception as e:
+        app.logger.exception("Failed to post to Instagram")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route('/compose/post/<int:post_id>/queue', methods=['POST'])
 def compose_add_to_queue(post_id: int):
     """Add a standalone post to the schedule queue."""
@@ -7087,9 +7558,21 @@ def compose_add_to_queue(post_id: int):
     scheduled_for = request.form.get('scheduled_for', '').strip()
     
     # Validate platform
-    if platform not in ['linkedin', 'threads', 'facebook', 'twitter']:
+    if platform not in ['linkedin', 'threads', 'facebook', 'twitter', 'instagram']:
         return jsonify({"error": f"Platform {platform} does not support scheduling yet"}), 400
-    
+
+    # Instagram feed posts require an image; attach a stock image now so the
+    # user can review or swap it before the scheduled time.
+    if platform == 'instagram':
+        existing_image = post['image_url'] if 'image_url' in post.keys() else None
+        _, image_err = _ensure_instagram_image(
+            post['content'],
+            existing_image,
+            standalone_post_id=post_id,
+        )
+        if image_err:
+            return jsonify({"error": "Instagram posts require an image. Attach one before queueing."}), 400
+
     # Use provided scheduled_for or get next available slot
     if scheduled_for:
         # Use custom datetime provided by user
@@ -7911,6 +8394,7 @@ def scheduled_post_worker() -> None:
             threads_token = None
             facebook_token = None
             twitter_token = None
+            instagram_token = None
             redistributed_platforms = set()  # Track platforms we've redistributed
             
             for post in pending:
@@ -8218,7 +8702,97 @@ def scheduled_post_worker() -> None:
                                     error_message=f'{error_msg} (max retries exhausted)',
                                 )
                                 app.logger.error("Scheduled Twitter post %d failed permanently: %s", post['id'], error_msg)
-                    
+
+                    elif platform == 'instagram':
+                        if instagram_token is None:
+                            instagram_token = get_instagram_token()
+
+                        if not instagram_token:
+                            app.logger.warning("Scheduled Instagram post %d due but Instagram not connected", post['id'])
+                            update_scheduled_post_status(
+                                post['id'],
+                                status='failed',
+                                error_message='Instagram not connected',
+                            )
+                            continue
+
+                        if instagram_is_token_expired(instagram_token['expires_at']):
+                            ig_client = get_instagram_client()
+                            try:
+                                new_token = ig_client.refresh_access_token(instagram_token['access_token'])
+                                expires_at = instagram_calculate_token_expiry(new_token.get('expires_in', 5184000))
+                                update_instagram_token(
+                                    access_token=new_token['access_token'],
+                                    expires_at=expires_at,
+                                )
+                                instagram_token = get_instagram_token()
+                            except Exception as e:
+                                app.logger.error("Failed to refresh Instagram token: %s", e)
+                                update_scheduled_post_status(
+                                    post['id'],
+                                    status='failed',
+                                    error_message='Instagram token expired',
+                                )
+                                continue
+
+                        # Instagram feed posts require an image; try to
+                        # auto-attach a stock image, otherwise fail immediately
+                        # (no retries - a missing image won't fix itself).
+                        image_url, image_err = _ensure_instagram_image(
+                            content,
+                            image_url,
+                            standalone_post_id=post['standalone_post_id'],
+                            social_post_id=post['social_post_id'],
+                        )
+                        if image_err:
+                            app.logger.warning("Scheduled Instagram post %d has no image: %s", post['id'], image_err)
+                            update_scheduled_post_status(
+                                post['id'],
+                                status='failed',
+                                error_message=image_err,
+                            )
+                            continue
+
+                        ig_client = get_instagram_client()
+
+                        app.logger.info("Posting Instagram with image: %s", image_url)
+                        result = ig_client.publish_image_post(
+                            access_token=instagram_token['access_token'],
+                            caption=content[:2200],
+                            image_url=image_url,
+                        )
+
+                        if result['success']:
+                            update_scheduled_post_status(
+                                post['id'],
+                                status='posted',
+                                linkedin_post_urn=result.get('permalink'),
+                            )
+                            if post['social_post_id']:
+                                mark_social_post_used(post['social_post_id'], True)
+                            if post['standalone_post_id']:
+                                mark_standalone_post_used(post['standalone_post_id'], True)
+                            app.logger.info("Scheduled Instagram post %d published successfully", post['id'])
+                        else:
+                            error_msg = str(result.get('friendly') or result.get('error', 'Unknown error'))[:500]
+                            retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
+                            if retry_count < MAX_RETRIES:
+                                increment_retry_count(post['id'])
+                                redistribute_scheduled_posts(platform)
+                                redistributed_platforms.add(platform)
+                                app.logger.warning(
+                                    "Instagram post %d failed (%s), rescheduled to next slot (retry %d/%d)",
+                                    post['id'], error_msg, retry_count + 1, MAX_RETRIES,
+                                )
+                                break
+                            else:
+                                update_scheduled_post_status(
+                                    post['id'],
+                                    status='failed',
+                                    error_message=f'{error_msg} (max retries exhausted)',
+                                )
+                                app.logger.error("Scheduled Instagram post %d failed permanently: %s", post['id'], error_msg)
+
                     else:
                         # Handle LinkedIn posting (default)
                         if linkedin_token is None:
