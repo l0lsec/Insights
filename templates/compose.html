@@ -5037,8 +5037,14 @@ function applyPostFilters() {
             }
         });
         
-        // Hide card if no visible posts
-        card.style.display = visibleInCard > 0 ? '' : 'none';
+        // Keep manual-create-only cards (no posts) visible so any platform can be
+        // authored from scratch; only hide them when a different platform is filtered.
+        // Cards that have posts are hidden when all their posts are filtered out.
+        if (totalInCard === 0) {
+            card.style.display = (!platformFilter || platformFilter === platform) ? '' : 'none';
+        } else {
+            card.style.display = visibleInCard > 0 ? '' : 'none';
+        }
         
         // Update platform count badge
         const countBadge = card.querySelector('.social-copy-header .badge');
