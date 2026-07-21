@@ -5881,29 +5881,97 @@ def _valid_post_platform(raw):
     return platform or None
 
 
-@app.route('/compose/posts/content')
-def compose_posts_content():
-    """Return id/platform/content for every saved post (optionally one platform).
+# The Compose filter bar's non-platform filters, in the same vocabulary the
+# <select> options use, so the server can reproduce the client's predicate.
+_POST_FILTER_KEYS = ('used', 'queued', 'image', 'source', 'brief')
 
-    Text only — no images, schedules or brief metadata — so Find & Replace can
-    search across ALL posts, not just the page currently rendered.
+
+def _post_matches_filters(post, filters, scheduled_info):
+    """Mirror the client-side applyPostFilters() predicate for one saved post."""
+    used = filters.get('used')
+    if used == 'used' and not post['used']:
+        return False
+    if used == 'unused' and post['used']:
+        return False
+
+    queued = filters.get('queued')
+    if queued:
+        # The page only renders a queue button for the post's own platform, so
+        # "queued" means a pending schedule on that platform.
+        is_queued = bool(scheduled_info.get(post['id'], {}).get(post['platform']))
+        if queued == 'queued' and not is_queued:
+            return False
+        if queued == 'not-queued' and is_queued:
+            return False
+
+    image = filters.get('image')
+    if image == 'has-image' and not post['image_url']:
+        return False
+    if image == 'no-image' and post['image_url']:
+        return False
+
+    source = filters.get('source')
+    if source:
+        if ('agent' if post['source_type'] == 'agent' else 'manual') != source:
+            return False
+
+    brief = filters.get('brief')
+    if brief:
+        brief_id = post['brief_id'] if 'brief_id' in post.keys() else None
+        if str(brief_id or '') != brief:
+            return False
+
+    return True
+
+
+def _filtered_standalone_posts(args):
+    """Return (matching rows, index_by_id) for the Compose filters in ``args``.
+
+    Reproduces the client-side filter bar server-side so "select all across
+    every page" and Find & Replace act on exactly the filtered set rather than
+    only the posts currently rendered. ``index_by_id`` is the 1-based
+    per-platform position in the *unfiltered* list, matching the page's
+    "Post N" label.
     """
-    platform = _valid_post_platform(request.args.get('platform'))
+    platform = _valid_post_platform(args.get('platform'))
+    filters = {key: (args.get(key) or '').strip() for key in _POST_FILTER_KEYS}
+
     rows = list_standalone_posts(platform=platform)
 
-    # Index mirrors the "Post N" label on the page: 1-based within each platform,
-    # newest first (the same order the Compose page renders).
-    per_platform_index = {}
-    posts = []
+    index_by_id = {}
+    per_platform = {}
     for row in rows:
         p = row['platform']
-        per_platform_index[p] = per_platform_index.get(p, 0) + 1
-        posts.append({
+        per_platform[p] = per_platform.get(p, 0) + 1
+        index_by_id[row['id']] = per_platform[p]
+
+    # Pending schedules are only needed (and only paid for) by the queued filter.
+    scheduled_info = {}
+    if filters['queued']:
+        ids = [r['id'] for r in rows]
+        scheduled_info = get_pending_schedules_for_standalone_posts(ids) if ids else {}
+
+    matched = [r for r in rows if _post_matches_filters(r, filters, scheduled_info)]
+    return matched, index_by_id
+
+
+@app.route('/compose/posts/content')
+def compose_posts_content():
+    """Return id/platform/content for saved posts matching the Compose filters.
+
+    Text only — no images, schedules or brief metadata — so Find & Replace can
+    search across ALL matching posts, not just the page currently rendered.
+    """
+    rows, index_by_id = _filtered_standalone_posts(request.args)
+    posts = [
+        {
             'id': row['id'],
-            'platform': p,
+            'platform': row['platform'],
             'content': row['content'] or '',
-            'index': per_platform_index[p],
-        })
+            'index': index_by_id.get(row['id']),
+        }
+        for row in rows
+    ]
 
     return jsonify({
         "success": True,
@@ -5914,20 +5982,26 @@ def compose_posts_content():
 
 @app.route('/compose/posts/ids')
 def compose_posts_ids():
-    """Return the id + platform of every saved post (optionally one platform).
+    """Return the id + platform of saved posts matching the Compose filters.
 
     Powers the "select all across every page" bulk actions, which need the full
-    matching id set rather than the checkboxes currently in the DOM.
+    matching id set rather than the checkboxes currently in the DOM. Pass
+    ``count_only=1`` to get just the totals (used to size the offer banner).
     """
-    platform = _valid_post_platform(request.args.get('platform'))
-    rows = list_standalone_posts(platform=platform)
-    posts = [{'id': row['id'], 'platform': row['platform']} for row in rows]
+    rows, _ = _filtered_standalone_posts(request.args)
 
-    return jsonify({
+    by_platform = {}
+    for row in rows:
+        by_platform[row['platform']] = by_platform.get(row['platform'], 0) + 1
+
+    payload = {
         "success": True,
-        "posts": posts,
-        "count": len(posts),
-    })
+        "count": len(rows),
+        "by_platform": by_platform,
+    }
+    if not request.args.get('count_only'):
+        payload["posts"] = [{'id': row['id'], 'platform': row['platform']} for row in rows]
+    return jsonify(payload)
 
 
 @app.route('/compose/posts/queue-all-unscheduled', methods=['POST'])
@@ -5937,11 +6011,23 @@ def compose_queue_all_unscheduled():
     Replaces the old DOM-scraping "Queue All" so it works across all posts, not
     just the ones currently loaded on the page.
     """
-    platform = (request.form.get('platform') or (request.get_json(silent=True) or {}).get('platform') or '').strip()
+    payload = request.get_json(silent=True) or {}
+    platform = (request.form.get('platform') or payload.get('platform') or '').strip()
     if platform not in ['linkedin', 'threads', 'facebook', 'twitter', 'instagram']:
         return jsonify({"error": f"Platform {platform} does not support scheduling"}), 400
 
     rows = list_standalone_posts(platform=platform)
+
+    # Optional id restriction: a filtered "select all across every page" queues
+    # only the posts that actually match the filters, not the whole platform.
+    raw_ids = request.form.getlist('post_ids') or payload.get('post_ids')
+    if raw_ids:
+        try:
+            allowed = {int(pid) for pid in raw_ids}
+        except (TypeError, ValueError):
+            return jsonify({"error": "Invalid post IDs"}), 400
+        rows = [r for r in rows if r['id'] in allowed]
+
     all_ids = [r['id'] for r in rows]
     already_scheduled = get_pending_schedules_for_standalone_posts(all_ids) if all_ids else {}
 
