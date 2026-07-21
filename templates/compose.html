@@ -5037,14 +5037,11 @@ function applyPostFilters() {
             }
         });
         
-        // Keep manual-create-only cards (no posts) visible so any platform can be
-        // authored from scratch; only hide them when a different platform is filtered.
-        // Cards that have posts are hidden when all their posts are filtered out.
-        if (totalInCard === 0) {
-            card.style.display = (!platformFilter || platformFilter === platform) ? '' : 'none';
-        } else {
-            card.style.display = visibleInCard > 0 ? '' : 'none';
-        }
+        // Always keep the card (and its "Write a New X Post" affordance) visible so
+        // any platform can be authored from scratch, even when all of its posts are
+        // filtered out (used/queued/image/etc.). Only hide it when a *different*
+        // platform is explicitly selected in the platform filter.
+        card.style.display = (platformFilter && platformFilter !== platform) ? 'none' : '';
         
         // Update platform count badge
         const countBadge = card.querySelector('.social-copy-header .badge');
