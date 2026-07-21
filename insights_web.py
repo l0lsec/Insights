@@ -5713,31 +5713,17 @@ def schedule_debug():
 # Command Center Routes
 # ============================================================================
 
+# Saved posts are paginated per platform so the Compose page stays small even
+# with thousands of imported/generated posts.
+POSTS_PAGE_SIZE = 20
 
-@app.route('/compose')
-def compose_page():
-    """Command Center page for generating social media posts."""
-    # Get existing standalone posts grouped by platform
-    posts = list_standalone_posts()
-    
-    # Get scheduled info for all standalone posts
-    post_ids = [post['id'] for post in posts]
-    scheduled_info = get_pending_schedules_for_standalone_posts(post_ids) if post_ids else {}
-    posted_info = get_posted_info_for_standalone_posts(post_ids) if post_ids else {}
-    
-    # Map brief ids -> names so agent-curated posts can show/filter by their brief
-    brief_names = {brief['id']: brief['name'] for brief in list_content_briefs()}
-    briefs_in_posts = {}
 
-    posts_by_platform = {}
-    for post in posts:
-        platform = post['platform']
-        if platform not in posts_by_platform:
-            posts_by_platform[platform] = []
+def _enrich_standalone_posts(rows, scheduled_info, posted_info, brief_names):
+    """Turn standalone_posts rows into template dicts (scheduled/posted/media/brief)."""
+    enriched = []
+    for post in rows:
         post_dict = dict(post)
-        # Add scheduled info to each post
         post_dict['scheduled'] = scheduled_info.get(post['id'], {})
-        # Add posted info (with URL) to each post
         post_dict['posted'] = posted_info.get(post['id'], {})
         # Instagram media format + parsed media list (feed by default)
         post_dict['ig_post_type'] = post_dict.get('ig_post_type') or 'feed'
@@ -5748,13 +5734,43 @@ def compose_page():
             post_dict['media_items'] = []
         # Attach the originating brief's name (agent-curated posts only)
         brief_id = post_dict.get('brief_id')
-        brief_name = brief_names.get(brief_id) if brief_id else None
-        post_dict['brief_name'] = brief_name
-        if brief_id and brief_name:
-            briefs_in_posts[brief_id] = brief_name
-        posts_by_platform[platform].append(post_dict)
+        post_dict['brief_name'] = brief_names.get(brief_id) if brief_id else None
+        enriched.append(post_dict)
+    return enriched
 
-    # Distinct briefs that have at least one saved post, for the filter dropdown
+
+@app.route('/compose')
+def compose_page():
+    """Command Center page for generating social media posts."""
+    # All saved posts (newest first) — cheap to load; we only render the first page.
+    posts = list_standalone_posts()
+
+    # Map brief ids -> names so agent-curated posts can show/filter by their brief
+    brief_names = {brief['id']: brief['name'] for brief in list_content_briefs()}
+
+    # Group raw rows by platform and count totals (for the "Load more" controls)
+    raw_by_platform = {}
+    for post in posts:
+        raw_by_platform.setdefault(post['platform'], []).append(post)
+    platform_totals = {p: len(rows) for p, rows in raw_by_platform.items()}
+
+    # Only enrich + render the first page per platform (keeps the payload small).
+    capped_by_platform = {p: rows[:POSTS_PAGE_SIZE] for p, rows in raw_by_platform.items()}
+    capped_ids = [r['id'] for rows in capped_by_platform.values() for r in rows]
+    scheduled_info = get_pending_schedules_for_standalone_posts(capped_ids) if capped_ids else {}
+    posted_info = get_posted_info_for_standalone_posts(capped_ids) if capped_ids else {}
+
+    posts_by_platform = {
+        platform: _enrich_standalone_posts(rows, scheduled_info, posted_info, brief_names)
+        for platform, rows in capped_by_platform.items()
+    }
+
+    # Distinct briefs across ALL saved posts (not just the first page), for the filter
+    briefs_in_posts = {}
+    for post in posts:
+        bid = post['brief_id'] if 'brief_id' in post.keys() else None
+        if bid and bid in brief_names:
+            briefs_in_posts[bid] = brief_names[bid]
     brief_filter_options = [
         {'id': bid, 'name': name}
         for bid, name in sorted(briefs_in_posts.items(), key=lambda kv: kv[1].lower())
@@ -5809,6 +5825,8 @@ def compose_page():
     return render_template(
         'compose.html',
         posts_by_platform=posts_by_platform,
+        platform_totals=platform_totals,
+        page_size=POSTS_PAGE_SIZE,
         brief_filter_options=brief_filter_options,
         next_slots=next_slots,
         saved_sources=saved_sources,
@@ -5823,6 +5841,105 @@ def compose_page():
         file_formats=[f for f in document_extractor.supported_formats() if f['available']],
         file_accept=document_extractor.accept_attribute(),
     )
+
+
+@app.route('/compose/posts/more')
+def compose_posts_more():
+    """Return the next page of saved posts for a platform as an HTML fragment."""
+    platform = (request.args.get('platform') or '').strip()
+    if not platform:
+        return jsonify({"error": "platform is required"}), 400
+    offset = request.args.get('offset', 0, type=int) or 0
+
+    # Fetch one extra row to know whether there are more after this page
+    rows = list_standalone_posts(platform=platform, limit=POSTS_PAGE_SIZE + 1, offset=offset)
+    has_more = len(rows) > POSTS_PAGE_SIZE
+    rows = rows[:POSTS_PAGE_SIZE]
+
+    ids = [r['id'] for r in rows]
+    scheduled_info = get_pending_schedules_for_standalone_posts(ids) if ids else {}
+    posted_info = get_posted_info_for_standalone_posts(ids) if ids else {}
+    brief_names = {brief['id']: brief['name'] for brief in list_content_briefs()}
+    enriched = _enrich_standalone_posts(rows, scheduled_info, posted_info, brief_names)
+
+    html = render_template(
+        'partials/post_items.html',
+        posts=enriched,
+        platform=platform,
+        start_index=offset,
+    )
+    return jsonify({
+        "html": html,
+        "has_more": has_more,
+        "next_offset": offset + len(rows),
+    })
+
+
+@app.route('/compose/posts/queue-all-unscheduled', methods=['POST'])
+def compose_queue_all_unscheduled():
+    """Queue every unscheduled, unused saved post for a platform (server-side).
+
+    Replaces the old DOM-scraping "Queue All" so it works across all posts, not
+    just the ones currently loaded on the page.
+    """
+    platform = (request.form.get('platform') or (request.get_json(silent=True) or {}).get('platform') or '').strip()
+    if platform not in ['linkedin', 'threads', 'facebook', 'twitter', 'instagram']:
+        return jsonify({"error": f"Platform {platform} does not support scheduling"}), 400
+
+    rows = list_standalone_posts(platform=platform)
+    all_ids = [r['id'] for r in rows]
+    already_scheduled = get_pending_schedules_for_standalone_posts(all_ids) if all_ids else {}
+
+    queued = 0
+    skipped = 0
+    no_slots = False
+    for row in rows:
+        post = dict(row)
+        pid = post['id']
+        if post.get('used'):
+            continue
+        if pid in already_scheduled:
+            continue
+
+        if platform == 'instagram':
+            ig_post_type = post.get('ig_post_type')
+            raw_items = post.get('media_items')
+            try:
+                media_items = json.loads(raw_items) if raw_items else []
+            except (ValueError, TypeError):
+                media_items = []
+            _, media_err = _ensure_instagram_media(
+                post.get('content'),
+                post.get('image_url'),
+                ig_post_type,
+                media_items,
+                standalone_post_id=pid,
+            )
+            if media_err:
+                skipped += 1
+                continue
+
+        slot = get_next_available_slot(platform)
+        if not slot:
+            no_slots = True
+            break
+        add_scheduled_post(
+            social_post_id=None,
+            article_id=None,
+            standalone_post_id=pid,
+            post_type='standalone',
+            platform=platform,
+            scheduled_for=slot,
+            status='pending',
+        )
+        queued += 1
+
+    return jsonify({
+        "success": True,
+        "queued": queued,
+        "skipped": skipped,
+        "no_slots": no_slots,
+    })
 
 
 @app.route('/compose/recent-prompts')

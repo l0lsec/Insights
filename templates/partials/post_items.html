@@ -1,0 +1,2 @@
+{% from 'partials/post_item.html' import render_post_item %}
+{% for post in posts %}{{ render_post_item(post, platform, start_index + loop.index) }}{% endfor %}
