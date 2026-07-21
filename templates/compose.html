@@ -885,7 +885,14 @@
             <button class="btn btn-sm btn-outline-secondary" onclick="clearPostFilters()" title="Clear Filters">✕</button>
             <span class="text-muted small ms-2" id="filter-results-count"></span>
         </div>
-        
+
+        <!-- Select-all-across-pages banner: only posts on the current page live in
+             the DOM, so this offers to widen bulk actions to every saved post. -->
+        <div class="alert alert-info py-2 px-3 mb-3 d-none" id="select-all-scope-banner" role="status">
+            <span class="small" id="select-all-scope-text"></span>
+            <button type="button" class="btn btn-sm btn-link p-0 ms-1 align-baseline" id="select-all-scope-btn"></button>
+        </div>
+
         <div id="saved-posts-container">
             {% for platform, posts in posts_by_platform.items() %}
             <div class="social-copy-card mb-3" data-platform="{{ platform }}">
@@ -3441,7 +3448,118 @@ function schedulePost() {
 }
 
 // Select mode functions
+
+// When null, bulk actions act on the checked checkboxes currently in the DOM.
+// When set ({platform: 'threads'|null}), they act on EVERY saved post matching
+// that platform — including posts on pages that haven't been loaded.
+let selectAllScope = null;
+
+const SCOPE_QUEUEABLE_PLATFORMS = ['linkedin', 'threads'];
+const SCOPE_POSTABLE_PLATFORMS = ['linkedin', 'threads', 'facebook', 'twitter', 'instagram'];
+
+function currentPlatformFilter() {
+    const el = document.getElementById('filter-platform');
+    return el ? el.value : '';
+}
+
+// Server-side totals per platform, so we can size an across-pages selection
+// without loading every post.
+function scopeCounts(platform) {
+    const platforms = platform ? [platform] : Object.keys(PLATFORM_TOTALS);
+    let total = 0, queueable = 0, postable = 0;
+    platforms.forEach(p => {
+        const n = PLATFORM_TOTALS[p] || 0;
+        total += n;
+        if (SCOPE_QUEUEABLE_PLATFORMS.includes(p)) queueable += n;
+        if (SCOPE_POSTABLE_PLATFORMS.includes(p)) postable += n;
+    });
+    return { total, queueable, postable };
+}
+
+function otherFiltersActive() {
+    const ids = ['filter-used', 'filter-queued', 'filter-image', 'filter-source', 'filter-brief'];
+    return ids.some(id => {
+        const el = document.getElementById(id);
+        return el && el.value;
+    });
+}
+
+function clearSelectAllScope() {
+    selectAllScope = null;
+    const banner = document.getElementById('select-all-scope-banner');
+    if (banner) banner.classList.add('d-none');
+}
+
+// Offer "select all across every page" once the loaded posts are all checked
+// but more posts exist behind "Load more". `platform` (''|null = all platforms)
+// scopes the offer to a single platform when triggered from a platform's "All".
+function offerSelectAllScope(loadedCount, platform) {
+    const banner = document.getElementById('select-all-scope-banner');
+    if (!banner) return;
+
+    platform = platform || null;
+    const total = scopeCounts(platform).total;
+    if (total <= loadedCount) {
+        banner.classList.add('d-none');
+        return;
+    }
+
+    const label = platform ? `${platform} post` : 'post';
+    let text = `All ${loadedCount} loaded ${label}${loadedCount !== 1 ? 's' : ''} selected.`;
+    if (otherFiltersActive()) {
+        text += ' Selecting across pages ignores the other filters.';
+    }
+    document.getElementById('select-all-scope-text').textContent = text;
+
+    const btn = document.getElementById('select-all-scope-btn');
+    btn.textContent = `Select all ${total} ${label}${total !== 1 ? 's' : ''} across every page`;
+    btn.onclick = () => enableSelectAllScope(platform);
+    banner.classList.remove('d-none');
+}
+
+function enableSelectAllScope(platform) {
+    platform = platform || null;
+    selectAllScope = { platform: platform };
+
+    const total = scopeCounts(platform).total;
+    const label = platform ? `${platform} post` : 'post';
+    document.getElementById('select-all-scope-text').textContent =
+        `All ${total} ${label}${total !== 1 ? 's' : ''} selected — bulk actions apply to every page.`;
+
+    const btn = document.getElementById('select-all-scope-btn');
+    btn.textContent = 'Clear selection';
+    btn.onclick = clearScopedSelection;
+
+    updateSelectedCount();
+}
+
+function clearScopedSelection() {
+    document.querySelectorAll('.post-select-checkbox').forEach(cb => cb.checked = false);
+    clearSelectAllScope();
+    updateSelectedCount();
+}
+
+// Any manual checkbox toggle drops back to "just the checked posts".
+function onPostCheckboxChange() {
+    clearSelectAllScope();
+    updateSelectedCount();
+}
+
+// Full id set for an across-pages selection (only fetched when an action runs).
+async function fetchScopedPosts() {
+    const qs = selectAllScope && selectAllScope.platform
+        ? '?platform=' + encodeURIComponent(selectAllScope.platform)
+        : '';
+    const res = await fetch('/compose/posts/ids' + qs);
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+        throw new Error(data.error || 'Failed to load posts');
+    }
+    return data.posts;
+}
+
 function toggleSelectMode() {
+    clearSelectAllScope();
     selectModeActive = !selectModeActive;
     const checkboxes = document.querySelectorAll('.post-select-checkbox');
     const toggleBtn = document.getElementById('toggle-select-mode');
@@ -3489,10 +3607,15 @@ function selectAllPosts() {
         return postItem && postItem.style.display !== 'none' && !postItem.classList.contains('d-none');
     });
     const allChecked = visibleCheckboxes.length > 0 && visibleCheckboxes.every(cb => cb.checked);
-    visibleCheckboxes.forEach(cb => cb.checked = !allChecked);
+    const selecting = !allChecked;
+    visibleCheckboxes.forEach(cb => cb.checked = selecting);
+    clearSelectAllScope();
     updateSelectedCount();
     const btn = document.getElementById('select-all-btn');
-    btn.innerHTML = allChecked ? '☑️ Select All' : '☐ Deselect All';
+    btn.innerHTML = selecting ? '☐ Deselect All' : '☑️ Select All';
+    if (selecting) {
+        offerSelectAllScope(visibleCheckboxes.length, currentPlatformFilter());
+    }
 }
 
 function selectPlatformPosts(platform) {
@@ -3504,21 +3627,29 @@ function selectPlatformPosts(platform) {
         return postItem && postItem.style.display !== 'none' && !postItem.classList.contains('d-none');
     });
     const allChecked = visibleCheckboxes.length > 0 && visibleCheckboxes.every(cb => cb.checked);
-    visibleCheckboxes.forEach(cb => cb.checked = !allChecked);
+    const selecting = !allChecked;
+    visibleCheckboxes.forEach(cb => cb.checked = selecting);
+    clearSelectAllScope();
     updateSelectedCount();
+    // Offer to widen to every page for this one platform when more exist.
+    if (selecting) {
+        offerSelectAllScope(visibleCheckboxes.length, platform);
+    }
 }
 
 function updateSelectedCount() {
+    const scoped = !!selectAllScope;
     const selected = document.querySelectorAll('.post-select-checkbox:checked');
-    const count = selected.length;
+    const scopeInfo = scoped ? scopeCounts(selectAllScope.platform) : null;
+    const count = scoped ? scopeInfo.total : selected.length;
     document.getElementById('selected-count').textContent = count;
-    
+
     // Count only visible checkboxes for "all selected" state
     const visibleCheckboxes = Array.from(document.querySelectorAll('.post-select-checkbox')).filter(cb => {
         const postItem = cb.closest('.post-item');
         return postItem && postItem.style.display !== 'none' && !postItem.classList.contains('d-none');
     });
-    
+
     const deleteBtn = document.getElementById('delete-selected-btn');
     const queueBtn = document.getElementById('queue-selected-btn');
     const unqueueBtn = document.getElementById('unqueue-selected-btn');
@@ -3527,28 +3658,39 @@ function updateSelectedCount() {
     const findStockBtn = document.getElementById('find-stock-images-btn');
     const markUsedBtn = document.getElementById('mark-used-selected-btn');
     const postNowBtn = document.getElementById('post-now-selected-btn');
-    
+
     if (count > 0 && selectModeActive) {
         deleteBtn.classList.remove('d-none');
-        removeImageBtn.classList.remove('d-none');
-        addImageBtn.classList.remove('d-none');
-        findStockBtn.classList.remove('d-none');
         markUsedBtn.classList.remove('d-none');
-        
-        // Update counts for image buttons
-        document.getElementById('remove-image-count').textContent = count;
-        document.getElementById('add-image-count').textContent = count;
-        document.getElementById('find-stock-count').textContent = count;
-        
-        // Determine if mark-used should be "mark used" or "mark unused"
-        let usedCount = 0;
-        selected.forEach(cb => {
-            const postItem = cb.closest('.post-item');
-            if (postItem && postItem.querySelector('.used-badge')) {
-                usedCount++;
-            }
-        });
-        const allUsed = usedCount === count;
+
+        // Image ops don't support the across-pages selection — they only act on
+        // the posts actually rendered, so hide them while a scope is active.
+        if (scoped) {
+            removeImageBtn.classList.add('d-none');
+            addImageBtn.classList.add('d-none');
+            findStockBtn.classList.add('d-none');
+        } else {
+            removeImageBtn.classList.remove('d-none');
+            addImageBtn.classList.remove('d-none');
+            findStockBtn.classList.remove('d-none');
+            document.getElementById('remove-image-count').textContent = count;
+            document.getElementById('add-image-count').textContent = count;
+            document.getElementById('find-stock-count').textContent = count;
+        }
+
+        // Determine if mark-used should be "mark used" or "mark unused". Across
+        // pages we can't know the used/unused split, so default to "Mark as Used".
+        let allUsed = false;
+        if (!scoped) {
+            let usedCount = 0;
+            selected.forEach(cb => {
+                const postItem = cb.closest('.post-item');
+                if (postItem && postItem.querySelector('.used-badge')) {
+                    usedCount++;
+                }
+            });
+            allUsed = usedCount === count;
+        }
         document.getElementById('mark-used-count').textContent = count;
         if (allUsed) {
             markUsedBtn.innerHTML = '○ Mark as Unused (<span id="mark-used-count">' + count + '</span>)';
@@ -3561,26 +3703,34 @@ function updateSelectedCount() {
             markUsedBtn.classList.add('btn-outline-success');
             markUsedBtn.dataset.action = 'use';
         }
-        
+
         let queueableCount = 0;
         let queuedCount = 0;
         let postableCount = 0;
-        selected.forEach(cb => {
-            const card = cb.closest('.social-copy-card');
-            const platform = card ? card.dataset.platform : '';
-            if (platform === 'linkedin' || platform === 'threads') {
-                postableCount++;
-                const postItem = cb.closest('.post-item');
-                const queueToggleBtn = postItem.querySelector('.queue-toggle-btn');
-                const isQueued = queueToggleBtn && queueToggleBtn.dataset.queued === 'true';
-                if (isQueued) {
-                    queuedCount++;
-                } else {
-                    queueableCount++;
+        if (scoped) {
+            // Can't tell the already-queued split across pages; the server-side
+            // queue-all skips posts that are already scheduled.
+            queueableCount = scopeInfo.queueable;
+            queuedCount = 0;
+            postableCount = scopeInfo.postable;
+        } else {
+            selected.forEach(cb => {
+                const card = cb.closest('.social-copy-card');
+                const platform = card ? card.dataset.platform : '';
+                if (platform === 'linkedin' || platform === 'threads') {
+                    postableCount++;
+                    const postItem = cb.closest('.post-item');
+                    const queueToggleBtn = postItem.querySelector('.queue-toggle-btn');
+                    const isQueued = queueToggleBtn && queueToggleBtn.dataset.queued === 'true';
+                    if (isQueued) {
+                        queuedCount++;
+                    } else {
+                        queueableCount++;
+                    }
                 }
-            }
-        });
-        
+            });
+        }
+
         document.getElementById('queue-selected-count').textContent = queueableCount;
         document.getElementById('unqueue-selected-count').textContent = queuedCount;
         document.getElementById('post-now-count').textContent = postableCount;
@@ -3622,19 +3772,63 @@ function updateSelectedCount() {
     }
 }
 
-function deleteSelectedPosts() {
+async function deleteSelectedPosts() {
+    // Across-pages selection: delete every matching post, then reload.
+    if (selectAllScope) {
+        let posts;
+        try {
+            posts = await fetchScopedPosts();
+        } catch (e) {
+            alert('Error: ' + e.message);
+            return;
+        }
+        const ids = posts.map(p => p.id);
+        if (ids.length === 0) {
+            alert('No posts to delete');
+            return;
+        }
+        if (!confirm(`Delete all ${ids.length} post${ids.length !== 1 ? 's' : ''} across every page? This cannot be undone.`)) {
+            return;
+        }
+        const btn = document.getElementById('delete-selected-btn');
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '⏳ Deleting...';
+        btn.disabled = true;
+        try {
+            const res = await fetch('/compose/posts/delete-bulk', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ post_ids: ids })
+            });
+            const data = await res.json();
+            if (res.ok && data.success) {
+                showToast(`Deleted ${data.deleted_count} posts`, 'success');
+                setTimeout(() => location.reload(), 600);
+            } else {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+                alert('Error: ' + (data.error || 'Failed to delete posts'));
+            }
+        } catch (e) {
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+            alert('Error: ' + e.message);
+        }
+        return;
+    }
+
     const selected = document.querySelectorAll('.post-select-checkbox:checked');
     const postIds = Array.from(selected).map(cb => parseInt(cb.dataset.postId));
-    
+
     if (postIds.length === 0) {
         alert('No posts selected');
         return;
     }
-    
+
     if (!confirm(`Delete ${postIds.length} selected post${postIds.length !== 1 ? 's' : ''}? This cannot be undone.`)) {
         return;
     }
-    
+
     fetch('/compose/posts/delete-bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -3687,7 +3881,54 @@ function deleteSelectedPosts() {
     });
 }
 
-function markUsedSelectedPosts() {
+async function markUsedSelectedPosts() {
+    const btn = document.getElementById('mark-used-selected-btn');
+    const markAsUsed = btn.dataset.action !== 'unuse';
+
+    // Across-pages selection: flip every matching post, then reload.
+    if (selectAllScope) {
+        let posts;
+        try {
+            posts = await fetchScopedPosts();
+        } catch (e) {
+            alert('Error: ' + e.message);
+            return;
+        }
+        const ids = posts.map(p => p.id);
+        if (ids.length === 0) {
+            alert('No posts to update');
+            return;
+        }
+        const action = markAsUsed ? 'used' : 'unused';
+        if (!confirm(`Mark all ${ids.length} post${ids.length !== 1 ? 's' : ''} across every page as ${action}?`)) {
+            return;
+        }
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '⏳ Marking...';
+        btn.disabled = true;
+        try {
+            const res = await fetch('/compose/posts/bulk-toggle-used', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ post_ids: ids, used: markAsUsed })
+            });
+            const data = await res.json();
+            if (res.ok && data.success) {
+                showToast(`Marked ${data.updated_count} post${data.updated_count !== 1 ? 's' : ''} as ${action}`, 'success');
+                setTimeout(() => location.reload(), 600);
+            } else {
+                btn.innerHTML = originalText;
+                btn.disabled = false;
+                alert('Error: ' + (data.error || 'Failed to mark posts'));
+            }
+        } catch (e) {
+            btn.innerHTML = originalText;
+            btn.disabled = false;
+            alert('Error: ' + e.message);
+        }
+        return;
+    }
+
     const selected = document.querySelectorAll('.post-select-checkbox:checked');
     const postIds = Array.from(selected).map(cb => parseInt(cb.dataset.postId));
 
@@ -3696,8 +3937,6 @@ function markUsedSelectedPosts() {
         return;
     }
 
-    const btn = document.getElementById('mark-used-selected-btn');
-    const markAsUsed = btn.dataset.action !== 'unuse';
     const originalText = btn.innerHTML;
     btn.innerHTML = '⏳ Marking...';
     btn.disabled = true;
@@ -3762,20 +4001,42 @@ function markUsedSelectedPosts() {
 }
 
 async function postNowSelectedPosts() {
-    const selected = document.querySelectorAll('.post-select-checkbox:checked');
+    const postable = ['linkedin', 'threads', 'facebook', 'twitter', 'instagram'];
+    const scoped = !!selectAllScope;
 
     const postsToPublish = [];
-    selected.forEach(cb => {
-        const card = cb.closest('.social-copy-card');
-        const platform = card ? card.dataset.platform : '';
-        if (platform === 'linkedin' || platform === 'threads' || platform === 'facebook' || platform === 'twitter' || platform === 'instagram') {
-            postsToPublish.push({
-                postId: parseInt(cb.dataset.postId),
-                platform: platform,
-                postItem: cb.closest('.post-item'),
-            });
+    if (scoped) {
+        // Across-pages: fetch every matching id/platform (no DOM node for most).
+        let posts;
+        try {
+            posts = await fetchScopedPosts();
+        } catch (e) {
+            alert('Error: ' + e.message);
+            return;
         }
-    });
+        posts.forEach(p => {
+            if (postable.includes(p.platform)) {
+                postsToPublish.push({
+                    postId: p.id,
+                    platform: p.platform,
+                    postItem: document.querySelector(`.post-item[data-post-id="${p.id}"]`),
+                });
+            }
+        });
+    } else {
+        const selected = document.querySelectorAll('.post-select-checkbox:checked');
+        selected.forEach(cb => {
+            const card = cb.closest('.social-copy-card');
+            const platform = card ? card.dataset.platform : '';
+            if (postable.includes(platform)) {
+                postsToPublish.push({
+                    postId: parseInt(cb.dataset.postId),
+                    platform: platform,
+                    postItem: cb.closest('.post-item'),
+                });
+            }
+        });
+    }
 
     if (postsToPublish.length === 0) {
         alert('No LinkedIn, Threads, Facebook, Twitter, or Instagram posts selected');
@@ -3791,7 +4052,13 @@ async function postNowSelectedPosts() {
         return;
     }
 
-    if (!confirm(`Post ${postsToPublish.length} selected post${postsToPublish.length !== 1 ? 's' : ''} now? This will publish them immediately to their platforms.`)) {
+    if (scoped) {
+        // Publishing thousands of posts to real accounts — require a strong,
+        // count-based confirmation that cannot be undone.
+        if (!confirm(`⚠️ Immediately publish ${postsToPublish.length} post${postsToPublish.length !== 1 ? 's' : ''} to your connected accounts?\n\nThis publishes across every page and cannot be undone.`)) {
+            return;
+        }
+    } else if (!confirm(`Post ${postsToPublish.length} selected post${postsToPublish.length !== 1 ? 's' : ''} now? This will publish them immediately to their platforms.`)) {
         return;
     }
 
@@ -3843,6 +4110,7 @@ async function postNowSelectedPosts() {
     btn.innerHTML = originalText;
     btn.disabled = false;
 
+    const wasScoped = scoped;
     toggleSelectMode();
 
     if (errorCount === 0) {
@@ -3853,11 +4121,67 @@ async function postNowSelectedPosts() {
             console.error('Post Now errors:', errors);
         }
     }
+
+    // Most scoped posts aren't in the DOM, so reload to reflect their new state.
+    if (wasScoped) {
+        setTimeout(() => location.reload(), 800);
+    }
 }
 
 async function queueSelectedPosts() {
+    // Across-pages: reuse the server-side "queue all unscheduled" per platform in
+    // scope (≤5 calls) instead of a per-post loop over thousands of posts.
+    if (selectAllScope) {
+        const platforms = selectAllScope.platform
+            ? [selectAllScope.platform]
+            : SCOPE_QUEUEABLE_PLATFORMS.filter(p => (PLATFORM_TOTALS[p] || 0) > 0);
+        const queueablePlatforms = platforms.filter(p => SCOPE_QUEUEABLE_PLATFORMS.includes(p));
+
+        if (queueablePlatforms.length === 0) {
+            alert('No queueable posts selected (only LinkedIn and Threads posts can be queued)');
+            return;
+        }
+        if ((queueablePlatforms.includes('linkedin') && !linkedinConnected) ||
+            (queueablePlatforms.includes('threads') && !threadsConnected)) {
+            alert('Please connect the required platforms first');
+            return;
+        }
+
+        const queueBtn = document.getElementById('queue-selected-btn');
+        const originalText = queueBtn.innerHTML;
+        queueBtn.innerHTML = '⏳ Adding...';
+        queueBtn.disabled = true;
+
+        let queuedTotal = 0, skippedTotal = 0, noSlots = false;
+        for (const platform of queueablePlatforms) {
+            try {
+                const fd = new FormData();
+                fd.append('platform', platform);
+                const res = await fetch('/compose/posts/queue-all-unscheduled', { method: 'POST', body: fd });
+                const data = await res.json();
+                if (res.ok && data.success) {
+                    queuedTotal += data.queued || 0;
+                    skippedTotal += data.skipped || 0;
+                    if (data.no_slots) noSlots = true;
+                }
+            } catch (e) {
+                // Skip this platform; keep going with the rest.
+            }
+        }
+
+        queueBtn.innerHTML = originalText;
+        queueBtn.disabled = false;
+
+        let msg = `Queued ${queuedTotal} post${queuedTotal !== 1 ? 's' : ''}`;
+        if (skippedTotal) msg += `, skipped ${skippedTotal}`;
+        if (noSlots) msg += ' (ran out of time slots — add more)';
+        showToast(msg, noSlots ? 'warning' : 'success');
+        setTimeout(() => location.reload(), 1200);
+        return;
+    }
+
     const selected = document.querySelectorAll('.post-select-checkbox:checked');
-    
+
     const postsToQueue = [];
     selected.forEach(cb => {
         const card = cb.closest('.social-copy-card');
@@ -3870,12 +4194,12 @@ async function queueSelectedPosts() {
             });
         }
     });
-    
+
     if (postsToQueue.length === 0) {
         alert('No queueable posts selected (only LinkedIn and Threads posts can be queued)');
         return;
     }
-    
+
     if ((postsToQueue.some(p => p.platform === 'linkedin') && !linkedinConnected) ||
         (postsToQueue.some(p => p.platform === 'threads') && !threadsConnected) ||
         (postsToQueue.some(p => p.platform === 'twitter') && !twitterConnected)) {
@@ -4594,6 +4918,9 @@ function showToast(message, type = 'info') {
 
 // Post filtering functions
 function applyPostFilters() {
+    // Filters and "Load more" change which posts are loaded/visible, so drop any
+    // across-pages selection to avoid a stale "all N selected" banner.
+    clearSelectAllScope();
     const usedFilter = document.getElementById('filter-used').value;
     const queuedFilter = document.getElementById('filter-queued').value;
     const platformFilter = document.getElementById('filter-platform').value;
@@ -4719,49 +5046,48 @@ let searchDebounceTimer = null;
 let excludedMatches = {}; // { "postId-matchIndex": true } for excluded matches
 let openSearchEdits = {}; // { postId: draftText } for inline editors currently open
 
-function openSearchReplaceModal() {
-    // Gather post data from visible (non-filtered) posts only
+async function openSearchReplaceModal() {
+    // Load EVERY saved post's text from the server (not just the page rendered in
+    // the DOM), optionally scoped to the active platform filter, so Find & Replace
+    // covers all posts.
     searchReplacePostData = [];
-    let totalPosts = 0;
-    
-    document.querySelectorAll('.post-item[data-post-id]').forEach(post => {
-        totalPosts++;
-        
-        // Skip posts that are hidden by filters
-        if (post.style.display === 'none') return;
-        
-        // Also skip if parent card is hidden (platform filter)
-        const card = post.closest('.social-copy-card');
-        if (card && card.style.display === 'none') return;
-        
-        const postId = post.dataset.postId;
-        const contentEl = post.querySelector('.social-copy-text');
-        const content = contentEl ? contentEl.textContent : '';
-        const platform = card ? card.dataset.platform : 'unknown';
-        const postIndex = post.dataset.postIndex || '?';
-        
+    const platform = currentPlatformFilter();
+    const qs = platform ? '?platform=' + encodeURIComponent(platform) : '';
+
+    let posts;
+    try {
+        const res = await fetch('/compose/posts/content' + qs);
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+            throw new Error(data.error || 'Failed to load posts');
+        }
+        posts = data.posts;
+    } catch (e) {
+        alert('Error loading posts: ' + e.message);
+        return;
+    }
+
+    posts.forEach(post => {
+        const content = post.content || '';
         if (content.trim()) {
             searchReplacePostData.push({
-                id: postId,
+                id: String(post.id),
                 content: content,
-                platform: platform,
-                index: postIndex
+                platform: post.platform || 'unknown',
+                index: post.index != null ? String(post.index) : '?'
             });
         }
     });
-    
-    // Check if filters are active
-    const filtersActive = searchReplacePostData.length < totalPosts;
+
+    // Tell the user the search now spans every saved post (all platforms, or the
+    // filtered platform). Other page filters are intentionally not applied here.
     const filterNotice = document.getElementById('search-filter-notice');
     if (filterNotice) {
-        if (filtersActive) {
-            filterNotice.textContent = `Searching ${searchReplacePostData.length} of ${totalPosts} posts (filters active)`;
-            filterNotice.classList.remove('d-none');
-        } else {
-            filterNotice.classList.add('d-none');
-        }
+        const scopeLabel = platform ? `all ${searchReplacePostData.length} ${platform} posts` : `all ${searchReplacePostData.length} posts`;
+        filterNotice.textContent = `Searching ${scopeLabel} across every page.`;
+        filterNotice.classList.remove('d-none');
     }
-    
+
     // Reset the form
     document.getElementById('search-find-input').value = '';
     document.getElementById('search-replace-input').value = '';
