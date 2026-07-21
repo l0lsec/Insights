@@ -5932,6 +5932,8 @@ def _filtered_standalone_posts(args):
     only the posts currently rendered. ``index_by_id`` is the 1-based
     per-platform position in the *unfiltered* list, matching the page's
     "Post N" label.
+
+    ``args`` is a request.args multidict or a plain dict of the same keys.
     """
     platform = _valid_post_platform(args.get('platform'))
     filters = {key: (args.get(key) or '').strip() for key in _POST_FILTER_KEYS}
@@ -5955,38 +5957,43 @@ def _filtered_standalone_posts(args):
     return matched, index_by_id
 
 
-@app.route('/compose/posts/content')
-def compose_posts_content():
-    """Return id/platform/content for saved posts matching the Compose filters.
+def _selected_standalone_posts(payload):
+    """Resolve a Compose bulk-action selection to the rows it should act on.
 
-    Text only — no images, schedules or brief metadata — so Find & Replace can
-    search across ALL matching posts, not just the page currently rendered.
+    Two payload shapes:
+      ``{"post_ids": [...]}``  the checkboxes ticked on the page
+      ``{"filters": {...}}``   "select all across every page" — the server
+                               re-derives the matching set from the filter bar,
+                               so the browser never has to ship (or go stale on)
+                               thousands of ids.
+
+    Returns ``(rows, error)`` where ``error`` is a ready-to-return response.
     """
-    rows, index_by_id = _filtered_standalone_posts(request.args)
-    posts = [
-        {
-            'id': row['id'],
-            'platform': row['platform'],
-            'content': row['content'] or '',
-            'index': index_by_id.get(row['id']),
-        }
-        for row in rows
-    ]
+    filters = payload.get('filters')
+    if filters is not None:
+        if not isinstance(filters, dict):
+            return None, (jsonify({"error": "filters must be an object"}), 400)
+        rows, _ = _filtered_standalone_posts(filters)
+        return rows, None
 
-    return jsonify({
-        "success": True,
-        "posts": posts,
-        "count": len(posts),
-    })
+    raw_ids = payload.get('post_ids') or []
+    if not raw_ids:
+        return None, (jsonify({"error": "No posts selected"}), 400)
+    try:
+        wanted = {int(pid) for pid in raw_ids}
+    except (TypeError, ValueError):
+        return None, (jsonify({"error": "Invalid post IDs"}), 400)
+    return [r for r in list_standalone_posts() if r['id'] in wanted], None
 
 
 @app.route('/compose/posts/ids')
 def compose_posts_ids():
     """Return the id + platform of saved posts matching the Compose filters.
 
-    Powers the "select all across every page" bulk actions, which need the full
-    matching id set rather than the checkboxes currently in the DOM. Pass
-    ``count_only=1`` to get just the totals (used to size the offer banner).
+    Bulk actions resolve their own target set server-side from the filters, so
+    this is only for the paths that genuinely need per-post ids in the browser
+    (Post Now, which publishes one post per request). Pass ``count_only=1`` to
+    get just the totals (used to size the "select all" offer banner).
     """
     rows, _ = _filtered_standalone_posts(request.args)
 
@@ -6004,30 +6011,176 @@ def compose_posts_ids():
     return jsonify(payload)
 
 
-@app.route('/compose/posts/queue-all-unscheduled', methods=['POST'])
-def compose_queue_all_unscheduled():
-    """Queue every unscheduled, unused saved post for a platform (server-side).
+# How many matching posts the Find & Replace modal renders at once. Replace All
+# still applies to every match — the cap only bounds the preview list.
+POST_SEARCH_RESULT_LIMIT = 200
 
-    Replaces the old DOM-scraping "Queue All" so it works across all posts, not
-    just the ones currently loaded on the page.
+
+def _search_flag(value):
+    """Read a checkbox-style query/JSON parameter."""
+    return str(value if value is not None else '').lower() in ('1', 'true', 'yes', 'on')
+
+
+def _search_exclude_words(raw):
+    """Parse the modal's comma-separated 'exclude posts containing' list."""
+    if isinstance(raw, list):
+        parts = raw
+    else:
+        parts = str(raw or '').split(',')
+    return [w.strip().lower() for w in parts if w and w.strip()]
+
+
+def _post_search_pattern(find_text, case_sensitive, whole_word):
+    """The Find & Replace pattern — identical to the one the replace applies."""
+    flags = 0 if case_sensitive else re.IGNORECASE
+    body = re.escape(find_text)
+    if whole_word:
+        body = r'\b' + body + r'\b'
+    return re.compile(body, flags)
+
+
+@app.route('/compose/posts/search')
+def compose_posts_search():
+    """Run the Find & Replace search over every saved post, server-side.
+
+    The modal used to download all post text and match it in JavaScript. Doing
+    it here keeps the response to the posts that actually match, and makes the
+    preview use the exact same regex that /compose/posts/replace will apply —
+    previously JS did the finding and Python did the replacing, so the two could
+    disagree on what matched.
     """
+    find_text = request.args.get('find') or ''
+    if not find_text.strip():
+        return jsonify({"error": "find is required"}), 400
+
+    case_sensitive = _search_flag(request.args.get('case_sensitive'))
+    whole_word = _search_flag(request.args.get('whole_word'))
+    exclude_words = _search_exclude_words(request.args.get('exclude'))
+    limit = request.args.get('limit', POST_SEARCH_RESULT_LIMIT, type=int)
+    if limit is None or limit < 0:
+        limit = POST_SEARCH_RESULT_LIMIT
+
+    rows, index_by_id = _filtered_standalone_posts(request.args)
+    pattern = _post_search_pattern(find_text, case_sensitive, whole_word)
+
+    posts = []
+    matched_posts = 0
+    total_matches = 0
+    excluded_posts = 0
+    for row in rows:
+        content = row['content'] or ''
+        if not content.strip():
+            continue
+        if exclude_words:
+            lowered = content.lower()
+            if any(word in lowered for word in exclude_words):
+                excluded_posts += 1
+                continue
+
+        count = len(pattern.findall(content))
+        if not count:
+            continue
+
+        matched_posts += 1
+        total_matches += count
+        if len(posts) < limit:
+            posts.append({
+                'id': row['id'],
+                'platform': row['platform'],
+                'content': content,
+                'index': index_by_id.get(row['id']),
+                'match_count': count,
+            })
+
+    return jsonify({
+        "success": True,
+        "posts": posts,
+        "matched_posts": matched_posts,
+        "total_matches": total_matches,
+        "excluded_posts": excluded_posts,
+        "searched": len(rows),
+        "truncated": matched_posts > len(posts),
+    })
+
+
+@app.route('/compose/posts/replace', methods=['POST'])
+def compose_posts_replace():
+    """Apply Find & Replace to every saved post matching the search criteria.
+
+    Takes the same criteria as /compose/posts/search rather than a list of ids:
+    the preview list is capped, so the ids the browser knows about are not
+    necessarily the whole match set. ``deselected_ids`` carries the posts the
+    user unticked, and ``excluded_matches`` the individual matches they clicked
+    to skip (both only exist for posts that were rendered).
+    """
+    from database import bulk_replace_post_content
+
     payload = request.get_json(silent=True) or {}
-    platform = (request.form.get('platform') or payload.get('platform') or '').strip()
-    if platform not in ['linkedin', 'threads', 'facebook', 'twitter', 'instagram']:
-        return jsonify({"error": f"Platform {platform} does not support scheduling"}), 400
+    find_text = payload.get('find') or ''
+    if not find_text.strip():
+        return jsonify({"error": "Find text is required"}), 400
+    replace_text = payload.get('replace') or ''
 
-    rows = list_standalone_posts(platform=platform)
+    filters = payload.get('filters') or {}
+    if not isinstance(filters, dict):
+        return jsonify({"error": "filters must be an object"}), 400
 
-    # Optional id restriction: a filtered "select all across every page" queues
-    # only the posts that actually match the filters, not the whole platform.
-    raw_ids = request.form.getlist('post_ids') or payload.get('post_ids')
-    if raw_ids:
-        try:
-            allowed = {int(pid) for pid in raw_ids}
-        except (TypeError, ValueError):
-            return jsonify({"error": "Invalid post IDs"}), 400
-        rows = [r for r in rows if r['id'] in allowed]
+    case_sensitive = _search_flag(payload.get('case_sensitive'))
+    whole_word = _search_flag(payload.get('whole_word'))
+    exclude_words = _search_exclude_words(payload.get('exclude'))
+    excluded_matches = payload.get('excluded_matches') or {}
 
+    try:
+        deselected = {int(pid) for pid in (payload.get('deselected_ids') or [])}
+    except (TypeError, ValueError):
+        return jsonify({"error": "Invalid post IDs"}), 400
+
+    rows, _ = _filtered_standalone_posts(filters)
+    pattern = _post_search_pattern(find_text, case_sensitive, whole_word)
+
+    target_ids = []
+    for row in rows:
+        if row['id'] in deselected:
+            continue
+        content = row['content'] or ''
+        if exclude_words:
+            lowered = content.lower()
+            if any(word in lowered for word in exclude_words):
+                continue
+        if pattern.search(content):
+            target_ids.append(row['id'])
+
+    if not target_ids:
+        return jsonify({"success": True, "affected_count": 0})
+
+    try:
+        affected_count = bulk_replace_post_content(
+            find_text=find_text,
+            replace_text=replace_text,
+            post_type='standalone',
+            case_sensitive=case_sensitive,
+            whole_word=whole_word,
+            post_ids=target_ids,
+            excluded_matches=excluded_matches,
+        )
+    except Exception as exc:
+        app.logger.exception("Failed to replace in saved posts")
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify({
+        "success": True,
+        "affected_count": affected_count,
+    })
+
+
+SCHEDULABLE_PLATFORMS = ['linkedin', 'threads', 'facebook', 'twitter', 'instagram']
+
+
+def _queue_unscheduled_rows(platform, rows):
+    """Queue every unused, not-yet-scheduled row into the platform's free slots.
+
+    Returns ``(queued, skipped, no_slots)``.
+    """
     all_ids = [r['id'] for r in rows]
     already_scheduled = get_pending_schedules_for_standalone_posts(all_ids) if all_ids else {}
 
@@ -6074,6 +6227,53 @@ def compose_queue_all_unscheduled():
             status='pending',
         )
         queued += 1
+
+    return queued, skipped, no_slots
+
+
+@app.route('/compose/posts/queue-all-unscheduled', methods=['POST'])
+def compose_queue_all_unscheduled():
+    """Queue unscheduled, unused saved posts (server-side).
+
+    Two modes:
+      ``platform=<name>``   the platform card's "Queue All" — every unscheduled
+                            post on that platform.
+      ``{"filters": {...}, "platforms": [...]}``  a "select all across every
+                            page" selection — the server re-derives the matching
+                            posts and queues each platform in this one request.
+    """
+    payload = request.get_json(silent=True) or {}
+    filters = payload.get('filters')
+
+    if filters is not None:
+        rows, error = _selected_standalone_posts({'filters': filters})
+        if error:
+            return error
+        # The caller says which platforms its Queue button covers, so the server
+        # never queues a platform the toolbar didn't count.
+        platforms = payload.get('platforms') or SCHEDULABLE_PLATFORMS
+        unsupported = [p for p in platforms if p not in SCHEDULABLE_PLATFORMS]
+        if unsupported:
+            return jsonify({"error": f"Platform {unsupported[0]} does not support scheduling"}), 400
+        rows_by_platform = {}
+        for row in rows:
+            if row['platform'] in platforms:
+                rows_by_platform.setdefault(row['platform'], []).append(row)
+    else:
+        platform = (request.form.get('platform') or payload.get('platform') or '').strip()
+        if platform not in SCHEDULABLE_PLATFORMS:
+            return jsonify({"error": f"Platform {platform} does not support scheduling"}), 400
+        rows_by_platform = {platform: list_standalone_posts(platform=platform)}
+
+    queued = 0
+    skipped = 0
+    no_slots = False
+    for platform, platform_rows in rows_by_platform.items():
+        # Running out of slots on one platform doesn't stop the others.
+        p_queued, p_skipped, p_no_slots = _queue_unscheduled_rows(platform, platform_rows)
+        queued += p_queued
+        skipped += p_skipped
+        no_slots = no_slots or p_no_slots
 
     return jsonify({
         "success": True,
@@ -7664,17 +7864,19 @@ def compose_delete_post(post_id: int):
 
 @app.route('/compose/posts/delete-bulk', methods=['POST'])
 def compose_delete_bulk():
-    """Delete multiple standalone posts."""
-    data = request.get_json()
-    post_ids = data.get('post_ids', [])
-    
-    if not post_ids:
-        return jsonify({"error": "No posts selected"}), 400
-    
-    # Convert to integers
-    post_ids = [int(pid) for pid in post_ids]
-    deleted = delete_standalone_posts_bulk(post_ids)
-    
+    """Delete the selected standalone posts.
+
+    Takes either ``post_ids`` (the ticked checkboxes) or ``filters`` (a "select
+    all across every page" selection, resolved server-side).
+    """
+    data = request.get_json(silent=True) or {}
+    rows, error = _selected_standalone_posts(data)
+    if error:
+        return error
+
+    post_ids = [row['id'] for row in rows]
+    deleted = delete_standalone_posts_bulk(post_ids) if post_ids else 0
+
     return jsonify({
         "success": True,
         "deleted_count": deleted,
@@ -7746,21 +7948,22 @@ def compose_toggle_used(post_id: int):
 
 @app.route('/compose/posts/bulk-toggle-used', methods=['POST'])
 def compose_bulk_toggle_used():
-    """Bulk mark/unmark standalone posts as used."""
-    data = request.get_json()
-    post_ids = data.get('post_ids', [])
+    """Bulk mark/unmark standalone posts as used.
+
+    Takes either ``post_ids`` (the ticked checkboxes) or ``filters`` (a "select
+    all across every page" selection, resolved server-side).
+    """
+    data = request.get_json(silent=True) or {}
     used = data.get('used', True)
 
-    if not post_ids:
-        return jsonify({"error": "No posts selected"}), 400
+    rows, error = _selected_standalone_posts(data)
+    if error:
+        return error
 
-    post_ids = [int(pid) for pid in post_ids]
     updated = 0
-    for post_id in post_ids:
-        post = get_standalone_post(post_id)
-        if post:
-            mark_standalone_post_used(post_id, used)
-            updated += 1
+    for row in rows:
+        mark_standalone_post_used(row['id'], used)
+        updated += 1
 
     return jsonify({
         "success": True,

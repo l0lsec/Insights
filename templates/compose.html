@@ -1252,6 +1252,9 @@
                     </div>
                 </div>
                 <hr>
+                <div class="alert alert-secondary py-2 px-3 d-none" id="search-truncated-notice" role="status">
+                    <small></small>
+                </div>
                 <div class="d-flex justify-content-between align-items-center mb-2 d-none" id="search-select-controls">
                     <div class="form-check">
                         <input class="form-check-input" type="checkbox" id="search-select-all" checked onchange="toggleSearchSelectAll(this)">
@@ -3586,7 +3589,9 @@ function onPostCheckboxChange() {
     updateSelectedCount();
 }
 
-// Full id set for an across-pages selection (only fetched when an action runs).
+// Bulk actions hand the server the filter set and let it resolve the matching
+// posts itself. Post Now is the exception — it publishes one post per request,
+// so it genuinely needs the ids in the browser.
 async function fetchScopedPosts() {
     const res = await fetch('/compose/posts/ids' + postFilterQuery(selectAllScope.filters));
     const data = await res.json();
@@ -3813,21 +3818,15 @@ function updateSelectedCount() {
 }
 
 async function deleteSelectedPosts() {
-    // Across-pages selection: delete every matching post, then reload.
+    // Across-pages selection: hand the server the filters and let it delete
+    // every matching post in one request, then reload.
     if (selectAllScope) {
-        let posts;
-        try {
-            posts = await fetchScopedPosts();
-        } catch (e) {
-            alert('Error: ' + e.message);
-            return;
-        }
-        const ids = posts.map(p => p.id);
-        if (ids.length === 0) {
+        const total = selectAllScope.total;
+        if (total === 0) {
             alert('No posts to delete');
             return;
         }
-        if (!confirm(`Delete all ${ids.length} post${ids.length !== 1 ? 's' : ''} across every page? This cannot be undone.`)) {
+        if (!confirm(`Delete all ${total} post${total !== 1 ? 's' : ''} across every page? This cannot be undone.`)) {
             return;
         }
         const btn = document.getElementById('delete-selected-btn');
@@ -3838,7 +3837,7 @@ async function deleteSelectedPosts() {
             const res = await fetch('/compose/posts/delete-bulk', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ post_ids: ids })
+                body: JSON.stringify({ filters: selectAllScope.filters })
             });
             const data = await res.json();
             if (res.ok && data.success) {
@@ -3925,22 +3924,16 @@ async function markUsedSelectedPosts() {
     const btn = document.getElementById('mark-used-selected-btn');
     const markAsUsed = btn.dataset.action !== 'unuse';
 
-    // Across-pages selection: flip every matching post, then reload.
+    // Across-pages selection: the server flips every matching post in one
+    // request, then we reload.
     if (selectAllScope) {
-        let posts;
-        try {
-            posts = await fetchScopedPosts();
-        } catch (e) {
-            alert('Error: ' + e.message);
-            return;
-        }
-        const ids = posts.map(p => p.id);
-        if (ids.length === 0) {
+        const total = selectAllScope.total;
+        if (total === 0) {
             alert('No posts to update');
             return;
         }
         const action = markAsUsed ? 'used' : 'unused';
-        if (!confirm(`Mark all ${ids.length} post${ids.length !== 1 ? 's' : ''} across every page as ${action}?`)) {
+        if (!confirm(`Mark all ${total} post${total !== 1 ? 's' : ''} across every page as ${action}?`)) {
             return;
         }
         const originalText = btn.innerHTML;
@@ -3950,7 +3943,7 @@ async function markUsedSelectedPosts() {
             const res = await fetch('/compose/posts/bulk-toggle-used', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ post_ids: ids, used: markAsUsed })
+                body: JSON.stringify({ filters: selectAllScope.filters, used: markAsUsed })
             });
             const data = await res.json();
             if (res.ok && data.success) {
@@ -4169,24 +4162,16 @@ async function postNowSelectedPosts() {
 }
 
 async function queueSelectedPosts() {
-    // Across-pages: hand the matching ids to the server-side queue-all once per
-    // platform (≤2 calls) instead of a per-post loop over thousands of posts.
-    // Passing ids keeps it correct when the filter bar narrows the selection.
+    // Across-pages: one request. The server re-derives the matching posts from
+    // the filters and queues each platform, instead of the browser shipping
+    // thousands of ids or looping post by post.
     if (selectAllScope) {
-        let posts;
-        try {
-            posts = await fetchScopedPosts();
-        } catch (e) {
-            alert('Error: ' + e.message);
-            return;
-        }
-
-        const idsByPlatform = {};
-        posts.forEach(p => {
-            if (!SCOPE_QUEUEABLE_PLATFORMS.includes(p.platform)) return;
-            (idsByPlatform[p.platform] = idsByPlatform[p.platform] || []).push(p.id);
-        });
-        const queueablePlatforms = Object.keys(idsByPlatform);
+        // Which queueable platforms the selection actually covers — the banner's
+        // per-platform counts already tell us, so no id fetch is needed.
+        const scopePlatform = selectAllScope.filters.platform;
+        const candidates = scopePlatform ? [scopePlatform] : Object.keys(selectAllScope.byPlatform || {});
+        const queueablePlatforms = candidates.filter(p =>
+            SCOPE_QUEUEABLE_PLATFORMS.includes(p) && (selectAllScope.byPlatform || {})[p] > 0);
 
         if (queueablePlatforms.length === 0) {
             alert('No queueable posts selected (only LinkedIn and Threads posts can be queued)');
@@ -4203,32 +4188,35 @@ async function queueSelectedPosts() {
         queueBtn.innerHTML = '⏳ Adding...';
         queueBtn.disabled = true;
 
-        let queuedTotal = 0, skippedTotal = 0, noSlots = false;
-        for (const platform of queueablePlatforms) {
-            try {
-                const res = await fetch('/compose/posts/queue-all-unscheduled', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ platform: platform, post_ids: idsByPlatform[platform] })
-                });
-                const data = await res.json();
-                if (res.ok && data.success) {
-                    queuedTotal += data.queued || 0;
-                    skippedTotal += data.skipped || 0;
-                    if (data.no_slots) noSlots = true;
-                }
-            } catch (e) {
-                // Skip this platform; keep going with the rest.
+        let data = {};
+        try {
+            const res = await fetch('/compose/posts/queue-all-unscheduled', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    filters: selectAllScope.filters,
+                    platforms: queueablePlatforms,
+                })
+            });
+            data = await res.json();
+            if (!res.ok || !data.success) {
+                throw new Error(data.error || 'Failed to queue posts');
             }
+        } catch (e) {
+            queueBtn.innerHTML = originalText;
+            queueBtn.disabled = false;
+            alert('Error: ' + e.message);
+            return;
         }
 
         queueBtn.innerHTML = originalText;
         queueBtn.disabled = false;
 
+        const queuedTotal = data.queued || 0;
         let msg = `Queued ${queuedTotal} post${queuedTotal !== 1 ? 's' : ''}`;
-        if (skippedTotal) msg += `, skipped ${skippedTotal}`;
-        if (noSlots) msg += ' (ran out of time slots — add more)';
-        showToast(msg, noSlots ? 'warning' : 'success');
+        if (data.skipped) msg += `, skipped ${data.skipped}`;
+        if (data.no_slots) msg += ' (ran out of time slots — add more)';
+        showToast(msg, data.no_slots ? 'warning' : 'success');
         setTimeout(() => location.reload(), 1200);
         return;
     }
@@ -5094,50 +5082,39 @@ function clearPostFilters() {
 // Search and Replace Functions
 // ============================================================================
 
+// The posts currently rendered in the results list. The server caps how many it
+// returns, so this is not always every matching post — see searchResultInfo.
 let searchReplacePostData = [];
 let searchDebounceTimer = null;
 let excludedMatches = {}; // { "postId-matchIndex": true } for excluded matches
 let openSearchEdits = {}; // { postId: draftText } for inline editors currently open
 
-async function openSearchReplaceModal() {
-    // Load the text of every post matching the filter bar from the server (not
-    // just the page rendered in the DOM), so Find & Replace covers all pages
-    // while still respecting the filters the user can see.
+// Discards responses from a superseded search — each keystroke fires its own
+// request and they can come back out of order.
+let searchRequestSeq = 0;
+
+// Totals for the last completed search, plus the filters it ran against, so
+// Replace All acts on exactly what was searched even if the filter bar moved.
+let searchResultInfo = { matchedPosts: 0, truncated: false, filters: null };
+
+function openSearchReplaceModal() {
+    // Searching and replacing both happen server-side across every page, so the
+    // modal only needs to know how many posts the filter bar has it looking at.
     searchReplacePostData = [];
+    searchResultInfo = { matchedPosts: 0, truncated: false, filters: null };
     const filters = currentPostFilters();
 
-    let posts;
-    try {
-        const res = await fetch('/compose/posts/content' + postFilterQuery(filters));
-        const data = await res.json();
-        if (!res.ok || !data.success) {
-            throw new Error(data.error || 'Failed to load posts');
-        }
-        posts = data.posts;
-    } catch (e) {
-        alert('Error loading posts: ' + e.message);
-        return;
-    }
-
-    posts.forEach(post => {
-        const content = post.content || '';
-        if (content.trim()) {
-            searchReplacePostData.push({
-                id: String(post.id),
-                content: content,
-                platform: post.platform || 'unknown',
-                index: post.index != null ? String(post.index) : '?'
-            });
-        }
-    });
-
-    // The search spans every page, narrowed to whatever the filter bar shows.
     const filterNotice = document.getElementById('search-filter-notice');
-    if (filterNotice) {
-        const n = searchReplacePostData.length;
-        filterNotice.textContent = `Searching all ${n} ${scopeLabel(filters, n)} across every page.`;
-        filterNotice.classList.remove('d-none');
-    }
+    if (filterNotice) filterNotice.classList.add('d-none');
+    fetch('/compose/posts/ids' + postFilterQuery(filters, { count_only: '1' }))
+        .then(res => res.json())
+        .then(data => {
+            if (!data.success || !filterNotice) return;
+            filterNotice.textContent =
+                `Searching all ${data.count} ${scopeLabel(filters, data.count)} across every page.`;
+            filterNotice.classList.remove('d-none');
+        })
+        .catch(() => {});
 
     // Reset the form
     document.getElementById('search-find-input').value = '';
@@ -5153,6 +5130,7 @@ async function openSearchReplaceModal() {
     document.getElementById('search-select-all').checked = true;
     document.getElementById('search-exclude-words').value = '';
     document.getElementById('search-edit-notice').classList.add('d-none');
+    document.getElementById('search-truncated-notice').classList.add('d-none');
     excludedMatches = {}; // Reset excluded matches
     openSearchEdits = {}; // Reset any inline editors
 
@@ -5167,115 +5145,145 @@ function performLiveSearch() {
     }, 300);
 }
 
-function doSearch(preserveState = false) {
+// Hide every part of the results UI, leaving only the empty state.
+function resetSearchResultsUI(emptyStateHtml) {
+    const emptyState = document.getElementById('search-empty-state');
+    const resultsList = document.getElementById('search-results-list');
+    if (emptyStateHtml) emptyState.innerHTML = emptyStateHtml;
+    emptyState.classList.remove('d-none');
+    resultsList.classList.add('d-none');
+    resultsList.innerHTML = '';
+    document.getElementById('replace-all-btn').disabled = true;
+    document.getElementById('search-select-controls').classList.add('d-none');
+    document.getElementById('search-click-hint').classList.add('d-none');
+    document.getElementById('search-edit-notice').classList.add('d-none');
+    document.getElementById('search-truncated-notice').classList.add('d-none');
+}
+
+async function doSearch(preserveState = false) {
     const findText = document.getElementById('search-find-input').value;
     const replaceText = document.getElementById('search-replace-input').value;
     const caseSensitive = document.getElementById('search-case-sensitive').checked;
     const wholeWord = document.getElementById('search-whole-word').checked;
     const excludeWordsInput = document.getElementById('search-exclude-words').value;
-    
+
     const emptyState = document.getElementById('search-empty-state');
     const resultsList = document.getElementById('search-results-list');
     const matchCountBadge = document.getElementById('search-match-count');
-    const replaceBtn = document.getElementById('replace-all-btn');
-    
+
     // Snapshot checkbox selection, open editor drafts and scroll offset so a
     // re-render triggered by an inline edit doesn't throw the user's work away.
     const priorState = preserveState ? captureSearchResultState() : null;
 
-    // Reset excluded matches when the search itself changes (a re-render after
-    // an inline edit keeps them)
+    if (!findText.trim()) {
+        searchRequestSeq++;  // abandon anything still in flight
+        searchReplacePostData = [];
+        searchResultInfo = { matchedPosts: 0, truncated: false, filters: null };
+        excludedMatches = {};
+        openSearchEdits = {};
+        matchCountBadge.textContent = '0 matches in 0 posts';
+        resetSearchResultsUI(`
+            <div style="font-size: 2rem;">🔍</div>
+            <p class="mb-0">Enter text to search in posts</p>
+        `);
+        return;
+    }
+
+    // The server does the matching, over every post the filter bar covers —
+    // and with the same regex the replace will use.
+    const filters = currentPostFilters();
+    const params = { find: findText };
+    if (caseSensitive) params.case_sensitive = '1';
+    if (wholeWord) params.whole_word = '1';
+    if (excludeWordsInput.trim()) params.exclude = excludeWordsInput;
+
+    const seq = ++searchRequestSeq;
+    let data;
+    try {
+        const res = await fetch('/compose/posts/search' + postFilterQuery(filters, params));
+        data = await res.json();
+        if (!res.ok || !data.success) {
+            throw new Error(data.error || 'Search failed');
+        }
+    } catch (e) {
+        if (seq !== searchRequestSeq) return;  // a newer search is already running
+        matchCountBadge.textContent = '0 matches in 0 posts';
+        resetSearchResultsUI(`
+            <div style="font-size: 2rem;">⚠️</div>
+            <p class="mb-0">Search failed: ${escapeHtml(e.message)}</p>
+        `);
+        return;
+    }
+    if (seq !== searchRequestSeq) return;  // a newer search already rendered
+
+    // Committing to this result set: rebuilding the list destroys any open
+    // editors, and a brand-new search invalidates per-match exclusions (a
+    // re-render after an inline edit keeps them).
     if (!preserveState) {
         excludedMatches = {};
     }
-    openSearchEdits = {}; // Rebuilding the list destroys any open editors
+    openSearchEdits = {};
 
-    if (!findText.trim()) {
-        emptyState.classList.remove('d-none');
-        resultsList.classList.add('d-none');
-        resultsList.innerHTML = '';
-        matchCountBadge.textContent = '0 matches in 0 posts';
-        replaceBtn.disabled = true;
-        document.getElementById('search-select-controls').classList.add('d-none');
-        document.getElementById('search-click-hint').classList.add('d-none');
-        document.getElementById('search-edit-notice').classList.add('d-none');
-        return;
-    }
-    
-    // Parse exclude words (comma-separated, trimmed)
-    const excludeWords = excludeWordsInput
-        .split(',')
-        .map(w => w.trim().toLowerCase())
-        .filter(w => w.length > 0);
-    
-    // Find matching posts
-    const matchingPosts = [];
-    let totalMatches = 0;
-    let excludedPostCount = 0;
-    
-    // Build search pattern with optional whole word boundaries
-    const searchPattern = wholeWord ? `\\b${escapeRegex(findText)}\\b` : escapeRegex(findText);
-    
-    searchReplacePostData.forEach(post => {
-        const content = post.content;
-        const contentLower = content.toLowerCase();
-        
-        // Check if post contains any excluded words
-        if (excludeWords.length > 0) {
-            const hasExcludedWord = excludeWords.some(word => contentLower.includes(word));
-            if (hasExcludedWord) {
-                excludedPostCount++;
-                return; // Skip this post
-            }
-        }
-        
-        const flags = caseSensitive ? 'g' : 'gi';
-        const regex = new RegExp(searchPattern, flags);
-        const matches = content.match(regex);
-        
-        if (matches && matches.length > 0) {
-            totalMatches += matches.length;
-            matchingPosts.push({
-                ...post,
-                matchCount: matches.length,
-                highlightedContent: highlightMatches(content, findText, caseSensitive, wholeWord, post.id),
-                previewContent: replaceText ? showReplacementPreview(content, findText, replaceText, caseSensitive, wholeWord, post.id) : null
-            });
-        }
+    const matchingPosts = data.posts.map(post => {
+        const content = post.content || '';
+        const id = String(post.id);
+        return {
+            id: id,
+            content: content,
+            platform: post.platform || 'unknown',
+            index: post.index != null ? String(post.index) : '?',
+            matchCount: post.match_count,
+            highlightedContent: highlightMatches(content, findText, caseSensitive, wholeWord, id),
+            previewContent: replaceText ? showReplacementPreview(content, findText, replaceText, caseSensitive, wholeWord, id) : null
+        };
     });
-    
-    // Update UI
-    let countText = `${totalMatches} match${totalMatches !== 1 ? 'es' : ''} in ${matchingPosts.length} post${matchingPosts.length !== 1 ? 's' : ''}`;
-    if (excludedPostCount > 0) {
-        countText += ` (${excludedPostCount} excluded)`;
+    // The inline editor and preview helpers read from here.
+    searchReplacePostData = matchingPosts.map(p => ({
+        id: p.id, content: p.content, platform: p.platform, index: p.index
+    }));
+    searchResultInfo = {
+        matchedPosts: data.matched_posts,
+        truncated: !!data.truncated,
+        filters: filters,
+    };
+
+    let countText = `${data.total_matches} match${data.total_matches !== 1 ? 'es' : ''} in ${data.matched_posts} post${data.matched_posts !== 1 ? 's' : ''}`;
+    if (data.excluded_posts > 0) {
+        countText += ` (${data.excluded_posts} excluded)`;
     }
     matchCountBadge.textContent = countText;
-    replaceBtn.disabled = matchingPosts.length === 0;
-    
+
     if (matchingPosts.length === 0) {
         let emptyMessage = `No matches found for "<strong>${escapeHtml(findText)}</strong>"`;
-        if (excludedPostCount > 0) {
-            emptyMessage += `<br><small class="text-muted">(${excludedPostCount} post${excludedPostCount !== 1 ? 's' : ''} excluded by filter)</small>`;
+        if (data.excluded_posts > 0) {
+            emptyMessage += `<br><small class="text-muted">(${data.excluded_posts} post${data.excluded_posts !== 1 ? 's' : ''} excluded by filter)</small>`;
         }
-        emptyState.innerHTML = `
+        resetSearchResultsUI(`
             <div style="font-size: 2rem;">😕</div>
             <p class="mb-0">${emptyMessage}</p>
-        `;
-        emptyState.classList.remove('d-none');
-        resultsList.classList.add('d-none');
-        resultsList.innerHTML = '';
-        document.getElementById('search-select-controls').classList.add('d-none');
-        document.getElementById('search-click-hint').classList.add('d-none');
-        document.getElementById('search-edit-notice').classList.add('d-none');
+        `);
         return;
     }
-    
+
     // Render matching posts
     emptyState.classList.add('d-none');
     resultsList.classList.remove('d-none');
     document.getElementById('search-select-controls').classList.remove('d-none');
     document.getElementById('search-click-hint').classList.remove('d-none');
-    
+
+    // Only a page of matches is rendered when there are a lot of them, but
+    // Replace All still covers every one — say so rather than implying the list
+    // is the whole set.
+    const truncatedNotice = document.getElementById('search-truncated-notice');
+    if (searchResultInfo.truncated) {
+        truncatedNotice.querySelector('small').textContent =
+            `Showing the first ${matchingPosts.length} of ${data.matched_posts} matching posts. ` +
+            `Replace All covers all ${data.matched_posts} — unticking a post here excludes just that post.`;
+        truncatedNotice.classList.remove('d-none');
+    } else {
+        truncatedNotice.classList.add('d-none');
+    }
+
     let html = '';
     matchingPosts.forEach(post => {
         const platformIcon = post.platform === 'linkedin' ? '💼' : 
@@ -5447,8 +5455,10 @@ function updateSearchSelectedCount() {
     const total = allCheckboxes.length;
     const selected = checkedCheckboxes.length;
     
-    // Update count display
-    document.getElementById('search-selected-count').textContent = `${selected} of ${total} selected`;
+    // Update count display. "shown" matters when the list is capped: the posts
+    // that aren't rendered are still replaced.
+    const noun = searchResultInfo.truncated ? `${total} shown` : total;
+    document.getElementById('search-selected-count').textContent = `${selected} of ${noun} selected`;
     
     // Update select-all checkbox state
     const selectAllCheckbox = document.getElementById('search-select-all');
@@ -5655,27 +5665,34 @@ function executeReplaceAll() {
     const replaceText = document.getElementById('search-replace-input').value;
     const caseSensitive = document.getElementById('search-case-sensitive').checked;
     const wholeWord = document.getElementById('search-whole-word').checked;
-    
-    // Get selected post IDs
-    const selectedPostIds = Array.from(document.querySelectorAll('.search-post-checkbox:checked'))
-        .map(cb => cb.dataset.postId);
-    
+    const excludeWordsInput = document.getElementById('search-exclude-words').value;
+
     if (!findText.trim()) {
         alert('Please enter text to find');
         return;
     }
-    
-    if (selectedPostIds.length === 0) {
+
+    const rendered = Array.from(document.querySelectorAll('.search-post-checkbox'));
+    if (rendered.length === 0 || rendered.every(cb => !cb.checked)) {
         alert('No posts selected');
         return;
     }
-    
+    // The server re-runs the search and replaces in every match, so it only
+    // needs to hear about the posts the user unticked.
+    const deselectedIds = rendered.filter(cb => !cb.checked).map(cb => cb.dataset.postId);
+
+    const targetCount = searchResultInfo.matchedPosts - deselectedIds.length;
+    if (searchResultInfo.truncated &&
+        !confirm(`Replace in ${targetCount} post${targetCount !== 1 ? 's' : ''}? Only ${rendered.length} of them are shown here.`)) {
+        return;
+    }
+
     const btn = document.getElementById('replace-all-btn');
     const originalText = btn.innerHTML;
     btn.innerHTML = '⏳ Replacing...';
     btn.disabled = true;
-    
-    fetch('/posts/bulk-replace', {
+
+    fetch('/compose/posts/replace', {
         method: 'POST',
         headers: {
             'Content-Type': 'application/json',
@@ -5683,10 +5700,13 @@ function executeReplaceAll() {
         body: JSON.stringify({
             find: findText,
             replace: replaceText,
-            post_type: 'standalone',
             case_sensitive: caseSensitive,
             whole_word: wholeWord,
-            post_ids: selectedPostIds,
+            exclude: excludeWordsInput,
+            // The filters the results were produced under, not whatever the
+            // filter bar says now — the two can differ if it moved meanwhile.
+            filters: searchResultInfo.filters || currentPostFilters(),
+            deselected_ids: deselectedIds,
             excluded_matches: excludedMatches
         }),
     })
