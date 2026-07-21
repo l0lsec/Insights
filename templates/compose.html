@@ -3450,38 +3450,60 @@ function schedulePost() {
 // Select mode functions
 
 // When null, bulk actions act on the checked checkboxes currently in the DOM.
-// When set ({platform: 'threads'|null}), they act on EVERY saved post matching
-// that platform — including posts on pages that haven't been loaded.
+// When set, they act on EVERY saved post matching the filter bar — including
+// posts on pages that haven't been loaded:
+//   {filters: {platform, used, queued, image, source, brief}, total, byPlatform}
 let selectAllScope = null;
 
 const SCOPE_QUEUEABLE_PLATFORMS = ['linkedin', 'threads'];
 const SCOPE_POSTABLE_PLATFORMS = ['linkedin', 'threads', 'facebook', 'twitter', 'instagram'];
 
-function currentPlatformFilter() {
-    const el = document.getElementById('filter-platform');
-    return el ? el.value : '';
+// The filter bar's current state. The server reproduces this exact predicate so
+// an across-pages selection matches what the filters say is showing.
+function currentPostFilters() {
+    const val = id => {
+        const el = document.getElementById(id);
+        return el ? el.value : '';
+    };
+    return {
+        platform: val('filter-platform'),
+        used: val('filter-used'),
+        queued: val('filter-queued'),
+        image: val('filter-image'),
+        source: val('filter-source'),
+        brief: val('filter-brief'),
+    };
 }
 
-// Server-side totals per platform, so we can size an across-pages selection
-// without loading every post.
-function scopeCounts(platform) {
-    const platforms = platform ? [platform] : Object.keys(PLATFORM_TOTALS);
+function postFilterQuery(filters, extra) {
+    const params = new URLSearchParams();
+    Object.keys(filters).forEach(k => { if (filters[k]) params.set(k, filters[k]); });
+    Object.keys(extra || {}).forEach(k => params.set(k, extra[k]));
+    const qs = params.toString();
+    return qs ? '?' + qs : '';
+}
+
+function anyFilterActive(filters) {
+    return Object.keys(filters).some(k => !!filters[k]);
+}
+
+function nonPlatformFiltersActive(filters) {
+    return Object.keys(filters).some(k => k !== 'platform' && !!filters[k]);
+}
+
+// Per-platform counts for the selection, so the toolbar can size the
+// queueable/postable subsets without loading every post.
+function scopeCounts(platform, totals) {
+    const source = totals || PLATFORM_TOTALS;
+    const platforms = platform ? [platform] : Object.keys(source);
     let total = 0, queueable = 0, postable = 0;
     platforms.forEach(p => {
-        const n = PLATFORM_TOTALS[p] || 0;
+        const n = source[p] || 0;
         total += n;
         if (SCOPE_QUEUEABLE_PLATFORMS.includes(p)) queueable += n;
         if (SCOPE_POSTABLE_PLATFORMS.includes(p)) postable += n;
     });
     return { total, queueable, postable };
-}
-
-function otherFiltersActive() {
-    const ids = ['filter-used', 'filter-queued', 'filter-image', 'filter-source', 'filter-brief'];
-    return ids.some(id => {
-        const el = document.getElementById(id);
-        return el && el.value;
-    });
 }
 
 function clearSelectAllScope() {
@@ -3490,41 +3512,60 @@ function clearSelectAllScope() {
     if (banner) banner.classList.add('d-none');
 }
 
+function scopeLabel(filters, count) {
+    const platform = filters.platform;
+    const noun = platform ? `${platform} post` : 'post';
+    const qualifier = nonPlatformFiltersActive(filters) ? 'matching ' : '';
+    return `${qualifier}${noun}${count !== 1 ? 's' : ''}`;
+}
+
 // Offer "select all across every page" once the loaded posts are all checked
-// but more posts exist behind "Load more". `platform` (''|null = all platforms)
-// scopes the offer to a single platform when triggered from a platform's "All".
-function offerSelectAllScope(loadedCount, platform) {
+// but more matching posts exist behind "Load more". `platform` scopes the offer
+// to a single platform when triggered from a platform card's "All" button.
+async function offerSelectAllScope(loadedCount, platform) {
     const banner = document.getElementById('select-all-scope-banner');
     if (!banner) return;
 
-    platform = platform || null;
-    const total = scopeCounts(platform).total;
+    const filters = currentPostFilters();
+    if (platform) filters.platform = platform;
+
+    // With filters active the page totals don't apply — ask the server how many
+    // posts actually match. Unfiltered, the totals we already have are exact.
+    let total, byPlatform;
+    if (anyFilterActive(filters)) {
+        try {
+            const res = await fetch('/compose/posts/ids' + postFilterQuery(filters, { count_only: '1' }));
+            const data = await res.json();
+            if (!res.ok || !data.success) return;
+            total = data.count;
+            byPlatform = data.by_platform;
+        } catch (e) {
+            return;  // Can't size the offer — leave the plain selection alone.
+        }
+    } else {
+        total = scopeCounts(null).total;
+        byPlatform = PLATFORM_TOTALS;
+    }
+
     if (total <= loadedCount) {
         banner.classList.add('d-none');
         return;
     }
 
-    const label = platform ? `${platform} post` : 'post';
-    let text = `All ${loadedCount} loaded ${label}${loadedCount !== 1 ? 's' : ''} selected.`;
-    if (otherFiltersActive()) {
-        text += ' Selecting across pages ignores the other filters.';
-    }
-    document.getElementById('select-all-scope-text').textContent = text;
+    document.getElementById('select-all-scope-text').textContent =
+        `All ${loadedCount} loaded ${scopeLabel(filters, loadedCount)} selected.`;
 
     const btn = document.getElementById('select-all-scope-btn');
-    btn.textContent = `Select all ${total} ${label}${total !== 1 ? 's' : ''} across every page`;
-    btn.onclick = () => enableSelectAllScope(platform);
+    btn.textContent = `Select all ${total} ${scopeLabel(filters, total)} across every page`;
+    btn.onclick = () => enableSelectAllScope(filters, total, byPlatform);
     banner.classList.remove('d-none');
 }
 
-function enableSelectAllScope(platform) {
-    platform = platform || null;
-    selectAllScope = { platform: platform };
+function enableSelectAllScope(filters, total, byPlatform) {
+    selectAllScope = { filters: filters, total: total, byPlatform: byPlatform };
 
-    const total = scopeCounts(platform).total;
-    const label = platform ? `${platform} post` : 'post';
     document.getElementById('select-all-scope-text').textContent =
-        `All ${total} ${label}${total !== 1 ? 's' : ''} selected — bulk actions apply to every page.`;
+        `All ${total} ${scopeLabel(filters, total)} selected — bulk actions apply to every page.`;
 
     const btn = document.getElementById('select-all-scope-btn');
     btn.textContent = 'Clear selection';
@@ -3547,10 +3588,7 @@ function onPostCheckboxChange() {
 
 // Full id set for an across-pages selection (only fetched when an action runs).
 async function fetchScopedPosts() {
-    const qs = selectAllScope && selectAllScope.platform
-        ? '?platform=' + encodeURIComponent(selectAllScope.platform)
-        : '';
-    const res = await fetch('/compose/posts/ids' + qs);
+    const res = await fetch('/compose/posts/ids' + postFilterQuery(selectAllScope.filters));
     const data = await res.json();
     if (!res.ok || !data.success) {
         throw new Error(data.error || 'Failed to load posts');
@@ -3614,7 +3652,7 @@ function selectAllPosts() {
     const btn = document.getElementById('select-all-btn');
     btn.innerHTML = selecting ? '☐ Deselect All' : '☑️ Select All';
     if (selecting) {
-        offerSelectAllScope(visibleCheckboxes.length, currentPlatformFilter());
+        offerSelectAllScope(visibleCheckboxes.length, null);
     }
 }
 
@@ -3640,8 +3678,10 @@ function selectPlatformPosts(platform) {
 function updateSelectedCount() {
     const scoped = !!selectAllScope;
     const selected = document.querySelectorAll('.post-select-checkbox:checked');
-    const scopeInfo = scoped ? scopeCounts(selectAllScope.platform) : null;
-    const count = scoped ? scopeInfo.total : selected.length;
+    const scopeInfo = scoped
+        ? scopeCounts(selectAllScope.filters.platform || null, selectAllScope.byPlatform)
+        : null;
+    const count = scoped ? selectAllScope.total : selected.length;
     document.getElementById('selected-count').textContent = count;
 
     // Count only visible checkboxes for "all selected" state
@@ -4129,13 +4169,24 @@ async function postNowSelectedPosts() {
 }
 
 async function queueSelectedPosts() {
-    // Across-pages: reuse the server-side "queue all unscheduled" per platform in
-    // scope (≤5 calls) instead of a per-post loop over thousands of posts.
+    // Across-pages: hand the matching ids to the server-side queue-all once per
+    // platform (≤2 calls) instead of a per-post loop over thousands of posts.
+    // Passing ids keeps it correct when the filter bar narrows the selection.
     if (selectAllScope) {
-        const platforms = selectAllScope.platform
-            ? [selectAllScope.platform]
-            : SCOPE_QUEUEABLE_PLATFORMS.filter(p => (PLATFORM_TOTALS[p] || 0) > 0);
-        const queueablePlatforms = platforms.filter(p => SCOPE_QUEUEABLE_PLATFORMS.includes(p));
+        let posts;
+        try {
+            posts = await fetchScopedPosts();
+        } catch (e) {
+            alert('Error: ' + e.message);
+            return;
+        }
+
+        const idsByPlatform = {};
+        posts.forEach(p => {
+            if (!SCOPE_QUEUEABLE_PLATFORMS.includes(p.platform)) return;
+            (idsByPlatform[p.platform] = idsByPlatform[p.platform] || []).push(p.id);
+        });
+        const queueablePlatforms = Object.keys(idsByPlatform);
 
         if (queueablePlatforms.length === 0) {
             alert('No queueable posts selected (only LinkedIn and Threads posts can be queued)');
@@ -4155,9 +4206,11 @@ async function queueSelectedPosts() {
         let queuedTotal = 0, skippedTotal = 0, noSlots = false;
         for (const platform of queueablePlatforms) {
             try {
-                const fd = new FormData();
-                fd.append('platform', platform);
-                const res = await fetch('/compose/posts/queue-all-unscheduled', { method: 'POST', body: fd });
+                const res = await fetch('/compose/posts/queue-all-unscheduled', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ platform: platform, post_ids: idsByPlatform[platform] })
+                });
                 const data = await res.json();
                 if (res.ok && data.success) {
                     queuedTotal += data.queued || 0;
@@ -5047,16 +5100,15 @@ let excludedMatches = {}; // { "postId-matchIndex": true } for excluded matches
 let openSearchEdits = {}; // { postId: draftText } for inline editors currently open
 
 async function openSearchReplaceModal() {
-    // Load EVERY saved post's text from the server (not just the page rendered in
-    // the DOM), optionally scoped to the active platform filter, so Find & Replace
-    // covers all posts.
+    // Load the text of every post matching the filter bar from the server (not
+    // just the page rendered in the DOM), so Find & Replace covers all pages
+    // while still respecting the filters the user can see.
     searchReplacePostData = [];
-    const platform = currentPlatformFilter();
-    const qs = platform ? '?platform=' + encodeURIComponent(platform) : '';
+    const filters = currentPostFilters();
 
     let posts;
     try {
-        const res = await fetch('/compose/posts/content' + qs);
+        const res = await fetch('/compose/posts/content' + postFilterQuery(filters));
         const data = await res.json();
         if (!res.ok || !data.success) {
             throw new Error(data.error || 'Failed to load posts');
@@ -5079,12 +5131,11 @@ async function openSearchReplaceModal() {
         }
     });
 
-    // Tell the user the search now spans every saved post (all platforms, or the
-    // filtered platform). Other page filters are intentionally not applied here.
+    // The search spans every page, narrowed to whatever the filter bar shows.
     const filterNotice = document.getElementById('search-filter-notice');
     if (filterNotice) {
-        const scopeLabel = platform ? `all ${searchReplacePostData.length} ${platform} posts` : `all ${searchReplacePostData.length} posts`;
-        filterNotice.textContent = `Searching ${scopeLabel} across every page.`;
+        const n = searchReplacePostData.length;
+        filterNotice.textContent = `Searching all ${n} ${scopeLabel(filters, n)} across every page.`;
         filterNotice.classList.remove('d-none');
     }
 
