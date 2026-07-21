@@ -1046,6 +1046,46 @@
                             <pre class="social-copy-text" id="saved-post-{{ post.id }}" contenteditable="true" onfocus="enablePostEdit(this)" onblur="autoSavePost({{ post.id }}, this, 'standalone')">{{ post.content }}</pre>
                             <!-- Image attachment section -->
                             <div class="post-image-section mt-2" id="image-section-{{ post.id }}">
+                                {% if platform == 'instagram' %}
+                                <!-- Instagram format selector (feed / carousel / reel / story) -->
+                                <div class="d-flex align-items-center gap-2 mb-2 flex-wrap ig-format-bar">
+                                    <label class="small text-muted mb-0">Format:</label>
+                                    <select class="form-select form-select-sm" style="width:auto;"
+                                            id="ig-type-{{ post.id }}" onchange="switchIgType({{ post.id }}, this.value)">
+                                        <option value="feed" {% if post.ig_post_type == 'feed' %}selected{% endif %}>🖼️ Feed (1 image)</option>
+                                        <option value="carousel" {% if post.ig_post_type == 'carousel' %}selected{% endif %}>🎠 Carousel (2–10)</option>
+                                        <option value="reel" {% if post.ig_post_type == 'reel' %}selected{% endif %}>🎬 Reel (video)</option>
+                                        <option value="story" {% if post.ig_post_type == 'story' %}selected{% endif %}>⚡ Story</option>
+                                    </select>
+                                    <span class="small text-muted" id="ig-media-hint-{{ post.id }}"></span>
+                                </div>
+                                <!-- Multi-media builder for carousel / reel / story -->
+                                <div id="ig-media-builder-{{ post.id }}"
+                                     class="border rounded p-2 mb-2 {% if post.ig_post_type in [None, 'feed'] %}d-none{% endif %}"
+                                     data-ig-type="{{ post.ig_post_type or 'feed' }}"
+                                     data-ig-media='{{ post.media_items | tojson }}'>
+                                    <div id="ig-media-strip-{{ post.id }}" class="d-flex flex-wrap gap-2 mb-2">
+                                        <span class="text-muted small">No media added yet.</span>
+                                    </div>
+                                    <div class="d-flex gap-2 flex-wrap align-items-center">
+                                        <input type="url" class="form-control form-control-sm" style="max-width: 300px;"
+                                               id="ig-media-url-{{ post.id }}" placeholder="Paste public image or video URL">
+                                        <button class="btn btn-sm btn-outline-primary" type="button" onclick="igAddMediaUrl({{ post.id }})">＋ Add URL</button>
+                                        <label class="btn btn-sm btn-outline-secondary mb-0" title="Upload an image">
+                                            📁 Image
+                                            <input type="file" class="d-none" accept="image/png,image/jpeg,image/jpg,image/gif,image/webp"
+                                                   onchange="igUploadMedia({{ post.id }}, this, 'image')">
+                                        </label>
+                                        <label class="btn btn-sm btn-outline-secondary mb-0" title="Upload a video (MP4/MOV)">
+                                            🎬 Video
+                                            <input type="file" class="d-none" accept="video/mp4,video/quicktime"
+                                                   onchange="igUploadMedia({{ post.id }}, this, 'video')">
+                                        </label>
+                                        <span class="spinner-border spinner-border-sm text-secondary d-none" id="ig-media-spinner-{{ post.id }}" role="status"></span>
+                                    </div>
+                                </div>
+                                {% endif %}
+                                <div id="ig-feed-block-{{ post.id }}"{% if platform == 'instagram' and post.ig_post_type not in [None, 'feed'] %} class="d-none"{% endif %}>
                                 {% if post.image_url %}
                                 <div class="d-flex align-items-center gap-2 mb-2" id="image-preview-{{ post.id }}">
                                     <img src="{{ post.image_url }}" alt="Post image" class="img-thumbnail" style="max-height: 60px; max-width: 100px; cursor: pointer;" onclick="openImageLightbox('{{ post.image_url }}')" title="Click to enlarge">
@@ -1181,6 +1221,7 @@
                                     🖼️ Add Image
                                 </button>
                                 {% endif %}
+                                </div><!-- /ig-feed-block -->
                             </div>
                             <div class="edit-form d-none" id="edit-form-{{ post.id }}">
                                 <textarea class="form-control mb-2" id="edit-textarea-{{ post.id }}" rows="4">{{ post.content }}</textarea>
@@ -3307,6 +3348,155 @@ function postToInstagram(postId, btn) {
             alert('Error: ' + error.message);
         });
 }
+
+// ============ Instagram media builder (carousel / reel / story) ============
+// Per-post media lists: postId -> [{url, kind}]
+window._igMedia = window._igMedia || {};
+const IG_VIDEO_EXT = /\.(mp4|mov|m4v)(\?.*)?$/i;
+
+function igGuessKind(url) {
+    return IG_VIDEO_EXT.test(url || '') ? 'video' : 'image';
+}
+
+function igLimits(type) {
+    if (type === 'carousel') return { min: 2, max: 10, label: '2–10 images/videos' };
+    if (type === 'reel') return { min: 1, max: 1, label: 'one video' };
+    if (type === 'story') return { min: 1, max: 1, label: 'one image or video' };
+    return { min: 1, max: 1, label: '' };
+}
+
+function igCurrentType(postId) {
+    const sel = document.getElementById('ig-type-' + postId);
+    return sel ? sel.value : 'feed';
+}
+
+function renderIgStrip(postId) {
+    const strip = document.getElementById('ig-media-strip-' + postId);
+    if (!strip) return;
+    const items = window._igMedia[postId] || [];
+    const type = igCurrentType(postId);
+    const lim = igLimits(type);
+    if (!items.length) {
+        strip.innerHTML = '<span class="text-muted small">No media added yet.</span>';
+    } else {
+        strip.innerHTML = items.map((it, i) => {
+            const thumb = it.kind === 'video'
+                ? `<div class="d-flex align-items-center justify-content-center bg-dark text-white" style="width:64px;height:64px;border-radius:6px;font-size:1.4rem;" title="${it.url}">🎬</div>`
+                : `<img src="${it.url}" style="width:64px;height:64px;object-fit:cover;border-radius:6px;" title="${it.url}">`;
+            return `<div class="position-relative" style="width:64px;">
+                ${thumb}
+                <button type="button" class="btn btn-sm btn-danger position-absolute top-0 end-0 p-0 lh-1"
+                        style="width:18px;height:18px;font-size:0.7rem;" title="Remove"
+                        onclick="igRemoveMedia(${postId}, ${i})">✕</button>
+                <div class="small text-center text-muted">${i + 1}</div>
+            </div>`;
+        }).join('');
+    }
+    const hint = document.getElementById('ig-media-hint-' + postId);
+    if (hint) {
+        let msg = `${lim.label} — ${items.length} added`;
+        if (items.length < lim.min) msg += ` (need ${lim.min})`;
+        if (items.length > lim.max) msg += ` (max ${lim.max})`;
+        hint.textContent = msg;
+        hint.className = 'small ' + ((items.length < lim.min || items.length > lim.max) ? 'text-danger' : 'text-success');
+    }
+}
+
+function igSaveMedia(postId) {
+    const type = igCurrentType(postId);
+    const items = window._igMedia[postId] || [];
+    const fd = new FormData();
+    fd.append('ig_post_type', type);
+    fd.append('media_items', JSON.stringify(items));
+    return fetch(`/compose/post/${postId}/media`, { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(d => {
+            if (!d.success) showToast(d.error || 'Could not save media', 'warning');
+            return d;
+        })
+        .catch(() => showToast('Could not save media', 'error'));
+}
+
+function igAddItem(postId, url, kind) {
+    if (!url) return;
+    const type = igCurrentType(postId);
+    const lim = igLimits(type);
+    window._igMedia[postId] = window._igMedia[postId] || [];
+    if (window._igMedia[postId].length >= lim.max) {
+        showToast(`This format allows ${lim.label}.`, 'warning');
+        return;
+    }
+    if (type === 'reel' && kind !== 'video') {
+        showToast('Reels need a video.', 'warning');
+        return;
+    }
+    window._igMedia[postId].push({ url: url, kind: kind });
+    renderIgStrip(postId);
+    igSaveMedia(postId);
+}
+
+function igRemoveMedia(postId, idx) {
+    (window._igMedia[postId] || []).splice(idx, 1);
+    renderIgStrip(postId);
+    igSaveMedia(postId);
+}
+
+function igAddMediaUrl(postId) {
+    const input = document.getElementById('ig-media-url-' + postId);
+    const url = (input.value || '').trim();
+    if (!url) return;
+    igAddItem(postId, url, igGuessKind(url));
+    input.value = '';
+}
+
+function igUploadMedia(postId, input, kind) {
+    const file = input.files && input.files[0];
+    if (!file) return;
+    const spinner = document.getElementById('ig-media-spinner-' + postId);
+    if (spinner) spinner.classList.remove('d-none');
+    const fd = new FormData();
+    const route = kind === 'video' ? '/compose/upload-video' : '/compose/upload-image';
+    fd.append(kind === 'video' ? 'video' : 'image', file);
+    fetch(route, { method: 'POST', body: fd })
+        .then(r => r.json())
+        .then(d => {
+            const url = d.image_url || d.video_url;
+            if (d.success && url) {
+                igAddItem(postId, url, kind);
+            } else {
+                showToast(d.error || 'Upload failed', 'error');
+            }
+        })
+        .catch(() => showToast('Upload failed', 'error'))
+        .finally(() => { if (spinner) spinner.classList.add('d-none'); input.value = ''; });
+}
+
+function switchIgType(postId, type) {
+    const builder = document.getElementById('ig-media-builder-' + postId);
+    const feedBlock = document.getElementById('ig-feed-block-' + postId);
+    const isFeed = (type === 'feed');
+    if (builder) builder.classList.toggle('d-none', isFeed);
+    if (feedBlock) feedBlock.classList.toggle('d-none', !isFeed);
+    if (isFeed) {
+        // Feed uses the single image_url; clear the multi-media list server-side.
+        window._igMedia[postId] = [];
+        igSaveMedia(postId);
+    } else {
+        renderIgStrip(postId);
+        igSaveMedia(postId);
+    }
+}
+
+// Initialize builders from server-rendered data on load
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('[id^="ig-media-builder-"]').forEach(function(el) {
+        const postId = el.id.replace('ig-media-builder-', '');
+        let items = [];
+        try { items = JSON.parse(el.getAttribute('data-ig-media') || '[]'); } catch (e) { items = []; }
+        window._igMedia[postId] = Array.isArray(items) ? items : [];
+        renderIgStrip(postId);
+    });
+});
 
 function repostPost(postId, platform, btn) {
     // Reuses the same publish path as "Post Now". The publish endpoints have no

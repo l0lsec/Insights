@@ -151,6 +151,7 @@ from database import (
     update_standalone_post,
     update_standalone_post_image,
     update_social_post_image,
+    set_standalone_post_media,
     delete_standalone_post,
     delete_standalone_posts_bulk,
     mark_standalone_post_used,
@@ -360,8 +361,13 @@ swagger = Swagger(app, config=swagger_config, template=swagger_template)
 # Configure image uploads
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'uploads')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
+# Video uploads for Instagram Reels / video Stories / video carousel items.
+ALLOWED_VIDEO_EXTENSIONS = {'mp4', 'mov'}
+MAX_IMAGE_BYTES = 16 * 1024 * 1024   # 16MB — enforced manually on the image path
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
-app.config['MAX_CONTENT_LENGTH'] = 16 * 1024 * 1024  # 16MB max file size
+# Global cap is raised for video; the image route re-checks MAX_IMAGE_BYTES so the
+# effective image limit is unchanged.
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB (Cloudinary free-tier per-file)
 
 # Ensure upload directory exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -379,6 +385,10 @@ if os.environ.get('CLOUDINARY_CLOUD_NAME'):
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def allowed_video_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_VIDEO_EXTENSIONS
 
 
 # ── Authentication & activity tracking ────────────────────────────────────
@@ -5037,21 +5047,13 @@ def schedule_post_now(scheduled_id: int):
                 except Exception as e:
                     return jsonify({"error": f"Instagram token expired: {e}"}), 400
 
-            # Instagram feed posts require an image
-            image_url, image_err = _ensure_instagram_image(
-                content,
-                image_url,
+            # Publish honoring the post's Instagram format (feed/carousel/reel/story)
+            result = _instagram_publish_for_post(
+                ig_token['access_token'],
+                content=content,
+                image_url=image_url,
                 standalone_post_id=post['standalone_post_id'],
                 social_post_id=post['social_post_id'],
-            )
-            if image_err:
-                return jsonify({"error": image_err}), 400
-
-            app.logger.info("Posting to Instagram with image: %s", image_url)
-            result = ig_client.publish_image_post(
-                ig_token['access_token'],
-                content[:2200],
-                image_url,
             )
 
             if result and result.get('success'):
@@ -5240,20 +5242,13 @@ def schedule_retry(scheduled_id: int):
                 except Exception as e:
                     return jsonify({"error": f"Instagram token expired: {e}"}), 400
 
-            # Instagram feed posts require an image
-            image_url, image_err = _ensure_instagram_image(
-                content,
-                image_url,
+            # Publish honoring the post's Instagram format (feed/carousel/reel/story)
+            result = _instagram_publish_for_post(
+                ig_token['access_token'],
+                content=content,
+                image_url=image_url,
                 standalone_post_id=post['standalone_post_id'],
                 social_post_id=post['social_post_id'],
-            )
-            if image_err:
-                return jsonify({"error": image_err}), 400
-
-            result = ig_client.publish_image_post(
-                ig_token['access_token'],
-                content[:2200],
-                image_url,
             )
             if result and not result.get('success') and result.get('friendly'):
                 result = dict(result, error=result['friendly'])
@@ -5744,6 +5739,13 @@ def compose_page():
         post_dict['scheduled'] = scheduled_info.get(post['id'], {})
         # Add posted info (with URL) to each post
         post_dict['posted'] = posted_info.get(post['id'], {})
+        # Instagram media format + parsed media list (feed by default)
+        post_dict['ig_post_type'] = post_dict.get('ig_post_type') or 'feed'
+        _raw_media = post_dict.get('media_items')
+        try:
+            post_dict['media_items'] = json.loads(_raw_media) if _raw_media else []
+        except (ValueError, TypeError):
+            post_dict['media_items'] = []
         # Attach the originating brief's name (agent-curated posts only)
         brief_id = post_dict.get('brief_id')
         brief_name = brief_names.get(brief_id) if brief_id else None
@@ -6619,9 +6621,57 @@ def compose_update_post_image(post_id: int):
         return jsonify({"error": "Post not found"}), 404
     
     image_url = request.form.get('image_url', '').strip() or None
-    
+
     update_standalone_post_image(post_id, image_url)
     return jsonify({"success": True, "image_url": image_url})
+
+
+@app.route('/compose/post/<int:post_id>/media', methods=['POST'])
+def compose_set_post_media(post_id: int):
+    """Set a standalone post's Instagram media format and media list.
+
+    Form/JSON: ig_post_type in {feed,carousel,reel,story}; media_items = JSON
+    string list of {"url","kind":"image"|"video"}.
+    """
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    payload = request.get_json(silent=True) or request.form
+    ig_post_type = (payload.get('ig_post_type') or 'feed').strip().lower()
+    if ig_post_type not in ('feed', 'carousel', 'reel', 'story'):
+        return jsonify({"error": f"Invalid post type: {ig_post_type}"}), 400
+
+    raw_items = payload.get('media_items') or '[]'
+    if isinstance(raw_items, str):
+        try:
+            items = json.loads(raw_items)
+        except (ValueError, TypeError):
+            return jsonify({"error": "media_items must be valid JSON"}), 400
+    else:
+        items = raw_items
+    if not isinstance(items, list):
+        return jsonify({"error": "media_items must be a list"}), 400
+
+    # Normalize items to {url, kind}
+    clean = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        url = (it.get('url') or '').strip()
+        if not url:
+            continue
+        kind = 'video' if it.get('kind') == 'video' else 'image'
+        clean.append({"url": url, "kind": kind})
+
+    # Validate item counts per type (light server-side guard; publish re-validates)
+    if ig_post_type == 'carousel' and clean and not (2 <= len(clean) <= 10):
+        return jsonify({"error": "Carousels need between 2 and 10 items."}), 400
+    if ig_post_type in ('reel', 'story') and len(clean) > 1:
+        return jsonify({"error": f"A {ig_post_type} takes a single media item."}), 400
+
+    set_standalone_post_media(post_id, ig_post_type, clean)
+    return jsonify({"success": True, "ig_post_type": ig_post_type, "media_items": clean})
 
 
 @app.route('/compose/post/<int:post_id>/stock-image', methods=['GET'])
@@ -6982,6 +7032,109 @@ def _ensure_instagram_image(
     )
 
 
+def _ensure_instagram_media(
+    content: str | None,
+    image_url: str | None,
+    ig_post_type: str | None,
+    media_items: list | None,
+    *,
+    standalone_post_id: int | None = None,
+    social_post_id: int | None = None,
+) -> tuple[list | None, str | None]:
+    """Validate/prepare Instagram media by format. Returns (resolved_items, error).
+
+    resolved_items is the list of {"url","kind"} to publish. error is set on failure.
+    - feed: delegates to _ensure_instagram_image (stock auto-attach); 1 image.
+    - carousel: 2-10 items.
+    - reel: exactly one video item.
+    - story: exactly one media item (image or video).
+    """
+    ig_post_type = ig_post_type or 'feed'
+    items = [it for it in (media_items or []) if it]
+
+    if ig_post_type == 'feed':
+        url, err = _ensure_instagram_image(
+            content, image_url,
+            standalone_post_id=standalone_post_id, social_post_id=social_post_id,
+        )
+        if err:
+            return None, err
+        return [{"url": url, "kind": "image"}], None
+
+    if ig_post_type == 'carousel':
+        if not (2 <= len(items) <= 10):
+            return None, "Instagram carousels need between 2 and 10 items. Add media and retry."
+        if any(not it.get("url") for it in items):
+            return None, "A carousel item is missing its media URL."
+        return items, None
+
+    if ig_post_type == 'reel':
+        videos = [it for it in items if it.get("kind") == "video" and it.get("url")]
+        if len(videos) != 1:
+            return None, "Instagram Reels require exactly one video. Attach a video and retry."
+        return [videos[0]], None
+
+    if ig_post_type == 'story':
+        valid = [it for it in items if it.get("url")]
+        if len(valid) != 1:
+            return None, "A story needs exactly one image or video. Attach one and retry."
+        return [valid[0]], None
+
+    return None, f"Unknown Instagram post type: {ig_post_type}"
+
+
+def _instagram_publish_for_post(
+    access_token: str,
+    *,
+    content: str | None,
+    image_url: str | None,
+    standalone_post_id: int | None = None,
+    social_post_id: int | None = None,
+) -> dict:
+    """Publish an Instagram post honoring its media format (feed/carousel/reel/story).
+
+    Reads ig_post_type + media_items from the standalone post (feed when absent),
+    validates via _ensure_instagram_media, routes to the right client method, and
+    returns the client result dict unchanged. On a validation failure the result
+    carries ``guard_error: True`` so the worker can fail fast instead of retrying.
+    """
+    ig_post_type = 'feed'
+    media_items: list = []
+    if standalone_post_id:
+        row = get_standalone_post(standalone_post_id)
+        if row:
+            row = dict(row)
+            ig_post_type = row.get('ig_post_type') or 'feed'
+            raw = row.get('media_items')
+            if raw:
+                try:
+                    media_items = json.loads(raw)
+                except (ValueError, TypeError):
+                    media_items = []
+
+    resolved, err = _ensure_instagram_media(
+        content, image_url, ig_post_type, media_items,
+        standalone_post_id=standalone_post_id, social_post_id=social_post_id,
+    )
+    if err:
+        return {"success": False, "error": {"message": err}, "friendly": err, "guard_error": True}
+
+    client = get_instagram_client()
+    caption = (content or "")[:2200]
+
+    if ig_post_type == 'carousel':
+        return client.publish_carousel_post(access_token, caption, resolved)
+    if ig_post_type == 'reel':
+        return client.publish_reel_post(access_token, caption, resolved[0]["url"])
+    if ig_post_type == 'story':
+        item = resolved[0]
+        if item.get("kind") == "video":
+            return client.publish_story_post(access_token, video_url=item["url"])
+        return client.publish_story_post(access_token, image_url=item["url"])
+    # feed (default)
+    return client.publish_image_post(access_token, caption, resolved[0]["url"])
+
+
 @app.route('/compose/stock-images/search', methods=['GET'])
 def compose_search_stock_images():
     """Search for stock images by custom query.
@@ -7057,7 +7210,14 @@ def compose_upload_image():
     # Check extension first (fast rejection)
     if not allowed_file(file.filename):
         return jsonify({"error": f"File type not allowed. Allowed types: {', '.join(ALLOWED_EXTENSIONS)}"}), 400
-    
+
+    # Manual size cap for images (the global MAX_CONTENT_LENGTH is raised for video)
+    file.seek(0, os.SEEK_END)
+    if file.tell() > MAX_IMAGE_BYTES:
+        file.seek(0)
+        return jsonify({"error": "Image too large (max 16MB)."}), 400
+    file.seek(0)
+
     # Validate image content and re-encode to strip embedded data
     try:
         cleaned_bytes, ext = validate_and_clean_image(file)
@@ -7117,6 +7277,64 @@ def compose_upload_image():
         "filename": unique_filename,
         "storage": "local",
         "warning": "Image stored locally - may not work with Threads/external platforms" if not CLOUDINARY_CONFIGURED else None
+    })
+
+
+@app.route('/compose/upload-video', methods=['POST'])
+def compose_upload_video():
+    """Upload a video for Instagram Reels / video Stories / video carousel items.
+
+    Requires Cloudinary (Instagram's fetcher can't reach local /static/uploads in
+    most deploys). No transcoding — Instagram rejects wrong codec/aspect/duration,
+    surfaced back through the publish flow. For large files, paste a public URL
+    instead.
+    """
+    if 'video' not in request.files:
+        return jsonify({"error": "No video file provided"}), 400
+
+    file = request.files['video']
+    if file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+
+    if not allowed_video_file(file.filename):
+        return jsonify({"error": f"Video type not allowed. Allowed types: {', '.join(ALLOWED_VIDEO_EXTENSIONS)}"}), 400
+
+    if not CLOUDINARY_CONFIGURED:
+        return jsonify({
+            "error": "Video upload needs Cloudinary. Configure Cloudinary, or paste a "
+                     "public video URL instead.",
+        }), 400
+
+    video_bytes = file.read()
+    if not video_bytes:
+        return jsonify({"error": "Empty video file"}), 400
+
+    try:
+        result = cloudinary.uploader.upload(
+            video_bytes,
+            folder="insights",
+            resource_type="video",
+        )
+    except Exception as e:
+        app.logger.error("Cloudinary video upload failed: %s", str(e))
+        return jsonify({
+            "error": f"Video upload failed: {e}. Try a smaller/shorter clip or paste a public URL.",
+        }), 400
+
+    video_url = result['secure_url']
+    filename = result['public_id'].split('/')[-1]
+    add_uploaded_image(
+        filename=filename,
+        url=video_url,
+        storage='cloudinary',
+        size=result.get('bytes', len(video_bytes)),
+        media_type='video',
+    )
+    return jsonify({
+        "success": True,
+        "video_url": video_url,
+        "filename": filename,
+        "storage": "cloudinary",
     })
 
 
@@ -7496,21 +7714,13 @@ def compose_post_to_instagram(post_id: int):
     client = get_instagram_client()
 
     try:
-        # Instagram feed posts require an image
+        # Publish honoring the post's Instagram format (feed/carousel/reel/story)
         image_url = post['image_url'] if 'image_url' in post.keys() else None
-        image_url, image_err = _ensure_instagram_image(
-            post['content'],
-            image_url,
-            standalone_post_id=post_id,
-        )
-        if image_err:
-            return jsonify({"error": image_err}), 400
-
-        app.logger.info("Posting to Instagram with image: %s", image_url)
-        result = client.publish_image_post(
-            access_token=token['access_token'],
-            caption=post['content'],
+        result = _instagram_publish_for_post(
+            token['access_token'],
+            content=post['content'],
             image_url=image_url,
+            standalone_post_id=post_id,
         )
 
         if result['success']:
@@ -7561,17 +7771,25 @@ def compose_add_to_queue(post_id: int):
     if platform not in ['linkedin', 'threads', 'facebook', 'twitter', 'instagram']:
         return jsonify({"error": f"Platform {platform} does not support scheduling yet"}), 400
 
-    # Instagram feed posts require an image; attach a stock image now so the
-    # user can review or swap it before the scheduled time.
+    # Instagram posts require media; validate by format (and auto-attach a stock
+    # image for feed) now so the user can review or fix it before the scheduled time.
     if platform == 'instagram':
         existing_image = post['image_url'] if 'image_url' in post.keys() else None
-        _, image_err = _ensure_instagram_image(
+        ig_post_type = post['ig_post_type'] if 'ig_post_type' in post.keys() else None
+        raw_items = post['media_items'] if 'media_items' in post.keys() else None
+        try:
+            media_items = json.loads(raw_items) if raw_items else []
+        except (ValueError, TypeError):
+            media_items = []
+        _, media_err = _ensure_instagram_media(
             post['content'],
             existing_image,
+            ig_post_type,
+            media_items,
             standalone_post_id=post_id,
         )
-        if image_err:
-            return jsonify({"error": "Instagram posts require an image. Attach one before queueing."}), 400
+        if media_err:
+            return jsonify({"error": media_err}), 400
 
     # Use provided scheduled_for or get next available slot
     if scheduled_for:
@@ -8735,32 +8953,27 @@ def scheduled_post_worker() -> None:
                                 )
                                 continue
 
-                        # Instagram feed posts require an image; try to
-                        # auto-attach a stock image, otherwise fail immediately
-                        # (no retries - a missing image won't fix itself).
-                        image_url, image_err = _ensure_instagram_image(
-                            content,
-                            image_url,
+                        # Publish honoring the post's Instagram format
+                        # (feed/carousel/reel/story). A media-validation failure
+                        # (guard_error) fails immediately with no retry — a missing
+                        # image/video won't fix itself.
+                        result = _instagram_publish_for_post(
+                            instagram_token['access_token'],
+                            content=content,
+                            image_url=image_url,
                             standalone_post_id=post['standalone_post_id'],
                             social_post_id=post['social_post_id'],
                         )
-                        if image_err:
-                            app.logger.warning("Scheduled Instagram post %d has no image: %s", post['id'], image_err)
+
+                        if result.get('guard_error'):
+                            media_err = result.get('friendly', 'Instagram media requirement not met')
+                            app.logger.warning("Scheduled Instagram post %d media invalid: %s", post['id'], media_err)
                             update_scheduled_post_status(
                                 post['id'],
                                 status='failed',
-                                error_message=image_err,
+                                error_message=media_err,
                             )
                             continue
-
-                        ig_client = get_instagram_client()
-
-                        app.logger.info("Posting Instagram with image: %s", image_url)
-                        result = ig_client.publish_image_post(
-                            access_token=instagram_token['access_token'],
-                            caption=content[:2200],
-                            image_url=image_url,
-                        )
 
                         if result['success']:
                             update_scheduled_post_status(
