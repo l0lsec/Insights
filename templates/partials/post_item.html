@@ -3,7 +3,7 @@
                         <div class="d-flex justify-content-between align-items-center mb-2 post-header">
                             <div class="d-flex align-items-center gap-2">
                                 <input type="checkbox" class="form-check-input post-select-checkbox d-none"
-                                       data-post-id="{{ post.id }}" onchange="updateSelectedCount()">
+                                       data-post-id="{{ post.id }}" onchange="onPostCheckboxChange()">
                                 <span class="badge bg-secondary">Post {{ index }}</span>
                                 {% if post.source_type == 'agent' %}
                                 <span class="badge" style="background-color: #7c5cff;" title="Prepared by the content agent">🤖 Agent</span>

@@ -5875,6 +5875,61 @@ def compose_posts_more():
     })
 
 
+def _valid_post_platform(raw):
+    """Normalize an optional ?platform= filter, returning None when unset."""
+    platform = (raw or '').strip()
+    return platform or None
+
+
+@app.route('/compose/posts/content')
+def compose_posts_content():
+    """Return id/platform/content for every saved post (optionally one platform).
+
+    Text only — no images, schedules or brief metadata — so Find & Replace can
+    search across ALL posts, not just the page currently rendered.
+    """
+    platform = _valid_post_platform(request.args.get('platform'))
+    rows = list_standalone_posts(platform=platform)
+
+    # Index mirrors the "Post N" label on the page: 1-based within each platform,
+    # newest first (the same order the Compose page renders).
+    per_platform_index = {}
+    posts = []
+    for row in rows:
+        p = row['platform']
+        per_platform_index[p] = per_platform_index.get(p, 0) + 1
+        posts.append({
+            'id': row['id'],
+            'platform': p,
+            'content': row['content'] or '',
+            'index': per_platform_index[p],
+        })
+
+    return jsonify({
+        "success": True,
+        "posts": posts,
+        "count": len(posts),
+    })
+
+
+@app.route('/compose/posts/ids')
+def compose_posts_ids():
+    """Return the id + platform of every saved post (optionally one platform).
+
+    Powers the "select all across every page" bulk actions, which need the full
+    matching id set rather than the checkboxes currently in the DOM.
+    """
+    platform = _valid_post_platform(request.args.get('platform'))
+    rows = list_standalone_posts(platform=platform)
+    posts = [{'id': row['id'], 'platform': row['platform']} for row in rows]
+
+    return jsonify({
+        "success": True,
+        "posts": posts,
+        "count": len(posts),
+    })
+
+
 @app.route('/compose/posts/queue-all-unscheduled', methods=['POST'])
 def compose_queue_all_unscheduled():
     """Queue every unscheduled, unused saved post for a platform (server-side).
