@@ -1269,6 +1269,43 @@
                 </div>
             </div>
             {% endfor %}
+            {# Manual-create cards for supported platforms that have no posts yet,
+               so any platform (e.g. Instagram) can be authored from scratch. #}
+            {% for platform in ['linkedin', 'threads', 'twitter', 'facebook', 'instagram'] if platform not in posts_by_platform %}
+            <div class="social-copy-card mb-3" data-platform="{{ platform }}">
+                <div class="social-copy-header d-flex justify-content-between align-items-center" style="background-color: var(--platform-{{ platform }}-color, #6c757d)">
+                    <div>
+                        <span class="social-icon">
+                            {% if platform == 'twitter' %}𝕏{% elif platform == 'linkedin' %}💼{% elif platform == 'facebook' %}📘{% elif platform == 'threads' %}🧵{% elif platform == 'instagram' %}📷{% else %}📱{% endif %}
+                        </span>
+                        <span class="social-platform">{{ platform|capitalize }}</span>
+                    </div>
+                </div>
+                <div class="social-copy-body" data-platform="{{ platform }}">
+                    <div class="add-post-area" data-platform="{{ platform }}">
+                        <button class="btn btn-sm btn-outline-primary w-100 add-post-toggle-btn" id="add-post-btn-{{ platform }}" onclick="showAddPostForm('{{ platform }}')">
+                            ✏️ Write a New {{ platform|capitalize }} Post
+                        </button>
+                        <div class="d-none" id="add-post-form-{{ platform }}">
+                            <label class="form-label fw-bold small mb-1">New {{ platform|capitalize }} Post</label>
+                            <textarea class="form-control mb-2" id="add-post-textarea-{{ platform }}" rows="4"
+                                      placeholder="Write your {{ platform }} post here..." oninput="updateManualCharCount('{{ platform }}')"></textarea>
+                            <div class="d-flex justify-content-between align-items-center">
+                                <small class="text-muted" id="add-post-charcount-{{ platform }}"></small>
+                                <div class="d-flex gap-2">
+                                    <button class="btn btn-sm btn-success" onclick="createManualPost('{{ platform }}')">
+                                        💾 Save Post
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary" onclick="hideAddPostForm('{{ platform }}')">
+                                        Cancel
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            {% endfor %}
         </div>
     </div>
 </div>
