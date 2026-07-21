@@ -46,6 +46,7 @@ What started as a podcast transcription tool has grown into a complete content p
 - **Threads Integration** - OAuth-based posting with text and image support
 - **Facebook Integration** - OAuth-based posting to Facebook Pages with text and image support
 - **X/Twitter Integration** - OAuth 2.0 with PKCE for posting text and images (pay-per-use media uploads)
+- **Instagram Integration** - OAuth-based publishing of feed posts, **carousels** (2–10 images/videos), **Reels**, and **Stories** (image or video). Requires a professional (Business/Creator) account
 - **Time Slot Management** - Configure recurring posting times by day of week and platform
 - **Auto-Queue** - Posts automatically slot into the next available time
 - **Daily Limits** - Set per-platform daily posting caps
@@ -272,6 +273,17 @@ All variables can be set in a `.env` file in the project root. See `.env.example
 | `TWITTER_CLIENT_SECRET` | Client Secret from your X app |
 | `TWITTER_REDIRECT_URI` | OAuth callback URL (default: `http://localhost:5001/twitter/callback`) |
 
+### Instagram Integration
+
+| Variable | Description |
+|----------|-------------|
+| `INSTAGRAM_APP_ID` | Instagram App ID from your Meta app's **Instagram** product (not the Meta app's own ID) |
+| `INSTAGRAM_APP_SECRET` | Instagram App Secret from the same product |
+| `INSTAGRAM_REDIRECT_URI` | OAuth callback URL — must be **HTTPS** (default: `https://localhost:5001/instagram/callback`) |
+| `INSTAGRAM_SCOPES` | Optional; defaults to `instagram_business_basic,instagram_business_content_publish` |
+
+> Uses the "Instagram API with Instagram Login" flavor (no Facebook Page required). Requires a professional (Business/Creator) Instagram account. Feed/carousel/reel/story media must be publicly hosted — configure Cloudinary or paste public URLs.
+
 ### Stock Images (all free)
 
 | Variable | Rate Limit | Sign Up |
@@ -288,7 +300,7 @@ All variables can be set in a `.env` file in the project root. See `.env.example
 | `CLOUDINARY_API_KEY` | Cloudinary API key |
 | `CLOUDINARY_API_SECRET` | Cloudinary API secret |
 
-> Cloudinary provides publicly accessible image URLs needed by Threads, Facebook, X/Twitter, and other platforms. Sign up free at [cloudinary.com](https://cloudinary.com).
+> Cloudinary provides publicly accessible image and video URLs needed by Threads, Facebook, X/Twitter, and Instagram. It is effectively required for Instagram (and for Instagram Reels/video, which upload as `resource_type=video`). Sign up free at [cloudinary.com](https://cloudinary.com).
 
 ## Usage (CLI)
 
@@ -455,6 +467,30 @@ Posts are published to the selected Facebook Page with text and optional image a
 5. Click **Connect X** in the web UI
 
 X/Twitter uses the v2 API with pay-per-use pricing. Text posts cost $0.01 each. Image uploads use the chunked media upload endpoint (max 5 MB per image).
+
+### Posting to Instagram
+
+#### Setup
+
+1. Create a Meta App at the [Meta Developer Portal](https://developers.facebook.com/apps/) and add the **Instagram** product ("API setup with Instagram login")
+2. Under that product, copy the **Instagram App ID** and **Instagram App Secret** (these differ from the Meta app's own ID/secret)
+3. In **Set up business login**, add an **HTTPS** redirect URI (e.g. `https://localhost:5001/instagram/callback` or your public tunnel URL)
+4. Under **App roles → Roles**, add your Instagram account as an **Instagram Tester**, then accept the invite in the Instagram app (*Settings → Apps and websites → Tester Invites*)
+5. Set `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, and `INSTAGRAM_REDIRECT_URI` in your `.env`
+6. Click **Connect Instagram** in the web UI and authorize
+
+Requires a professional (**Business** or **Creator**) Instagram account. In Meta dev mode, tester access is sufficient for single-user posting — no App Review needed.
+
+#### Post formats
+
+In the Command Center, each Instagram post has a **format selector**:
+
+- **Feed** — a single image (auto-attaches a stock image if none is set)
+- **Carousel** — 2–10 images and/or videos
+- **Reel** — a single video
+- **Story** — a single image or video (no caption; Stories expire after 24h)
+
+Media is publicly hosted via Cloudinary (image/video upload) or a pasted public URL. Instagram has no text-only feed posts, so every post needs media. Videos must be MP4/MOV (H.264/AAC, ~90s) — Instagram rejects unsupported codecs/aspect ratios/durations, which the app surfaces as a readable error.
 
 ## Credits
 
