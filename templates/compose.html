@@ -1582,7 +1582,8 @@
                     <span class="text-muted small" id="search-selected-count">0 of 0 selected</span>
                 </div>
                 <div class="text-muted small mb-2 d-none" id="search-click-hint">
-                    💡 Click on highlighted text to exclude individual matches from replacement
+                    💡 Click on highlighted text to exclude individual matches from replacement &middot;
+                    Use <strong>✏️ Edit</strong> to rewrite a post right here
                 </div>
                 <div id="search-results-container" style="max-height: 400px; overflow-y: auto;">
                     <div class="text-center text-muted py-4" id="search-empty-state">
@@ -1593,6 +1594,9 @@
                 </div>
             </div>
             <div class="modal-footer">
+                <span class="text-muted small me-auto d-none" id="search-edit-notice">
+                    ✏️ Save or cancel your edit to re-enable Replace All
+                </span>
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                 <button type="button" class="btn btn-primary" onclick="executeReplaceAll()" id="replace-all-btn" disabled>
                     Replace All
@@ -5082,6 +5086,7 @@ function clearPostFilters() {
 let searchReplacePostData = [];
 let searchDebounceTimer = null;
 let excludedMatches = {}; // { "postId-matchIndex": true } for excluded matches
+let openSearchEdits = {}; // { postId: draftText } for inline editors currently open
 
 function openSearchReplaceModal() {
     // Gather post data from visible (non-filtered) posts only
@@ -5139,8 +5144,10 @@ function openSearchReplaceModal() {
     document.getElementById('search-select-controls').classList.add('d-none');
     document.getElementById('search-select-all').checked = true;
     document.getElementById('search-exclude-words').value = '';
+    document.getElementById('search-edit-notice').classList.add('d-none');
     excludedMatches = {}; // Reset excluded matches
-    
+    openSearchEdits = {}; // Reset any inline editors
+
     new bootstrap.Modal(document.getElementById('searchReplaceModal')).show();
 }
 
@@ -5152,7 +5159,7 @@ function performLiveSearch() {
     }, 300);
 }
 
-function doSearch() {
+function doSearch(preserveState = false) {
     const findText = document.getElementById('search-find-input').value;
     const replaceText = document.getElementById('search-replace-input').value;
     const caseSensitive = document.getElementById('search-case-sensitive').checked;
@@ -5164,9 +5171,17 @@ function doSearch() {
     const matchCountBadge = document.getElementById('search-match-count');
     const replaceBtn = document.getElementById('replace-all-btn');
     
-    // Reset excluded matches when search changes
-    excludedMatches = {};
-    
+    // Snapshot checkbox selection, open editor drafts and scroll offset so a
+    // re-render triggered by an inline edit doesn't throw the user's work away.
+    const priorState = preserveState ? captureSearchResultState() : null;
+
+    // Reset excluded matches when the search itself changes (a re-render after
+    // an inline edit keeps them)
+    if (!preserveState) {
+        excludedMatches = {};
+    }
+    openSearchEdits = {}; // Rebuilding the list destroys any open editors
+
     if (!findText.trim()) {
         emptyState.classList.remove('d-none');
         resultsList.classList.add('d-none');
@@ -5175,6 +5190,7 @@ function doSearch() {
         replaceBtn.disabled = true;
         document.getElementById('search-select-controls').classList.add('d-none');
         document.getElementById('search-click-hint').classList.add('d-none');
+        document.getElementById('search-edit-notice').classList.add('d-none');
         return;
     }
     
@@ -5239,8 +5255,10 @@ function doSearch() {
         `;
         emptyState.classList.remove('d-none');
         resultsList.classList.add('d-none');
+        resultsList.innerHTML = '';
         document.getElementById('search-select-controls').classList.add('d-none');
         document.getElementById('search-click-hint').classList.add('d-none');
+        document.getElementById('search-edit-notice').classList.add('d-none');
         return;
     }
     
@@ -5257,38 +5275,104 @@ function doSearch() {
         const platformColor = post.platform === 'linkedin' ? '#0077B5' : 
                              post.platform === 'threads' ? '#000000' : '#6c757d';
         
+        const editRows = Math.min(14, Math.max(4, post.content.split('\n').length + 1));
+
         html += `
             <div class="card mb-2 search-result-card" data-post-id="${post.id}">
                 <div class="card-header py-2 d-flex justify-content-between align-items-center" style="background-color: ${platformColor}15;">
                     <div class="d-flex align-items-center gap-2">
-                        <input type="checkbox" class="form-check-input search-post-checkbox" 
+                        <input type="checkbox" class="form-check-input search-post-checkbox"
                                data-post-id="${post.id}" checked onchange="updateSearchSelectedCount()">
                         <span class="badge" style="background-color: ${platformColor};">${platformIcon} ${post.platform.charAt(0).toUpperCase() + post.platform.slice(1)}</span>
                         <span class="badge bg-secondary">Post ${post.index}</span>
                         <span class="badge bg-warning text-dark">${post.matchCount} match${post.matchCount !== 1 ? 'es' : ''}</span>
                     </div>
+                    <button type="button" class="btn btn-sm btn-outline-secondary search-edit-btn"
+                            onclick="startSearchResultEdit('${post.id}')" title="Edit this post inline">
+                        ✏️ Edit
+                    </button>
                 </div>
                 <div class="card-body py-2">
-                    <div class="search-content-preview" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; word-break: break-word;">
-                        ${post.highlightedContent}
+                    <div class="search-result-view">
+                        <div class="search-content-preview" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; word-break: break-word;">
+                            ${post.highlightedContent}
+                        </div>
+                        ${post.previewContent ? `
+                        <hr class="my-2">
+                        <div class="text-muted small mb-1">After replacement:</div>
+                        <div class="replacement-preview" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; word-break: break-word; background-color: #f8f9fa; padding: 8px; border-radius: 4px;">
+                            ${post.previewContent}
+                        </div>
+                        ` : ''}
                     </div>
-                    ${post.previewContent ? `
-                    <hr class="my-2">
-                    <div class="text-muted small mb-1">After replacement:</div>
-                    <div class="replacement-preview" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; word-break: break-word; background-color: #f8f9fa; padding: 8px; border-radius: 4px;">
-                        ${post.previewContent}
+                    <div class="search-result-edit d-none">
+                        <textarea class="form-control" id="search-edit-textarea-${post.id}" rows="${editRows}"
+                                  style="font-family: monospace; font-size: 0.85rem;"
+                                  oninput="updateSearchEditCharCount('${post.id}')"
+                                  onkeydown="handleSearchEditKeydown(event, '${post.id}')">${escapeHtml(post.content)}</textarea>
+                        <div class="d-flex justify-content-between align-items-center mt-2">
+                            <small class="text-muted" id="search-edit-charcount-${post.id}"></small>
+                            <div class="d-flex gap-2">
+                                <button type="button" class="btn btn-sm btn-outline-secondary"
+                                        onclick="cancelSearchResultEdit('${post.id}')">Cancel</button>
+                                <button type="button" class="btn btn-sm btn-success search-edit-save-btn"
+                                        data-post-id="${post.id}" onclick="saveSearchResultEdit('${post.id}')">
+                                    💾 Save
+                                </button>
+                            </div>
+                        </div>
+                        <div class="text-muted mt-1" style="font-size: 0.75rem;">
+                            ⌘/Ctrl + Enter to save &middot; Esc to cancel
+                        </div>
                     </div>
-                    ` : ''}
                 </div>
             </div>
         `;
     });
     
     resultsList.innerHTML = html;
-    
-    // Update selected count and reset select-all checkbox
-    document.getElementById('search-select-all').checked = true;
+
+    if (priorState) {
+        restoreSearchResultState(priorState);
+    } else {
+        // Reset select-all checkbox for a fresh search
+        document.getElementById('search-select-all').checked = true;
+    }
     updateSearchSelectedCount();
+}
+
+function captureSearchResultState() {
+    const selection = {};
+    document.querySelectorAll('.search-post-checkbox').forEach(cb => {
+        selection[cb.dataset.postId] = cb.checked;
+    });
+
+    const drafts = {};
+    Object.keys(openSearchEdits).forEach(postId => {
+        const textarea = document.getElementById(`search-edit-textarea-${postId}`);
+        drafts[postId] = textarea ? textarea.value : openSearchEdits[postId];
+    });
+
+    const container = document.getElementById('search-results-container');
+    return { selection, drafts, scrollTop: container ? container.scrollTop : 0 };
+}
+
+function restoreSearchResultState(state) {
+    document.querySelectorAll('.search-post-checkbox').forEach(cb => {
+        if (Object.prototype.hasOwnProperty.call(state.selection, cb.dataset.postId)) {
+            cb.checked = state.selection[cb.dataset.postId];
+        }
+    });
+
+    // Reopen editors that were still open, keeping their unsaved drafts
+    Object.keys(state.drafts).forEach(postId => {
+        if (document.getElementById(`search-edit-textarea-${postId}`)) {
+            startSearchResultEdit(postId, state.drafts[postId], false);
+        }
+    });
+
+    const container = document.getElementById('search-results-container');
+    if (container) container.scrollTop = state.scrollTop;
 }
 
 function escapeRegex(string) {
@@ -5362,9 +5446,161 @@ function updateSearchSelectedCount() {
     const selectAllCheckbox = document.getElementById('search-select-all');
     selectAllCheckbox.checked = selected === total;
     selectAllCheckbox.indeterminate = selected > 0 && selected < total;
-    
-    // Enable/disable replace button based on selection
-    document.getElementById('replace-all-btn').disabled = selected === 0;
+
+    updateReplaceButtonState();
+}
+
+// Replace All needs at least one selected post and no half-finished inline edit
+function updateReplaceButtonState() {
+    const selected = document.querySelectorAll('.search-post-checkbox:checked').length;
+    const editsOpen = Object.keys(openSearchEdits).length > 0;
+
+    document.getElementById('replace-all-btn').disabled = selected === 0 || editsOpen;
+    document.getElementById('search-edit-notice').classList.toggle('d-none', !editsOpen);
+}
+
+// ---- Inline post editing from within the search results ----
+
+function startSearchResultEdit(postId, draftText, focus = true) {
+    const card = document.querySelector(`.search-result-card[data-post-id="${postId}"]`);
+    const textarea = document.getElementById(`search-edit-textarea-${postId}`);
+    if (!card || !textarea) return;
+
+    if (draftText !== undefined && draftText !== null) {
+        textarea.value = draftText;
+    }
+
+    card.querySelector('.search-result-view').classList.add('d-none');
+    card.querySelector('.search-result-edit').classList.remove('d-none');
+    const editBtn = card.querySelector('.search-edit-btn');
+    if (editBtn) editBtn.classList.add('d-none');
+
+    openSearchEdits[postId] = textarea.value;
+    updateSearchEditCharCount(postId);
+    updateReplaceButtonState();
+
+    if (focus) {
+        textarea.focus();
+        textarea.setSelectionRange(textarea.value.length, textarea.value.length);
+    }
+}
+
+function cancelSearchResultEdit(postId) {
+    const card = document.querySelector(`.search-result-card[data-post-id="${postId}"]`);
+    if (!card) return;
+
+    // Drop the draft — the textarea is re-seeded from post data on reopen
+    const textarea = document.getElementById(`search-edit-textarea-${postId}`);
+    const post = searchReplacePostData.find(p => p.id === postId);
+    if (textarea && post) textarea.value = post.content;
+
+    card.querySelector('.search-result-edit').classList.add('d-none');
+    card.querySelector('.search-result-view').classList.remove('d-none');
+    const editBtn = card.querySelector('.search-edit-btn');
+    if (editBtn) editBtn.classList.remove('d-none');
+
+    delete openSearchEdits[postId];
+    updateReplaceButtonState();
+}
+
+function updateSearchEditCharCount(postId) {
+    const textarea = document.getElementById(`search-edit-textarea-${postId}`);
+    const counter = document.getElementById(`search-edit-charcount-${postId}`);
+    if (!textarea || !counter) return;
+
+    openSearchEdits[postId] = textarea.value;
+
+    const post = searchReplacePostData.find(p => p.id === postId);
+    const limit = platformCharLimits[post ? post.platform : ''] || 5000;
+    const len = textarea.value.length;
+    counter.textContent = `${len} / ${limit} characters`;
+    counter.className = len > limit ? 'small text-danger fw-bold' : 'small text-muted';
+}
+
+function handleSearchEditKeydown(event, postId) {
+    if (event.key === 'Escape') {
+        // Stop Bootstrap from closing the whole modal
+        event.preventDefault();
+        event.stopPropagation();
+        cancelSearchResultEdit(postId);
+    } else if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        saveSearchResultEdit(postId);
+    }
+}
+
+function saveSearchResultEdit(postId) {
+    const textarea = document.getElementById(`search-edit-textarea-${postId}`);
+    if (!textarea) return;
+
+    const content = textarea.value.trim();
+    if (!content) {
+        showToast('Content cannot be empty', 'error');
+        return;
+    }
+
+    const post = searchReplacePostData.find(p => p.id === postId);
+    if (post && content === post.content) {
+        cancelSearchResultEdit(postId);
+        return;
+    }
+
+    const btn = document.querySelector(`.search-edit-save-btn[data-post-id="${postId}"]`);
+    const originalLabel = btn ? btn.innerHTML : '';
+    if (btn) {
+        btn.innerHTML = '⏳ Saving...';
+        btn.disabled = true;
+    }
+
+    const formData = new FormData();
+    formData.append('content', content);
+
+    fetch(`/compose/post/${postId}/edit`, {
+        method: 'POST',
+        body: formData
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            if (post) post.content = content;
+            syncPostContentOnPage(postId, content);
+
+            // Match indices shift after an edit, so this post's per-match
+            // exclusions no longer point at the right text
+            Object.keys(excludedMatches).forEach(key => {
+                if (key.startsWith(`${postId}-`)) delete excludedMatches[key];
+            });
+
+            delete openSearchEdits[postId];
+            showToast('Post updated!', 'success');
+            // Re-run the search so highlights and match counts reflect the edit
+            doSearch(true);
+        } else {
+            showToast('Error: ' + (data.error || 'Failed to save'), 'error');
+            if (btn) {
+                btn.innerHTML = originalLabel;
+                btn.disabled = false;
+            }
+        }
+    })
+    .catch(error => {
+        showToast('Error: ' + error.message, 'error');
+        if (btn) {
+            btn.innerHTML = originalLabel;
+            btn.disabled = false;
+        }
+    });
+}
+
+// Keep the post as rendered on the page behind the modal in sync with the edit
+function syncPostContentOnPage(postId, content) {
+    const textEl = document.getElementById(`saved-post-${postId}`);
+    if (textEl) {
+        textEl.textContent = content;
+        textEl.dataset.originalContent = content;
+    }
+    const editTextarea = document.getElementById(`edit-textarea-${postId}`);
+    if (editTextarea) editTextarea.value = content;
 }
 
 function toggleMatchSelection(element) {
