@@ -35,6 +35,11 @@ INSTAGRAM_SCOPES = os.environ.get(
 # Instagram caption limit (feed posts)
 INSTAGRAM_CAPTION_LIMIT = 2200
 
+# Container poll retry counts (2s interval). Video (reels / video stories /
+# video carousel items) processes much slower than images.
+IMAGE_MAX_RETRIES = 45      # ~90s
+VIDEO_MAX_RETRIES = 120     # ~4 min
+
 # Long-lived tokens last ~60 days
 DEFAULT_TOKEN_LIFETIME_SECONDS = 5184000
 
@@ -220,93 +225,83 @@ class InstagramClient:
             logger.error("Error getting Instagram profile: %s", e)
             return None
 
-    def publish_image_post(
-        self,
-        access_token: str,
-        caption: str,
-        image_url: str,
-    ) -> dict:
-        """Publish a single-image feed post to Instagram.
-
-        Instagram has no text-only posts, so image_url is required. The image
-        must be a JPEG on a publicly accessible URL with aspect ratio between
-        4:5 and 1.91:1.
-
-        Args:
-            access_token: Valid Instagram access token
-            caption: The post caption (max 2200 characters)
-            image_url: Public URL of the image to post
-
-        Returns:
-            Dict with success status and post details
-        """
-        if not image_url:
-            return {
-                "success": False,
-                "error": {"message": "Instagram posts require an image"},
-                "friendly": "Instagram posts require an image.",
-            }
-
-        if len(caption) > INSTAGRAM_CAPTION_LIMIT:
-            caption = caption[:INSTAGRAM_CAPTION_LIMIT - 3] + "..."
+    @staticmethod
+    def _truncate_caption(caption: str) -> str:
+        """Truncate a caption to the Instagram limit, keeping an ellipsis."""
+        if caption and len(caption) > INSTAGRAM_CAPTION_LIMIT:
             logger.warning("Instagram caption truncated to %d characters", INSTAGRAM_CAPTION_LIMIT)
+            return caption[:INSTAGRAM_CAPTION_LIMIT - 3] + "..."
+        return caption
 
-        params = {
-            "caption": caption,
-            "image_url": image_url,
-            "access_token": access_token,
-        }
+    def _create_container(self, params: dict) -> tuple[Optional[str], Optional[dict]]:
+        """POST /me/media to create a media container.
 
+        Returns (container_id, None) on success, or (None, error_result) where
+        error_result is the standard failure dict.
+        """
         try:
-            # Step 1: Create media container with image
-            logger.info("Creating Instagram image container with image: %s", image_url)
             response = requests.post(
                 f"{INSTAGRAM_API_HOST}/me/media",
                 params=params,
                 timeout=30,
             )
+        except requests.RequestException as e:
+            logger.error("Instagram container request failed: %s", e)
+            return None, {
+                "success": False,
+                "error": {"message": str(e)},
+                "friendly": f"Instagram API request failed: {e}",
+            }
 
-            if response.status_code != 200:
-                error_data = {}
-                try:
-                    error_data = response.json()
-                except Exception:
-                    error_data = {"raw": response.text}
-                logger.error(
-                    "Instagram container creation failed: %s - %s",
-                    response.status_code,
-                    error_data,
-                )
-                return {
-                    "success": False,
-                    "status_code": response.status_code,
-                    "error": error_data,
-                    "friendly": _friendly_error(error_data),
-                }
+        if response.status_code != 200:
+            error_data = {}
+            try:
+                error_data = response.json()
+            except Exception:
+                error_data = {"raw": response.text}
+            logger.error(
+                "Instagram container creation failed: %s - %s",
+                response.status_code,
+                error_data,
+            )
+            return None, {
+                "success": False,
+                "status_code": response.status_code,
+                "error": error_data,
+                "friendly": _friendly_error(error_data),
+            }
 
-            container_data = response.json()
-            container_id = container_data.get("id")
+        container_id = response.json().get("id")
+        if not container_id:
+            return None, {
+                "success": False,
+                "error": {"message": "No container ID returned"},
+                "friendly": "Instagram did not return a media container ID.",
+            }
+        return container_id, None
 
-            if not container_id:
-                return {
-                    "success": False,
-                    "error": {"message": "No container ID returned"},
-                    "friendly": "Instagram did not return a media container ID.",
-                }
+    def _poll_and_publish(
+        self,
+        container_id: str,
+        access_token: str,
+        *,
+        max_retries: int = IMAGE_MAX_RETRIES,
+        poll_interval: float = 2.0,
+    ) -> dict:
+        """Poll a container until FINISHED, then publish it.
 
-            # Step 2: Poll container status until FINISHED
-            # Instagram fetches the remote image, which can take a while
-            max_retries = 45
-            poll_interval = 2.0  # seconds
-
+        Shared by every media type (feed image, carousel, reel, story). Returns
+        the standard result dict: success ->
+        {success, post_id, shortcode, permalink, status_code}; failure ->
+        {success: False, status_code?, error, friendly}.
+        """
+        try:
+            # Step 2: Poll container status until FINISHED. Instagram fetches and
+            # processes the remote media, which can take a while (longer for video).
             for attempt in range(max_retries):
-                status_params = {
-                    "fields": "status_code,status",
-                    "access_token": access_token,
-                }
                 status_response = requests.get(
                     f"{INSTAGRAM_API_HOST}/{container_id}",
-                    params=status_params,
+                    params={"fields": "status_code,status", "access_token": access_token},
                     timeout=10,
                 )
 
@@ -319,15 +314,14 @@ class InstagramClient:
                         break
                     elif container_status == "ERROR":
                         # The human-readable detail lives in the status field
-                        error_msg = status_data.get("status", "Image container processing failed")
+                        error_msg = status_data.get("status", "Media container processing failed")
                         logger.error("Instagram container %s failed: %s", container_id, error_msg)
                         return {
                             "success": False,
                             "error": {"message": error_msg},
                             "friendly": (
-                                "Instagram rejected the image: %s. Feed photos must be "
-                                "JPEG on a public URL with aspect ratio between 4:5 and 1.91:1."
-                                % error_msg
+                                "Instagram rejected the media: %s. Check the format, aspect "
+                                "ratio, and (for video) duration/codec." % error_msg
                             ),
                         }
                     elif container_status == "EXPIRED":
@@ -356,38 +350,28 @@ class InstagramClient:
                 logger.error("Instagram container %s not ready after %d attempts", container_id, max_retries)
                 return {
                     "success": False,
-                    "error": {"message": "Image processing timed out"},
-                    "friendly": "Instagram image processing timed out. Try again or use a smaller image.",
+                    "error": {"message": "Media processing timed out"},
+                    "friendly": "Instagram media processing timed out. Try again or use a smaller/shorter file.",
                 }
 
             # Step 3: Publish the container
-            publish_params = {
-                "creation_id": container_id,
-                "access_token": access_token,
-            }
-
             publish_response = requests.post(
                 f"{INSTAGRAM_API_HOST}/me/media_publish",
-                params=publish_params,
+                params={"creation_id": container_id, "access_token": access_token},
                 timeout=30,
             )
 
             if publish_response.status_code == 200:
-                publish_data = publish_response.json()
-                post_id = publish_data.get("id")
+                post_id = publish_response.json().get("id")
 
                 # Fetch post details to get permalink and shortcode
                 permalink = None
                 shortcode = None
                 if post_id:
                     try:
-                        details_params = {
-                            "fields": "permalink,shortcode",
-                            "access_token": access_token,
-                        }
                         details_response = requests.get(
                             f"{INSTAGRAM_API_HOST}/{post_id}",
-                            params=details_params,
+                            params={"fields": "permalink,shortcode", "access_token": access_token},
                             timeout=10,
                         )
                         if details_response.status_code == 200:
@@ -429,6 +413,194 @@ class InstagramClient:
                 "error": {"message": str(e)},
                 "friendly": f"Instagram API request failed: {e}",
             }
+
+    def publish_image_post(
+        self,
+        access_token: str,
+        caption: str,
+        image_url: str,
+    ) -> dict:
+        """Publish a single-image feed post to Instagram.
+
+        Instagram has no text-only posts, so image_url is required. The image
+        must be a JPEG on a publicly accessible URL with aspect ratio between
+        4:5 and 1.91:1.
+
+        Args:
+            access_token: Valid Instagram access token
+            caption: The post caption (max 2200 characters)
+            image_url: Public URL of the image to post
+
+        Returns:
+            Dict with success status and post details
+        """
+        if not image_url:
+            return {
+                "success": False,
+                "error": {"message": "Instagram posts require an image"},
+                "friendly": "Instagram posts require an image.",
+            }
+
+        caption = self._truncate_caption(caption)
+        logger.info("Creating Instagram image container with image: %s", image_url)
+        container_id, error = self._create_container({
+            "caption": caption,
+            "image_url": image_url,
+            "access_token": access_token,
+        })
+        if error:
+            return error
+        return self._poll_and_publish(container_id, access_token)
+
+    def publish_carousel_post(
+        self,
+        access_token: str,
+        caption: str,
+        media_items: list,
+    ) -> dict:
+        """Publish a carousel (2-10 images and/or videos) feed post.
+
+        Args:
+            access_token: Valid Instagram access token
+            caption: The post caption (max 2200 characters)
+            media_items: list of {"url": str, "kind": "image"|"video"}
+
+        Returns:
+            Dict with success status and post details
+        """
+        items = media_items or []
+        if not (2 <= len(items) <= 10):
+            return {
+                "success": False,
+                "error": {"message": "carousel needs 2-10 items"},
+                "friendly": "Instagram carousels need between 2 and 10 items.",
+            }
+
+        caption = self._truncate_caption(caption)
+
+        # Step 1a: create a child container per item
+        child_ids = []
+        has_video = False
+        for item in items:
+            url = (item or {}).get("url")
+            kind = (item or {}).get("kind", "image")
+            if not url:
+                return {
+                    "success": False,
+                    "error": {"message": "carousel item missing url"},
+                    "friendly": "A carousel item is missing its media URL.",
+                }
+            if kind == "video":
+                has_video = True
+                params = {
+                    "media_type": "VIDEO",
+                    "video_url": url,
+                    "is_carousel_item": "true",
+                    "access_token": access_token,
+                }
+            else:
+                params = {
+                    "image_url": url,
+                    "is_carousel_item": "true",
+                    "access_token": access_token,
+                }
+            logger.info("Creating Instagram carousel child container (%s)", kind)
+            container_id, error = self._create_container(params)
+            if error:
+                return error
+            child_ids.append(container_id)
+
+        # Step 1b: create the parent carousel container
+        parent_id, error = self._create_container({
+            "media_type": "CAROUSEL",
+            "children": ",".join(child_ids),
+            "caption": caption,
+            "access_token": access_token,
+        })
+        if error:
+            return error
+
+        # Polling the parent covers child (video) processing — the parent will not
+        # reach FINISHED until all children are ready.
+        max_retries = VIDEO_MAX_RETRIES if has_video else IMAGE_MAX_RETRIES
+        return self._poll_and_publish(parent_id, access_token, max_retries=max_retries)
+
+    def publish_reel_post(
+        self,
+        access_token: str,
+        caption: str,
+        video_url: str,
+        share_to_feed: bool = True,
+    ) -> dict:
+        """Publish a Reel (single video) to Instagram.
+
+        Args:
+            access_token: Valid Instagram access token
+            caption: The post caption (max 2200 characters)
+            video_url: Public URL of the video (MP4/MOV, H.264/AAC, ~90s)
+            share_to_feed: Also show the reel on the main feed grid
+
+        Returns:
+            Dict with success status and post details
+        """
+        if not video_url:
+            return {
+                "success": False,
+                "error": {"message": "reel requires a video"},
+                "friendly": "Instagram Reels require a video.",
+            }
+
+        caption = self._truncate_caption(caption)
+        logger.info("Creating Instagram reel container with video: %s", video_url)
+        container_id, error = self._create_container({
+            "media_type": "REELS",
+            "video_url": video_url,
+            "caption": caption,
+            "share_to_feed": "true" if share_to_feed else "false",
+            "access_token": access_token,
+        })
+        if error:
+            return error
+        return self._poll_and_publish(container_id, access_token, max_retries=VIDEO_MAX_RETRIES)
+
+    def publish_story_post(
+        self,
+        access_token: str,
+        image_url: Optional[str] = None,
+        video_url: Optional[str] = None,
+    ) -> dict:
+        """Publish a Story (one image or one video) to Instagram.
+
+        Stories have no caption via the Content Publishing API.
+
+        Args:
+            access_token: Valid Instagram access token
+            image_url: Public URL of the image (mutually exclusive with video_url)
+            video_url: Public URL of the video (mutually exclusive with image_url)
+
+        Returns:
+            Dict with success status and post details
+        """
+        if bool(image_url) == bool(video_url):
+            return {
+                "success": False,
+                "error": {"message": "story requires exactly one of image_url/video_url"},
+                "friendly": "A story needs exactly one image or one video.",
+            }
+
+        params = {"media_type": "STORIES", "access_token": access_token}
+        if image_url:
+            params["image_url"] = image_url
+            max_retries = IMAGE_MAX_RETRIES
+        else:
+            params["video_url"] = video_url
+            max_retries = VIDEO_MAX_RETRIES
+
+        logger.info("Creating Instagram story container")
+        container_id, error = self._create_container(params)
+        if error:
+            return error
+        return self._poll_and_publish(container_id, access_token, max_retries=max_retries)
 
     def get_publishing_limit(self, access_token: str) -> dict | None:
         """Check the user's content publishing rate limit.

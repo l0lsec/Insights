@@ -288,6 +288,13 @@ def init_db(db_path: str = DB_PATH) -> None:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN image_url TEXT")
         if "repost" not in standalone_columns:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN repost INTEGER DEFAULT 0")
+        # Instagram media format: NULL/'feed' (single image) | 'carousel' | 'reel' | 'story'.
+        # media_items is a JSON list of {"url": ..., "kind": "image"|"video"} for the
+        # non-feed formats; feed keeps using the single image_url column.
+        if "ig_post_type" not in standalone_columns:
+            conn.execute("ALTER TABLE standalone_posts ADD COLUMN ig_post_type TEXT")
+        if "media_items" not in standalone_columns:
+            conn.execute("ALTER TABLE standalone_posts ADD COLUMN media_items TEXT")
         # URL sources - stores extracted content from URLs for reuse
         conn.execute(
             """
@@ -312,10 +319,16 @@ def init_db(db_path: str = DB_PATH) -> None:
                 url TEXT UNIQUE,
                 storage TEXT,
                 size INTEGER,
-                created_at TEXT
+                created_at TEXT,
+                media_type TEXT DEFAULT 'image'
             )
             """
         )
+        # Upgrade uploaded_images to track media type (image vs video) if missing
+        cur = conn.execute("PRAGMA table_info(uploaded_images)")
+        uploaded_images_columns = [row[1] for row in cur.fetchall()]
+        if "media_type" not in uploaded_images_columns:
+            conn.execute("ALTER TABLE uploaded_images ADD COLUMN media_type TEXT DEFAULT 'image'")
         # Prompt library - curated, named prompts the user can reuse anywhere
         conn.execute(
             """
@@ -3186,13 +3199,59 @@ def update_standalone_post_image(
         conn.commit()
 
 
+IG_POST_TYPES = ("feed", "carousel", "reel", "story")
+
+
+def set_standalone_post_media(
+    post_id: int,
+    ig_post_type: str,
+    media_items: Optional[list] = None,
+    db_path: str = DB_PATH,
+) -> None:
+    """Set the Instagram media format and media list for a standalone post.
+
+    Args:
+        post_id: The post ID
+        ig_post_type: one of 'feed' | 'carousel' | 'reel' | 'story'
+        media_items: list of {"url": str, "kind": "image"|"video"} (ignored for feed)
+
+    For 'feed', media_items is cleared and image_url is synced to the first item's
+    url when provided (feed stays single-source-of-truth on image_url).
+    """
+    if ig_post_type not in IG_POST_TYPES:
+        raise ValueError(f"Invalid ig_post_type: {ig_post_type!r}")
+    items = media_items or []
+
+    with sqlite3.connect(db_path) as conn:
+        if ig_post_type == "feed":
+            first_url = items[0].get("url") if items else None
+            if first_url:
+                conn.execute(
+                    "UPDATE standalone_posts SET ig_post_type = ?, media_items = NULL, "
+                    "image_url = ? WHERE id = ?",
+                    ("feed", first_url, post_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE standalone_posts SET ig_post_type = ?, media_items = NULL "
+                    "WHERE id = ?",
+                    ("feed", post_id),
+                )
+        else:
+            conn.execute(
+                "UPDATE standalone_posts SET ig_post_type = ?, media_items = ? WHERE id = ?",
+                (ig_post_type, json.dumps(items), post_id),
+            )
+        conn.commit()
+
+
 def update_social_post_image(
     post_id: int,
     image_url: Optional[str],
     db_path: str = DB_PATH,
 ) -> None:
     """Update only the image URL of a social post.
-    
+
     Args:
         post_id: The post ID
         image_url: New image URL (or None to remove image)
@@ -3438,16 +3497,18 @@ def add_uploaded_image(
     url: str,
     storage: str,
     size: int = 0,
+    media_type: str = 'image',
     db_path: str = DB_PATH,
 ) -> int:
-    """Save an uploaded image to the library.
-    
+    """Save an uploaded image or video to the library.
+
     Args:
         filename: Original or generated filename
-        url: The URL to access the image (local path or Cloudinary URL)
+        url: The URL to access the media (local path or Cloudinary URL)
         storage: 'local' or 'cloudinary'
         size: File size in bytes
-        
+        media_type: 'image' or 'video'
+
     Returns:
         The id of the inserted record
     """
@@ -3458,13 +3519,13 @@ def add_uploaded_image(
         existing = cur.fetchone()
         if existing:
             return existing[0]
-        
+
         cur = conn.execute(
             """
-            INSERT INTO uploaded_images (filename, url, storage, size, created_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO uploaded_images (filename, url, storage, size, created_at, media_type)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (filename, url, storage, size, created_at),
+            (filename, url, storage, size, created_at, media_type),
         )
         conn.commit()
         return cur.lastrowid
