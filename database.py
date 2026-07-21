@@ -3010,39 +3010,50 @@ def get_existing_standalone_content(db_path: str = DB_PATH) -> dict:
 def list_standalone_posts(
     source_type: Optional[str] = None,
     platform: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
     db_path: str = DB_PATH,
 ) -> List[sqlite3.Row]:
     """List standalone posts, optionally filtered by source type and/or platform.
-    
+
     Args:
         source_type: Optional filter by source type ('freeform', 'url', 'text')
         platform: Optional filter by platform
-        
+        limit: Optional max rows to return (for pagination)
+        offset: Optional number of rows to skip (for pagination)
+
     Returns:
-        List of standalone post rows
+        List of standalone post rows, newest first
     """
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        
+
         conditions = []
         params = []
-        
+
         if source_type:
             conditions.append("source_type = ?")
             params.append(source_type)
         if platform:
             conditions.append("platform = ?")
             params.append(platform)
-        
+
         where_clause = ""
         if conditions:
             where_clause = "WHERE " + " AND ".join(conditions)
-        
+
+        limit_clause = ""
+        if limit is not None:
+            limit_clause = "LIMIT ? OFFSET ?"
+            params.append(int(limit))
+            params.append(int(offset or 0))
+
         cur = conn.execute(
             f"""
             SELECT * FROM standalone_posts
             {where_clause}
             ORDER BY created_at DESC
+            {limit_clause}
             """,
             params,
         )
