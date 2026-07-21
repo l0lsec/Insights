@@ -1184,6 +1184,16 @@ function refreshQueue() {
         });
 }
 
+// Escape a value for safe interpolation into HTML text or attribute values
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
 // Rebuild the queue table with new data
 function rebuildQueueTable(posts) {
     const tbody = document.getElementById('schedule-tbody');
@@ -1198,7 +1208,9 @@ function rebuildQueueTable(posts) {
         const statusBadge = getStatusBadge(post.status, post.error_message);
         const platformBadge = getPlatformBadge(post.platform);
         const typeBadge = getTypeBadge(post.post_type);
-        const contentPreview = post.content_preview || post.article_topic || '<span class="text-muted">No content preview</span>';
+        const contentPreview = post.content_preview
+            ? escapeHtml(post.content_preview)
+            : (post.article_topic ? `<strong>${escapeHtml(post.article_topic)}</strong>` : '<span class="text-muted">No content preview</span>');
         const isDraggable = post.status === 'pending';
         const rowClass = isDraggable ? '' : 'not-draggable';
         
@@ -1261,10 +1273,21 @@ function getTypeBadge(postType) {
 
 function getActionButtons(post) {
     if (post.status === 'pending') {
+        let contentBtn = '';
+        const contentPostId = post.social_post_id || post.standalone_post_id;
+        if (contentPostId) {
+            const postType = post.social_post_id ? 'social' : 'standalone';
+            const content = escapeHtml(post.social_content || post.standalone_content || '');
+            const imageUrl = escapeHtml(post.social_image_url || post.standalone_image_url || '');
+            contentBtn = `
+            <button class="btn btn-sm btn-outline-secondary edit-content-btn" data-post-id="${contentPostId}" data-post-type="${postType}" data-platform="${post.platform}" data-content="${content}" data-image-url="${imageUrl}" title="Edit Content">
+                📝 Content
+            </button>`;
+        }
         return `
             <button class="btn btn-sm btn-outline-primary edit-time-btn" data-post-id="${post.id}" data-scheduled-for="${post.scheduled_for}" title="Edit Time">
                 ✏️ Time
-            </button>
+            </button>${contentBtn}
             <button class="btn btn-sm btn-success post-now-btn" data-post-id="${post.id}" data-platform="${post.platform}" title="Post Now">
                 🚀 Post Now
             </button>
@@ -2235,8 +2258,14 @@ function openEditContentModal(postId, postType, platform, currentContent, curren
     document.getElementById('edit-content-original-image-url').value = currentImageUrl;
     
     // Show platform indicator
-    const platformLabel = platform === 'linkedin' ? '💼 LinkedIn' : '🧵 Threads';
-    document.getElementById('edit-content-platform').textContent = platformLabel;
+    const platformLabels = {
+        linkedin: '💼 LinkedIn',
+        threads: '🧵 Threads',
+        twitter: '𝕏 Twitter',
+        facebook: '📘 Facebook',
+        instagram: '📷 Instagram',
+    };
+    document.getElementById('edit-content-platform').textContent = platformLabels[platform] || platform;
     
     // Reset image UI
     resetContentImageUI();
