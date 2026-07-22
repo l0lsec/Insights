@@ -153,6 +153,10 @@
                                         <option value="reel" {% if post.ig_post_type == 'reel' %}selected{% endif %}>🎬 Reel (video)</option>
                                         <option value="story" {% if post.ig_post_type == 'story' %}selected{% endif %}>⚡ Story</option>
                                     </select>
+                                    <button class="btn btn-sm btn-outline-secondary" type="button" onclick="openIgPreview({{ post.id }})"
+                                            title="Preview how this will look on Instagram and fix the aspect ratio">
+                                        👁️ Preview
+                                    </button>
                                     <span class="small text-muted" id="ig-media-hint-{{ post.id }}"></span>
                                 </div>
                                 <!-- Multi-media builder for carousel / reel / story -->
