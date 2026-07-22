@@ -5855,22 +5855,44 @@ def compose_page():
 
 @app.route('/compose/posts/more')
 def compose_posts_more():
-    """Return the next page of saved posts for a platform as an HTML fragment."""
+    """Return a page of a platform's saved posts as an HTML fragment.
+
+    Honours the Compose filter bar. The page renders only the first
+    POSTS_PAGE_SIZE posts per platform, so filtering in the browser could only
+    ever reveal matches that happened to be loaded already — a post further down
+    the list stayed invisible no matter what the filter said. Paging through the
+    *filtered* set here is what lets a filter reach the whole platform.
+
+    ``total`` is how many posts match, which the caller needs for the count
+    badge and the "Load more (N of total)" label.
+    """
     platform = (request.args.get('platform') or '').strip()
     if not platform:
         return jsonify({"error": "platform is required"}), 400
     offset = request.args.get('offset', 0, type=int) or 0
+    if offset < 0:
+        offset = 0
 
-    # Fetch one extra row to know whether there are more after this page
-    rows = list_standalone_posts(platform=platform, limit=POSTS_PAGE_SIZE + 1, offset=offset)
-    has_more = len(rows) > POSTS_PAGE_SIZE
-    rows = rows[:POSTS_PAGE_SIZE]
+    # The card being paged decides the platform; the filter bar supplies the rest.
+    filters = {key: request.args.get(key) for key in _POST_FILTER_KEYS}
+    filters['platform'] = platform
+    rows, index_by_id = _filtered_standalone_posts(filters)
 
-    ids = [r['id'] for r in rows]
+    total = len(rows)
+    page = rows[offset:offset + POSTS_PAGE_SIZE]
+    has_more = total > offset + len(page)
+
+    ids = [r['id'] for r in page]
     scheduled_info = get_pending_schedules_for_standalone_posts(ids) if ids else {}
     posted_info = get_posted_info_for_standalone_posts(ids) if ids else {}
     brief_names = {brief['id']: brief['name'] for brief in list_content_briefs()}
-    enriched = _enrich_standalone_posts(rows, scheduled_info, posted_info, brief_names)
+    enriched = _enrich_standalone_posts(page, scheduled_info, posted_info, brief_names)
+
+    # Label posts by their position in the *unfiltered* platform list, so "Post 7"
+    # means the same thing however the list is filtered — and matches what Find &
+    # Replace shows for the same post.
+    for post in enriched:
+        post['display_index'] = index_by_id.get(post['id'])
 
     html = render_template(
         'partials/post_items.html',
@@ -5881,7 +5903,8 @@ def compose_posts_more():
     return jsonify({
         "html": html,
         "has_more": has_more,
-        "next_offset": offset + len(rows),
+        "next_offset": offset + len(page),
+        "total": total,
     })
 
 

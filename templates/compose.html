@@ -3883,7 +3883,12 @@ async function loadMorePosts(platform, btn) {
     btn.disabled = true;
     btn.innerHTML = '⏳ Loading...';
     try {
-        const res = await fetch(`/compose/posts/more?platform=${encodeURIComponent(platform)}&offset=${offset}`);
+        // Page within the filtered set — the server applies the same filters the
+        // list was rendered under, so "Load more" can't surface non-matching posts.
+        const filters = currentPostFilters();
+        const res = await fetch('/compose/posts/more' + postFilterQuery(filters, {
+            platform: platform, offset: String(offset),
+        }));
         const data = await res.json();
         if (!res.ok || data.error) {
             showToast(data.error || 'Failed to load more posts', 'error');
@@ -3894,19 +3899,16 @@ async function loadMorePosts(platform, btn) {
         const container = document.getElementById(`posts-container-${platform}`);
         if (container && data.html) {
             container.insertAdjacentHTML('beforeend', data.html);
-            initIgMediaBuilders(container);
+            initLoadedPosts(container);
         }
         btn.dataset.offset = data.next_offset;
         if (data.has_more) {
-            const total = PLATFORM_TOTALS[platform] || data.next_offset;
             btn.disabled = false;
-            btn.innerHTML = `Load more (${data.next_offset} of ${total}) ▼`;
+            btn.innerHTML = `Load more (${data.next_offset} of ${data.total}) ▼`;
         } else {
             const wrap = btn.closest('.load-more-container');
             if (wrap) wrap.remove();
         }
-        // Re-apply the active filter so appended posts respect it
-        if (typeof applyPostFilters === 'function') applyPostFilters();
     } catch (e) {
         showToast('Failed to load more posts: ' + e.message, 'error');
         btn.disabled = false;
@@ -5612,109 +5614,126 @@ function showToast(message, type = 'info') {
 }
 
 // Post filtering functions
-function applyPostFilters() {
-    // Filters and "Load more" change which posts are loaded/visible, so drop any
-    // across-pages selection to avoid a stale "all N selected" banner.
+// Discards a superseded filter render — changing two selects quickly fires two
+// fetches that can come back out of order.
+let filterRequestSeq = 0;
+
+// What the posts currently in the DOM were rendered under. The server already
+// renders the unfiltered first page, so an identical filter set needs no fetch.
+let renderedFilterSignature = JSON.stringify(
+    { platform: '', used: '', queued: '', image: '', source: '', brief: '' });
+
+// Put freshly rendered posts into the same state as the ones they replaced.
+function initLoadedPosts(container) {
+    initIgMediaBuilders(container);
+    if (selectModeActive) {
+        container.querySelectorAll('.post-select-checkbox').forEach(cb => cb.classList.remove('d-none'));
+    }
+}
+
+// Add, update or remove a card's "Load more" control for the set now displayed.
+function syncLoadMore(card, platform, shown, total) {
+    let wrap = card.querySelector('.load-more-container');
+    if (shown >= total) {
+        if (wrap) wrap.remove();
+        return;
+    }
+    if (!wrap) {
+        wrap = document.createElement('div');
+        wrap.className = 'text-center mt-3 pt-3 border-top load-more-container';
+        wrap.innerHTML = `<button class="btn btn-sm btn-outline-secondary load-more-btn"
+                data-platform="${platform}" onclick="loadMorePosts('${platform}', this)"></button>`;
+        const postsContainer = card.querySelector('.posts-container');
+        postsContainer.insertAdjacentElement('afterend', wrap);
+    }
+    const btn = wrap.querySelector('.load-more-btn');
+    btn.dataset.offset = shown;
+    btn.disabled = false;
+    btn.innerHTML = `Load more (${shown} of ${total}) ▼`;
+}
+
+// Re-render the saved-posts list for the current filter bar.
+//
+// This used to hide non-matching .post-item nodes in place, which quietly capped
+// filtering at the ~20 posts per platform the page had loaded: a matching post
+// further down the list could never appear, however the filters were set. The
+// server now decides what matches, so filters reach every saved post.
+async function applyPostFilters() {
+    // Filters change which posts are loaded, so drop any across-pages selection
+    // to avoid a stale "all N selected" banner.
     clearSelectAllScope();
-    const usedFilter = document.getElementById('filter-used').value;
-    const queuedFilter = document.getElementById('filter-queued').value;
-    const platformFilter = document.getElementById('filter-platform').value;
-    const imageFilter = document.getElementById('filter-image').value;
-    const sourceEl = document.getElementById('filter-source');
-    const sourceFilter = sourceEl ? sourceEl.value : '';
-    const briefEl = document.getElementById('filter-brief');
-    const briefFilter = briefEl ? briefEl.value : '';
 
-    const cards = document.querySelectorAll('#saved-posts-container .social-copy-card');
-    let visiblePosts = 0;
-    let totalPosts = 0;
-    
+    const filters = currentPostFilters();
+    const platformFilter = filters.platform;
+    const cards = Array.from(document.querySelectorAll('#saved-posts-container .social-copy-card'));
+
+    // Always keep the card (and its "Write a New X Post" affordance) visible so
+    // any platform can be authored from scratch, even when all of its posts are
+    // filtered out. Only hide it when a *different* platform is selected.
     cards.forEach(card => {
-        const platform = card.dataset.platform;
-        const posts = card.querySelectorAll('.post-item');
-        let visibleInCard = 0;
-        let totalInCard = posts.length;
-        
-        posts.forEach(post => {
-            totalPosts++;
-            let show = true;
-            
-            // Platform filter (card level)
-            if (platformFilter && platform !== platformFilter) {
-                show = false;
-            }
-            
-            // Used filter
-            if (usedFilter && show) {
-                const usedBtn = post.querySelector('button[onclick*="toggleUsed"]');
-                const isUsed = usedBtn && usedBtn.innerHTML.includes('✓');
-                if (usedFilter === 'used' && !isUsed) show = false;
-                if (usedFilter === 'unused' && isUsed) show = false;
-            }
-            
-            // Queued filter
-            if (queuedFilter && show) {
-                const queueBtn = post.querySelector('.queue-toggle-btn');
-                const isQueued = queueBtn && queueBtn.dataset.queued === 'true';
-                if (queuedFilter === 'queued' && !isQueued) show = false;
-                if (queuedFilter === 'not-queued' && isQueued) show = false;
-            }
-            
-            // Image filter
-            if (imageFilter && show) {
-                const imagePreview = post.querySelector('[id^="image-preview-"]');
-                const hasImage = imagePreview && !imagePreview.classList.contains('d-none');
-                if (imageFilter === 'has-image' && !hasImage) show = false;
-                if (imageFilter === 'no-image' && hasImage) show = false;
-            }
+        card.style.display = (platformFilter && platformFilter !== card.dataset.platform) ? 'none' : '';
+    });
 
-            // Source filter (agent vs manual)
-            if (sourceFilter && show) {
-                const src = post.dataset.source || 'manual';
-                if (src !== sourceFilter) show = false;
-            }
+    const resultsSpan = document.getElementById('filter-results-count');
+    const signature = JSON.stringify(filters);
+    if (signature === renderedFilterSignature) {
+        // Already showing this exact set (e.g. the initial page load).
+        if (resultsSpan && !anyFilterActive(filters)) resultsSpan.textContent = '';
+        if (selectModeActive) updateSelectedCount();
+        return;
+    }
 
-            // Brief filter (which agent brief produced the post)
-            if (briefFilter && show) {
-                const brief = post.dataset.brief || '';
-                if (brief !== briefFilter) show = false;
-            }
+    const seq = ++filterRequestSeq;
+    if (resultsSpan) resultsSpan.textContent = 'Filtering…';
 
-            post.style.display = show ? '' : 'none';
-            if (show) {
-                visiblePosts++;
-                visibleInCard++;
-            }
-        });
-        
-        // Always keep the card (and its "Write a New X Post" affordance) visible so
-        // any platform can be authored from scratch, even when all of its posts are
-        // filtered out (used/queued/image/etc.). Only hide it when a *different*
-        // platform is explicitly selected in the platform filter.
-        card.style.display = (platformFilter && platformFilter !== platform) ? 'none' : '';
-        
-        // Update platform count badge
+    // Only fetch the platforms still on screen.
+    const shown = cards.filter(card => card.style.display !== 'none');
+    let pages;
+    try {
+        pages = await Promise.all(shown.map(card =>
+            fetch('/compose/posts/more' + postFilterQuery(filters, {
+                platform: card.dataset.platform, offset: '0',
+            })).then(res => res.json().then(data => {
+                if (!res.ok || data.error) throw new Error(data.error || 'Failed to filter posts');
+                return { card: card, platform: card.dataset.platform, data: data };
+            }))
+        ));
+    } catch (e) {
+        if (seq !== filterRequestSeq) return;
+        if (resultsSpan) resultsSpan.textContent = '';
+        showToast('Failed to apply filters: ' + e.message, 'error');
+        return;
+    }
+    if (seq !== filterRequestSeq) return;  // a newer filter render already landed
+
+    let matching = 0;
+    pages.forEach(({ card, platform, data }) => {
+        const container = document.getElementById(`posts-container-${platform}`);
+        if (container) {
+            container.innerHTML = data.html;
+            initLoadedPosts(container);
+        }
+        matching += data.total;
+
         const countBadge = card.querySelector('.social-copy-header .badge');
         if (countBadge) {
-            if (usedFilter || queuedFilter || platformFilter || imageFilter || sourceFilter || briefFilter) {
-                countBadge.textContent = `${visibleInCard} of ${totalInCard} posts`;
-            } else {
-                countBadge.textContent = `${totalInCard} post${totalInCard !== 1 ? 's' : ''}`;
-            }
+            const platformTotal = PLATFORM_TOTALS[platform] || data.total;
+            countBadge.textContent = anyFilterActive(filters)
+                ? `${data.total} of ${platformTotal} posts`
+                : `${data.total} post${data.total !== 1 ? 's' : ''}`;
         }
+        syncLoadMore(card, platform, container ? container.querySelectorAll('.post-item').length : 0, data.total);
     });
-    
-    // Update results count
-    const resultsSpan = document.getElementById('filter-results-count');
+
+    renderedFilterSignature = signature;
+
     if (resultsSpan) {
-        if (usedFilter || queuedFilter || platformFilter || imageFilter || sourceFilter || briefFilter) {
-            resultsSpan.textContent = `Showing ${visiblePosts} of ${totalPosts}`;
-        } else {
-            resultsSpan.textContent = '';
-        }
+        const everything = Object.values(PLATFORM_TOTALS).reduce((a, b) => a + b, 0);
+        resultsSpan.textContent = anyFilterActive(filters)
+            ? `Showing ${matching} of ${everything}`
+            : '';
     }
-    
-    // Update selected count since visibility changed
+
     if (selectModeActive) {
         updateSelectedCount();
     }
