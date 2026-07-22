@@ -35,7 +35,7 @@ from flask import (
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-from PIL import Image
+from PIL import Image, ImageEnhance, ImageFilter
 import cloudinary
 import cloudinary.uploader
 import re
@@ -371,6 +371,16 @@ app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # 100MB (Cloudinary free-t
 
 # Ensure upload directory exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+
+# Instagram target canvases (width, height) for the media "fit" endpoint.
+# Story/Reel are full-screen 9:16; feed images must sit between 4:5 and 1.91:1.
+IG_FIT_TARGETS = {
+    'story':          (1080, 1920),
+    'reel':           (1080, 1920),
+    'feed_square':    (1080, 1080),
+    'feed_portrait':  (1080, 1350),
+    'feed_landscape': (1080, 566),
+}
 
 # Configure Cloudinary (optional - for public image URLs that work with Threads)
 CLOUDINARY_CONFIGURED = False
@@ -7594,6 +7604,194 @@ def compose_upload_video():
         "filename": filename,
         "storage": "cloudinary",
     })
+
+
+def _load_image_for_fit(url: str) -> bytes:
+    """Load raw image bytes for the media-fit endpoint.
+
+    Local /static/uploads URLs are read from disk; everything else goes
+    through the SSRF-hardened fetcher.
+    """
+    parsed = urlparse(url)
+    path = parsed.path or ''
+    if path.startswith('/static/uploads/'):
+        filename = os.path.basename(path)
+        if not allowed_file(filename):
+            raise ValueError("unsupported local image type")
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        if not os.path.isfile(filepath):
+            raise ValueError("local image not found")
+        if os.path.getsize(filepath) > MAX_IMAGE_BYTES:
+            raise ValueError("image too large (max 16MB)")
+        with open(filepath, 'rb') as f:
+            return f.read()
+    data, _content_type, _final_url = _fetch_safely(
+        url,
+        max_bytes=MAX_IMAGE_BYTES,
+        timeout=15,
+        allowed_content_types=("image/",),
+    )
+    return data
+
+
+def _ig_crop_to_canvas(img: Image.Image, tw: int, th: int,
+                       focus_x: float = 0.5, focus_y: float = 0.5) -> Image.Image:
+    """Scale the image to cover the canvas, then crop around the focus point."""
+    w, h = img.size
+    scale = max(tw / w, th / h)
+    new_w = max(tw, round(w * scale))
+    new_h = max(th, round(h * scale))
+    img = img.resize((new_w, new_h), Image.LANCZOS)
+    left = min(max(round(focus_x * new_w - tw / 2), 0), new_w - tw)
+    top = min(max(round(focus_y * new_h - th / 2), 0), new_h - th)
+    return img.crop((left, top, left + tw, top + th))
+
+
+def _ig_pad_to_canvas(img: Image.Image, tw: int, th: int,
+                      pad_style: str = 'blur') -> Image.Image:
+    """Fit the image inside the canvas and fill the borders.
+
+    pad_style 'blur' mimics Instagram's look (blurred, darkened cover of the
+    same image); 'black'/'white' use a solid background.
+    """
+    w, h = img.size
+    if pad_style == 'blur':
+        canvas = _ig_crop_to_canvas(img, tw, th).filter(ImageFilter.GaussianBlur(40))
+        canvas = ImageEnhance.Brightness(canvas).enhance(0.65)
+    else:
+        color = (0, 0, 0) if pad_style == 'black' else (255, 255, 255)
+        canvas = Image.new('RGB', (tw, th), color)
+    scale = min(tw / w, th / h)
+    fit_w = max(1, round(w * scale))
+    fit_h = max(1, round(h * scale))
+    fitted = img.resize((fit_w, fit_h), Image.LANCZOS)
+    canvas.paste(fitted, ((tw - fit_w) // 2, (th - fit_h) // 2))
+    return canvas
+
+
+def _store_fitted_image(jpeg_bytes: bytes, prefix: str) -> str:
+    """Persist a processed JPEG to Cloudinary (if configured) or local uploads.
+
+    Returns the URL to use for the post — absolute for local storage, matching
+    the upload routes so Instagram's fetcher can reach it.
+    """
+    if CLOUDINARY_CONFIGURED:
+        try:
+            result = cloudinary.uploader.upload(
+                jpeg_bytes,
+                folder="insights",
+                resource_type="image",
+            )
+            saved_url = result['secure_url']
+            add_uploaded_image(
+                filename=result['public_id'].split('/')[-1],
+                url=saved_url,
+                storage='cloudinary',
+                size=result.get('bytes', len(jpeg_bytes)),
+            )
+            return saved_url
+        except Exception as e:
+            app.logger.error("Cloudinary upload of fitted image failed: %s", e)
+            # Fall back to local storage
+    unique_filename = f"{prefix}_{uuid.uuid4().hex}.jpg"
+    with open(os.path.join(UPLOAD_FOLDER, unique_filename), 'wb') as f:
+        f.write(jpeg_bytes)
+    add_uploaded_image(
+        filename=unique_filename,
+        url=f"/static/uploads/{unique_filename}",
+        storage='local',
+        size=len(jpeg_bytes),
+    )
+    return f"{request.host_url}static/uploads/{unique_filename}"
+
+
+@app.route('/compose/media/fit', methods=['POST'])
+def compose_fit_media():
+    """Resize an image to an exact Instagram canvas (crop or pad).
+    ---
+    tags:
+      - Compose
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            url:
+              type: string
+              description: Source image URL (upload, library, or public URL)
+            target:
+              type: string
+              enum: [story, reel, feed_square, feed_portrait, feed_landscape]
+            mode:
+              type: string
+              enum: [crop, pad]
+              description: crop = fill canvas and cut overflow; pad = fit inside and fill borders
+            focus_x:
+              type: number
+              description: Crop anchor 0..1 (0.5 = center), crop mode only
+            focus_y:
+              type: number
+            pad_style:
+              type: string
+              enum: [blur, black, white]
+    responses:
+      200:
+        description: New image URL and dimensions
+      400:
+        description: Validation or processing error
+    """
+    data = request.get_json(silent=True) or {}
+    url = (data.get('url') or '').strip()
+    target = (data.get('target') or '').strip()
+    mode = (data.get('mode') or 'crop').strip()
+    pad_style = (data.get('pad_style') or 'blur').strip()
+
+    if not url:
+        return jsonify({"error": "url is required"}), 400
+    if target not in IG_FIT_TARGETS:
+        return jsonify({
+            "error": f"target must be one of: {', '.join(sorted(IG_FIT_TARGETS))}"
+        }), 400
+    if mode not in ('crop', 'pad'):
+        return jsonify({"error": "mode must be crop or pad"}), 400
+    if pad_style not in ('blur', 'black', 'white'):
+        return jsonify({"error": "pad_style must be blur, black, or white"}), 400
+    try:
+        focus_x = min(max(float(data.get('focus_x', 0.5)), 0.0), 1.0)
+        focus_y = min(max(float(data.get('focus_y', 0.5)), 0.0), 1.0)
+    except (TypeError, ValueError):
+        return jsonify({"error": "focus_x/focus_y must be numbers"}), 400
+
+    try:
+        raw = _load_image_for_fit(url)
+    except (UnsafeURLError, ValueError, RuntimeError, requests.RequestException) as e:
+        return jsonify({"error": f"Could not load image: {e}"}), 400
+
+    tw, th = IG_FIT_TARGETS[target]
+    try:
+        img = Image.open(io.BytesIO(raw))
+        img.load()
+        img = img.convert('RGB')
+        if mode == 'crop':
+            fitted = _ig_crop_to_canvas(img, tw, th, focus_x, focus_y)
+        else:
+            fitted = _ig_pad_to_canvas(img, tw, th, pad_style)
+        output = io.BytesIO()
+        fitted.save(output, format='JPEG', quality=90, optimize=True)
+        jpeg_bytes = output.getvalue()
+    except Exception as e:
+        app.logger.error("Media fit processing failed for %s: %s", url, e)
+        return jsonify({"error": f"Could not process image: {e}"}), 400
+
+    try:
+        new_url = _store_fitted_image(jpeg_bytes, f"igfit_{target}")
+    except OSError as e:
+        app.logger.error("Could not store fitted image: %s", e)
+        return jsonify({"error": "Could not save the adjusted image."}), 500
+
+    return jsonify({"success": True, "image_url": new_url, "width": tw, "height": th})
 
 
 @app.route('/compose/list-images', methods=['GET'])
