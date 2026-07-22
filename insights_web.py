@@ -35,7 +35,9 @@ from flask import (
 )
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.utils import secure_filename
-from PIL import Image, ImageEnhance, ImageFilter
+import shutil
+import subprocess
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 import cloudinary
 import cloudinary.uploader
 import re
@@ -152,6 +154,7 @@ from database import (
     update_standalone_post_image,
     update_social_post_image,
     set_standalone_post_media,
+    set_standalone_post_user_tags,
     delete_standalone_post,
     delete_standalone_posts_bulk,
     mark_standalone_post_used,
@@ -5742,6 +5745,11 @@ def _enrich_standalone_posts(rows, scheduled_info, posted_info, brief_names):
             post_dict['media_items'] = json.loads(_raw_media) if _raw_media else []
         except (ValueError, TypeError):
             post_dict['media_items'] = []
+        _raw_tags = post_dict.get('ig_user_tags')
+        try:
+            post_dict['ig_user_tags'] = json.loads(_raw_tags) if _raw_tags else []
+        except (ValueError, TypeError):
+            post_dict['ig_user_tags'] = []
         # Attach the originating brief's name (agent-curated posts only)
         brief_id = post_dict.get('brief_id')
         post_dict['brief_name'] = brief_names.get(brief_id) if brief_id else None
@@ -7165,6 +7173,51 @@ def compose_set_post_media(post_id: int):
     return jsonify({"success": True, "ig_post_type": ig_post_type, "media_items": clean})
 
 
+@app.route('/compose/post/<int:post_id>/user-tags', methods=['POST'])
+def compose_set_post_user_tags(post_id: int):
+    """Set the Instagram people-tags for a standalone post (feed photos only).
+
+    JSON/Form: user_tags = JSON list of {"username", "x", "y"} with x/y in 0..1.
+    An empty list clears the tags.
+    """
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    payload = request.get_json(silent=True) or request.form
+    raw_tags = payload.get('user_tags')
+    if raw_tags is None:
+        raw_tags = []
+    if isinstance(raw_tags, str):
+        try:
+            tags = json.loads(raw_tags or '[]')
+        except (ValueError, TypeError):
+            return jsonify({"error": "user_tags must be valid JSON"}), 400
+    else:
+        tags = raw_tags
+    if not isinstance(tags, list):
+        return jsonify({"error": "user_tags must be a list"}), 400
+    if len(tags) > 20:
+        return jsonify({"error": "At most 20 people can be tagged."}), 400
+
+    clean = []
+    for tag in tags:
+        if not isinstance(tag, dict):
+            continue
+        username = (tag.get('username') or '').strip().lstrip('@')
+        if not username or not re.fullmatch(r'[A-Za-z0-9._]{1,30}', username):
+            return jsonify({"error": f"Invalid Instagram username: {tag.get('username')!r}"}), 400
+        try:
+            x = min(max(float(tag.get('x', 0.5)), 0.0), 1.0)
+            y = min(max(float(tag.get('y', 0.5)), 0.0), 1.0)
+        except (TypeError, ValueError):
+            return jsonify({"error": "Tag x/y must be numbers"}), 400
+        clean.append({"username": username, "x": round(x, 4), "y": round(y, 4)})
+
+    set_standalone_post_user_tags(post_id, clean)
+    return jsonify({"success": True, "user_tags": clean})
+
+
 @app.route('/compose/post/<int:post_id>/stock-image', methods=['GET'])
 def compose_get_stock_images(post_id: int):
     """Search for stock images based on post content.
@@ -7591,6 +7644,7 @@ def _instagram_publish_for_post(
     """
     ig_post_type = 'feed'
     media_items: list = []
+    user_tags: list = []
     if standalone_post_id:
         row = get_standalone_post(standalone_post_id)
         if row:
@@ -7602,6 +7656,12 @@ def _instagram_publish_for_post(
                     media_items = json.loads(raw)
                 except (ValueError, TypeError):
                     media_items = []
+            raw_tags = row.get('ig_user_tags')
+            if raw_tags:
+                try:
+                    user_tags = json.loads(raw_tags)
+                except (ValueError, TypeError):
+                    user_tags = []
 
     resolved, err = _ensure_instagram_media(
         content, image_url, ig_post_type, media_items,
@@ -7623,7 +7683,9 @@ def _instagram_publish_for_post(
             return client.publish_story_post(access_token, video_url=item["url"])
         return client.publish_story_post(access_token, image_url=item["url"])
     # feed (default)
-    return client.publish_image_post(access_token, caption, resolved[0]["url"])
+    return client.publish_image_post(
+        access_token, caption, resolved[0]["url"], user_tags=user_tags or None,
+    )
 
 
 @app.route('/compose/stock-images/search', methods=['GET'])
@@ -8015,6 +8077,304 @@ def compose_fit_media():
         return jsonify({"error": "Could not save the adjusted image."}), 500
 
     return jsonify({"success": True, "image_url": new_url, "width": tw, "height": th})
+
+
+# ── Text overlays on story/feed media ──────────────────────────────────────
+
+# Candidate fonts for baked-in text, best first (bold reads best on stories).
+_OVERLAY_FONT_CANDIDATES = [
+    "/System/Library/Fonts/Supplemental/Arial Bold.ttf",   # macOS
+    "/System/Library/Fonts/Helvetica.ttc",                 # macOS
+    "/System/Library/Fonts/Supplemental/Arial.ttf",        # macOS
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",  # Linux
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+
+_OVERLAY_BG_STYLES = {
+    "none": None,
+    "dark": (0, 0, 0, 153),        # 60% black — the classic story text pill
+    "light": (255, 255, 255, 191),  # 75% white
+    "black": (0, 0, 0, 255),
+    "white": (255, 255, 255, 255),
+}
+MAX_OVERLAY_LAYERS = 10
+MAX_VIDEO_FETCH_BYTES = 100 * 1024 * 1024  # matches MAX_CONTENT_LENGTH
+
+
+def _find_overlay_font() -> str | None:
+    """Return the first available TTF/TTC font path for text overlays."""
+    for path in _OVERLAY_FONT_CANDIDATES:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
+def _clean_overlay_layers(raw_layers) -> tuple[list | None, str | None]:
+    """Validate/normalize annotate layers. Returns (layers, error)."""
+    if not isinstance(raw_layers, list) or not raw_layers:
+        return None, "layers must be a non-empty list"
+    if len(raw_layers) > MAX_OVERLAY_LAYERS:
+        return None, f"At most {MAX_OVERLAY_LAYERS} text layers are supported."
+    clean = []
+    for layer in raw_layers:
+        if not isinstance(layer, dict):
+            return None, "each layer must be an object"
+        text = (layer.get("text") or "").replace("\r\n", "\n").strip("\n").rstrip()
+        if not text or len(text) > 300:
+            return None, "layer text must be 1-300 characters"
+        color = (layer.get("color") or "#ffffff").strip()
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            return None, f"invalid color: {color!r}"
+        bg = (layer.get("bg") or "none").strip()
+        if bg not in _OVERLAY_BG_STYLES:
+            return None, f"invalid bg style: {bg!r}"
+        try:
+            x = min(max(float(layer.get("x", 0.5)), 0.0), 1.0)
+            y = min(max(float(layer.get("y", 0.5)), 0.0), 1.0)
+            size = min(max(float(layer.get("size", 0.06)), 0.02), 0.3)
+        except (TypeError, ValueError):
+            return None, "layer x/y/size must be numbers"
+        clean.append({"text": text, "x": x, "y": y, "size": size, "color": color, "bg": bg})
+    return clean, None
+
+
+def _annotate_image(img: Image.Image, layers: list, font_path: str | None) -> Image.Image:
+    """Bake text layers onto an image (centered at x/y, IG-style pill option)."""
+    img = img.convert("RGB")
+    W, H = img.size
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+    for layer in layers:
+        font_px = max(12, round(layer["size"] * W))
+        try:
+            font = ImageFont.truetype(font_path, font_px) if font_path else ImageFont.load_default()
+        except OSError:
+            font = ImageFont.load_default()
+        cx, cy = layer["x"] * W, layer["y"] * H
+        spacing = round(font_px * 0.25)
+        stroke_w = 0 if layer["bg"] != "none" else max(2, font_px // 22)
+        kwargs = dict(font=font, anchor="mm", align="center", spacing=spacing)
+        bbox = draw.multiline_textbbox((cx, cy), layer["text"], stroke_width=stroke_w, **kwargs)
+        bg_fill = _OVERLAY_BG_STYLES[layer["bg"]]
+        if bg_fill:
+            pad_x, pad_y = round(font_px * 0.45), round(font_px * 0.28)
+            draw.rounded_rectangle(
+                [bbox[0] - pad_x, bbox[1] - pad_y, bbox[2] + pad_x, bbox[3] + pad_y],
+                radius=round(font_px * 0.35),
+                fill=bg_fill,
+            )
+        draw.multiline_text(
+            (cx, cy), layer["text"], fill=layer["color"],
+            stroke_width=stroke_w, stroke_fill=(0, 0, 0, 210) if stroke_w else None,
+            **kwargs,
+        )
+    return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+
+def _load_video_for_annotate(url: str, workdir: str) -> str:
+    """Materialize the source video as a local file path inside workdir.
+
+    Local /static/uploads URLs are used directly; remote URLs go through the
+    SSRF-hardened fetcher. Raises ValueError/UnsafeURLError/RuntimeError.
+    """
+    parsed = urlparse(url)
+    path = parsed.path or ""
+    if path.startswith("/static/uploads/"):
+        filename = os.path.basename(path)
+        if not allowed_video_file(filename):
+            raise ValueError("unsupported local video type")
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        if not os.path.isfile(filepath):
+            raise ValueError("local video not found")
+        return filepath
+    data, _content_type, _final = _fetch_safely(
+        url,
+        max_bytes=MAX_VIDEO_FETCH_BYTES,
+        timeout=60,
+        allowed_content_types=("video/", "application/octet-stream", "binary/"),
+    )
+    ext = ".mov" if path.lower().endswith(".mov") else ".mp4"
+    local = os.path.join(workdir, f"src{ext}")
+    with open(local, "wb") as f:
+        f.write(data)
+    return local
+
+
+def _annotate_video(src_path: str, layers: list, font_path: str, workdir: str) -> str:
+    """Burn text layers into a video with ffmpeg drawtext. Returns output path."""
+    ffprobe = shutil.which("ffprobe")
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg or not ffprobe:
+        raise RuntimeError("ffmpeg is not installed on the server")
+
+    probe = subprocess.run(
+        [ffprobe, "-v", "error", "-select_streams", "v:0",
+         "-show_entries", "stream=width,height", "-of", "csv=p=0", src_path],
+        capture_output=True, text=True, timeout=60,
+    )
+    try:
+        w, _h = (int(v) for v in probe.stdout.strip().split(",")[:2])
+    except (ValueError, IndexError):
+        raise RuntimeError(f"could not read video dimensions: {probe.stderr.strip()[:200]}")
+
+    filters = []
+    for i, layer in enumerate(layers):
+        font_px = max(12, round(layer["size"] * w))
+        # textfile= sidesteps drawtext's escaping rules entirely
+        textfile = os.path.join(workdir, f"layer{i}.txt")
+        with open(textfile, "w", encoding="utf-8") as f:
+            f.write(layer["text"])
+        parts = [
+            f"fontfile='{font_path}'",
+            f"textfile='{textfile}'",
+            f"fontsize={font_px}",
+            f"fontcolor=0x{layer['color'].lstrip('#')}",
+            f"x=w*{layer['x']:.4f}-text_w/2",
+            f"y=h*{layer['y']:.4f}-text_h/2",
+            f"line_spacing={round(font_px * 0.25)}",
+        ]
+        bg = layer["bg"]
+        if bg != "none":
+            boxcolor = {
+                "dark": "black@0.6", "light": "white@0.75",
+                "black": "black", "white": "white",
+            }[bg]
+            parts += ["box=1", f"boxcolor={boxcolor}", f"boxborderw={round(font_px * 0.35)}"]
+        else:
+            shadow = max(1, font_px // 22)
+            parts += ["shadowcolor=black@0.7", f"shadowx={shadow}", f"shadowy={shadow}"]
+        filters.append("drawtext=" + ":".join(parts))
+
+    out_path = os.path.join(workdir, "annotated.mp4")
+    result = subprocess.run(
+        [ffmpeg, "-y", "-i", src_path, "-vf", ",".join(filters),
+         "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+         "-c:a", "copy", "-movflags", "+faststart", "-pix_fmt", "yuv420p",
+         out_path],
+        capture_output=True, text=True, timeout=300,
+    )
+    if result.returncode != 0 or not os.path.isfile(out_path):
+        app.logger.error("ffmpeg drawtext failed: %s", result.stderr[-800:])
+        raise RuntimeError("video text rendering failed (see server log)")
+    return out_path
+
+
+def _store_annotated_video(video_path: str) -> str:
+    """Persist an annotated video like an upload; returns its serving URL."""
+    size = os.path.getsize(video_path)
+    if CLOUDINARY_CONFIGURED:
+        result = cloudinary.uploader.upload(
+            video_path, folder="insights", resource_type="video",
+        )
+        video_url = result["secure_url"]
+        add_uploaded_image(
+            filename=result["public_id"].split("/")[-1],
+            url=video_url,
+            storage="cloudinary",
+            size=result.get("bytes", size),
+            media_type="video",
+        )
+        return video_url
+    unique_filename = f"igtext_{uuid.uuid4().hex}.mp4"
+    dest = os.path.join(UPLOAD_FOLDER, unique_filename)
+    shutil.copyfile(video_path, dest)
+    add_uploaded_image(
+        filename=unique_filename,
+        url=f"/static/uploads/{unique_filename}",
+        storage="local",
+        size=size,
+        media_type="video",
+    )
+    return f"{request.host_url}static/uploads/{unique_filename}"
+
+
+@app.route('/compose/media/annotate', methods=['POST'])
+def compose_annotate_media():
+    """Bake text layers onto an image or burn them into a video.
+    ---
+    tags:
+      - Compose
+    parameters:
+      - name: body
+        in: body
+        required: true
+        schema:
+          type: object
+          properties:
+            url:
+              type: string
+              description: Source media URL (upload, library, or public URL)
+            kind:
+              type: string
+              enum: [image, video]
+            layers:
+              type: array
+              description: >
+                Text layers: {text, x, y (0..1 center), size (fraction of
+                media width), color (#rrggbb), bg (none|dark|light|black|white)}
+    responses:
+      200:
+        description: New media URL
+      400:
+        description: Validation or processing error
+    """
+    data = request.get_json(silent=True) or {}
+    url = (data.get("url") or "").strip()
+    kind = (data.get("kind") or "image").strip()
+    if not url:
+        return jsonify({"error": "url is required"}), 400
+    if kind not in ("image", "video"):
+        return jsonify({"error": "kind must be image or video"}), 400
+    layers, err = _clean_overlay_layers(data.get("layers"))
+    if err:
+        return jsonify({"error": err}), 400
+
+    font_path = _find_overlay_font()
+
+    if kind == "image":
+        try:
+            raw = _load_image_for_fit(url)
+            img = Image.open(io.BytesIO(raw))
+            img.load()
+            annotated = _annotate_image(img, layers, font_path)
+            output = io.BytesIO()
+            annotated.save(output, format="JPEG", quality=90, optimize=True)
+        except (UnsafeURLError, ValueError, RuntimeError, requests.RequestException) as e:
+            return jsonify({"error": f"Could not load image: {e}"}), 400
+        except Exception as e:
+            app.logger.error("Image annotate failed for %s: %s", url, e)
+            return jsonify({"error": f"Could not add text: {e}"}), 400
+        try:
+            new_url = _store_fitted_image(output.getvalue(), "igtext")
+        except OSError as e:
+            app.logger.error("Could not store annotated image: %s", e)
+            return jsonify({"error": "Could not save the image."}), 500
+        return jsonify({"success": True, "image_url": new_url, "kind": "image"})
+
+    # Video path — needs ffmpeg on the server
+    if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
+        return jsonify({
+            "error": "Adding text to video needs ffmpeg installed on the server "
+                     "(brew install ffmpeg).",
+        }), 400
+    if not font_path:
+        return jsonify({"error": "No usable system font found for video text."}), 400
+    workdir = tempfile.mkdtemp(prefix="igtext_")
+    try:
+        try:
+            src = _load_video_for_annotate(url, workdir)
+            out_path = _annotate_video(src, layers, font_path, workdir)
+        except (UnsafeURLError, ValueError, RuntimeError, requests.RequestException,
+                subprocess.TimeoutExpired) as e:
+            return jsonify({"error": f"Could not add text to video: {e}"}), 400
+        try:
+            new_url = _store_annotated_video(out_path)
+        except Exception as e:
+            app.logger.error("Could not store annotated video: %s", e)
+            return jsonify({"error": f"Could not save the video: {e}"}), 500
+        return jsonify({"success": True, "video_url": new_url, "kind": "video"})
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 @app.route('/compose/list-images', methods=['GET'])
