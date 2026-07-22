@@ -306,6 +306,63 @@
         -webkit-box-orient: vertical;
         opacity: 0.95;
     }
+    /* Text layers & tag pins in the IG editor */
+    .ig-layer-host {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+    }
+    .ig-text-layer {
+        position: absolute;
+        transform: translate(-50%, -50%);
+        pointer-events: auto;
+        cursor: grab;
+        user-select: none;
+        white-space: pre;
+        text-align: center;
+        font-family: "Arial Black", "Arial Bold", Arial, "Helvetica Neue", sans-serif;
+        font-weight: 700;
+        line-height: 1.25;
+        padding: 0.28em 0.45em;
+        border-radius: 0.35em;
+        max-width: 96%;
+    }
+    .ig-text-layer.bg-none { text-shadow: 0 1px 2px rgba(0,0,0,0.75), 0 0 4px rgba(0,0,0,0.5); }
+    .ig-text-layer.selected { outline: 2px dashed #0d6efd; outline-offset: 2px; }
+    .ig-text-layer.dragging { cursor: grabbing; }
+    .ig-tag-pin {
+        position: absolute;
+        transform: translate(-50%, -50%);
+        pointer-events: auto;
+        cursor: pointer;
+        background: rgba(38, 38, 38, 0.92);
+        color: #fff;
+        padding: 2px 8px;
+        border-radius: 5px;
+        font-size: 0.65rem;
+        white-space: nowrap;
+        box-shadow: 0 1px 4px rgba(0,0,0,0.4);
+    }
+    .ig-tag-pin::after {
+        content: "";
+        position: absolute;
+        top: -5px;
+        left: 50%;
+        transform: translateX(-50%);
+        border: 5px solid transparent;
+        border-bottom-color: rgba(38, 38, 38, 0.92);
+        border-top: none;
+    }
+    .ig-phone-frame.ig-tag-arming { cursor: crosshair; }
+    .ig-color-swatch {
+        width: 22px;
+        height: 22px;
+        border-radius: 50%;
+        border: 2px solid #dee2e6;
+        cursor: pointer;
+        display: inline-block;
+    }
+    .ig-color-swatch.selected { border-color: #0d6efd; box-shadow: 0 0 0 2px rgba(13,110,253,0.35); }
 </style>
 
 <nav aria-label="breadcrumb" class="mb-3">
@@ -1270,10 +1327,17 @@
                                 </div>
                                 <div class="ig-caption-ghost" id="ig-reel-caption">Caption preview…</div>
                             </div>
+                            <div class="ig-layer-host" id="ig-text-layer-host"></div>
+                            <div class="ig-layer-host" id="ig-tag-pin-host"></div>
                         </div>
                         <div class="small text-muted mt-2 text-center" id="ig-preview-dims">Loading media…</div>
                     </div>
                     <div class="col-md-6">
+                        <div class="btn-group btn-group-sm w-100 mb-3" role="group" id="ig-editor-mode-row">
+                            <button type="button" class="btn btn-outline-dark" id="ig-emode-preview" onclick="igSetEditorMode('preview')">📱 Preview</button>
+                            <button type="button" class="btn btn-outline-dark" id="ig-emode-text" onclick="igSetEditorMode('text')">📝 Text</button>
+                            <button type="button" class="btn btn-outline-dark" id="ig-emode-tag" onclick="igSetEditorMode('tag')">🏷️ Tag people</button>
+                        </div>
                         <div class="alert alert-secondary py-2 small mb-3" id="ig-fit-status">Checking dimensions…</div>
                         <div class="mb-3 d-none" id="ig-ratio-row">
                             <label class="form-label small fw-bold mb-1">Target shape</label>
@@ -1298,6 +1362,49 @@
                             </div>
                             <div class="small text-muted mb-2" id="ig-fix-hint"></div>
                             <button type="button" class="btn btn-success btn-sm w-100" id="ig-apply-fix-btn" onclick="igApplyFix(this)">✅ Apply &amp; save adjusted image</button>
+                        </div>
+                        <!-- Text overlay editor (images and videos) -->
+                        <div class="d-none" id="ig-text-controls">
+                            <div class="d-flex gap-2 mb-2">
+                                <button type="button" class="btn btn-sm btn-outline-primary flex-grow-1" onclick="igAddTextLayer('')">＋ Add text</button>
+                                <button type="button" class="btn btn-sm btn-outline-primary flex-grow-1" onclick="igAddTextLayer('@username')" title="Adds an @name as text. Note: API-published stories can't have tappable mentions.">@ Mention</button>
+                            </div>
+                            <div class="border rounded p-2 mb-2 d-none" id="ig-text-edit-form">
+                                <textarea class="form-control form-control-sm mb-2" id="ig-text-input" rows="2"
+                                          placeholder="Your text…" oninput="igUpdateSelectedText(this.value)"></textarea>
+                                <div class="d-flex align-items-center gap-2 mb-2">
+                                    <label class="small text-muted mb-0">Size</label>
+                                    <input type="range" class="form-range" id="ig-text-size" min="0.03" max="0.18" step="0.005"
+                                           oninput="igUpdateSelectedProp('size', parseFloat(this.value))">
+                                </div>
+                                <div class="d-flex align-items-center gap-1 mb-2 flex-wrap" id="ig-text-colors">
+                                    <label class="small text-muted mb-0 me-1">Color</label>
+                                </div>
+                                <div class="d-flex align-items-center gap-2 mb-2">
+                                    <label class="small text-muted mb-0">Style</label>
+                                    <div class="btn-group btn-group-sm" role="group" id="ig-text-bgs">
+                                        <button type="button" class="btn btn-outline-secondary" data-bg="none" onclick="igUpdateSelectedProp('bg', 'none')">Aa</button>
+                                        <button type="button" class="btn btn-outline-secondary" data-bg="dark" onclick="igUpdateSelectedProp('bg', 'dark')" style="background:rgba(0,0,0,0.6);color:#fff;">Aa</button>
+                                        <button type="button" class="btn btn-outline-secondary" data-bg="light" onclick="igUpdateSelectedProp('bg', 'light')" style="background:rgba(255,255,255,0.85);">Aa</button>
+                                        <button type="button" class="btn btn-outline-secondary" data-bg="black" onclick="igUpdateSelectedProp('bg', 'black')" style="background:#000;color:#fff;">Aa</button>
+                                        <button type="button" class="btn btn-outline-secondary" data-bg="white" onclick="igUpdateSelectedProp('bg', 'white')" style="background:#fff;">Aa</button>
+                                    </div>
+                                    <button type="button" class="btn btn-sm btn-outline-danger ms-auto" onclick="igDeleteSelectedLayer()" title="Delete this text">🗑️</button>
+                                </div>
+                            </div>
+                            <button type="button" class="btn btn-success btn-sm w-100 mb-2" id="ig-bake-text-btn" onclick="igBakeText(this)">🔥 Bake text into media &amp; save</button>
+                            <div class="small text-muted" id="ig-text-note">Drag text to position it. Text is baked into the pixels — for tappable mentions use feed tags or the Instagram app.</div>
+                        </div>
+                        <!-- People tags (real Instagram feed tags) -->
+                        <div class="d-none" id="ig-tag-controls">
+                            <div class="input-group input-group-sm mb-2">
+                                <span class="input-group-text">@</span>
+                                <input type="text" class="form-control" id="ig-tag-username" placeholder="username"
+                                       onkeydown="if(event.key === 'Enter') { event.preventDefault(); igArmTagPlacement(); }">
+                                <button type="button" class="btn btn-outline-primary" id="ig-tag-place-btn" onclick="igArmTagPlacement()">📍 Place on photo</button>
+                            </div>
+                            <div class="d-flex flex-wrap gap-1 mb-2" id="ig-tag-list"></div>
+                            <div class="small text-muted" id="ig-tag-note">Type a username, then tap the photo where they are. Tags are saved with the post and applied when it publishes (feed photos only — click a pin to remove it).</div>
                         </div>
                         <div class="alert alert-warning py-2 small d-none mb-2" id="ig-video-note"></div>
                         <hr class="my-3">
@@ -3401,6 +3508,9 @@ function initIgMediaBuilders(root) {
         let items = [];
         try { items = JSON.parse(el.getAttribute('data-ig-media') || '[]'); } catch (e) { items = []; }
         window._igMedia[postId] = Array.isArray(items) ? items : [];
+        let tags = [];
+        try { tags = JSON.parse(el.getAttribute('data-ig-tags') || '[]'); } catch (e) { tags = []; }
+        window._igTags[postId] = Array.isArray(tags) ? tags : [];
         renderIgStrip(postId);
     });
 }
@@ -3416,6 +3526,8 @@ const IG_FEED_TARGETS = { feed_portrait: 4 / 5, feed_square: 1, feed_landscape: 
 
 window._igPv = null;          // preview modal state
 window._igDims = {};          // url -> {w, h} cache
+window._igTags = window._igTags || {};   // postId -> saved people-tags
+const IG_TEXT_COLORS = ['#FFFFFF', '#262626', '#FFDC00', '#ED4956', '#3897F0', '#70C050', '#FF7BAC', '#A307BA'];
 
 function igRatioClose(a, b) { return Math.abs(a - b) <= b * IG_RATIO_TOL; }
 
@@ -3521,6 +3633,8 @@ function openIgPreview(postId) {
         postId: postId, type: type, items: items, index: 0,
         mode: 'crop', padStyle: 'blur', focusX: 0.5, focusY: 0.5,
         feedTarget: null, dims: null,
+        editorMode: 'preview', textLayers: [], selectedLayer: null, tagArming: null,
+        userTags: (type === 'feed' ? ((window._igTags[postId] || []).slice()) : []),
     };
     renderIgPreview();
     bootstrap.Modal.getOrCreateInstance(document.getElementById('igPreviewModal')).show();
@@ -3560,12 +3674,17 @@ function renderIgPreview() {
     nav.classList.toggle('d-flex', st.items.length > 1);
     document.getElementById('ig-preview-counter').textContent = `${st.index + 1} / ${st.items.length}`;
 
-    // Frame shape
+    // Frame shape: preview mode shows the target canvas; text/tag editing shows
+    // the media's own shape so layer coordinates map 1:1 onto the pixels.
     const frame = document.getElementById('ig-preview-frame');
-    const ratio = igTargetRatio(st);
+    const editing = st.editorMode !== 'preview';
+    const mediaRatio = st.dims ? (st.dims.w / st.dims.h) : null;
+    const ratio = (editing && mediaRatio) ? mediaRatio : igTargetRatio(st);
     frame.style.aspectRatio = `${ratio}`;
-    frame.style.width = ratio >= 1.5 ? '340px' : (ratio >= 1 ? '270px' : '250px');
-    frame.style.background = (st.mode === 'pad' && st.padStyle === 'white') ? '#fff' : '#000';
+    frame.style.width = editing
+        ? `${Math.min(340, Math.max(170, Math.round(430 * ratio)))}px`
+        : (ratio >= 1.5 ? '340px' : (ratio >= 1 ? '270px' : '250px'));
+    frame.style.background = (!editing && st.mode === 'pad' && st.padStyle === 'white') ? '#fff' : '#000';
 
     // Media element
     const img = document.getElementById('ig-preview-img');
@@ -3573,10 +3692,10 @@ function renderIgPreview() {
     const bg = document.getElementById('ig-preview-bg');
     img.classList.toggle('d-none', isVideo);
     video.classList.toggle('d-none', !isVideo);
-    const fitCover = !isVideo && st.mode === 'crop';
+    const fitCover = !editing && !isVideo && st.mode === 'crop';
     const media = isVideo ? video : img;
     media.style.objectFit = fitCover ? 'cover' : 'contain';
-    media.style.objectPosition = `${st.focusX * 100}% ${st.focusY * 100}%`;
+    media.style.objectPosition = editing ? '50% 50%' : `${st.focusX * 100}% ${st.focusY * 100}%`;
     if (isVideo) {
         if (video.getAttribute('src') !== item.url) video.setAttribute('src', item.url);
         video.play().catch(() => {});
@@ -3587,26 +3706,45 @@ function renderIgPreview() {
         video.removeAttribute('src');
     }
     // Blurred backdrop when previewing "fit with background"
-    const showBlurBg = !isVideo && st.mode === 'pad' && st.padStyle === 'blur';
+    const showBlurBg = !editing && !isVideo && st.mode === 'pad' && st.padStyle === 'blur';
     bg.classList.toggle('d-none', !showBlurBg);
     if (showBlurBg) bg.src = item.url; else bg.removeAttribute('src');
 
-    // Overlays
-    document.getElementById('ig-overlay-story').classList.toggle('d-none', st.type !== 'story');
-    document.getElementById('ig-overlay-reel').classList.toggle('d-none', st.type !== 'reel');
+    // Overlays (while editing, only keep story guides when the media really is 9:16)
+    const storyOverlayOn = st.type === 'story' &&
+        (!editing || (mediaRatio && igRatioClose(mediaRatio, IG_STORY_RATIO)));
+    document.getElementById('ig-overlay-story').classList.toggle('d-none', !storyOverlayOn);
+    document.getElementById('ig-overlay-reel').classList.toggle('d-none', st.type !== 'reel' || editing);
     if (st.type === 'reel') {
         const pre = document.getElementById('saved-post-' + st.postId);
         const text = pre ? pre.textContent.trim() : '';
         document.getElementById('ig-reel-caption').textContent = text ? text.slice(0, 90) : 'Caption preview…';
     }
 
-    // Ratio buttons (feed/carousel only)
-    document.getElementById('ig-ratio-row').classList.toggle('d-none', !isFeedLike);
+    // Ratio buttons (feed/carousel only, preview mode)
+    document.getElementById('ig-ratio-row').classList.toggle('d-none', !isFeedLike || editing);
 
-    // Fix controls: images only (videos can't be re-encoded here)
-    document.getElementById('ig-fix-controls').classList.toggle('d-none', isVideo);
+    // Fix controls: images only (videos can't be re-encoded here), preview mode
+    document.getElementById('ig-fix-controls').classList.toggle('d-none', isVideo || editing);
     const note = document.getElementById('ig-video-note');
-    note.classList.toggle('d-none', !isVideo);
+    note.classList.toggle('d-none', !(isVideo && !editing));
+
+    // Editor mode switcher + text/tag panels
+    document.getElementById('ig-emode-preview').classList.toggle('active', st.editorMode === 'preview');
+    document.getElementById('ig-emode-text').classList.toggle('active', st.editorMode === 'text');
+    document.getElementById('ig-emode-tag').classList.toggle('active', st.editorMode === 'tag');
+    const tagModeBtn = document.getElementById('ig-emode-tag');
+    tagModeBtn.disabled = (st.type !== 'feed');
+    tagModeBtn.title = st.type === 'feed'
+        ? 'Tag people on this photo (real Instagram tags)'
+        : 'Instagram only supports people-tags on feed photos';
+    document.getElementById('ig-text-controls').classList.toggle('d-none', st.editorMode !== 'text');
+    document.getElementById('ig-tag-controls').classList.toggle('d-none', st.editorMode !== 'tag');
+    frame.classList.toggle('ig-tag-arming', !!st.tagArming);
+    igRenderTextLayers();
+    igRenderTagPins();
+    igRenderTagList();
+    igSyncTextEditForm();
 
     // Mode + pad-style button highlights
     document.getElementById('ig-mode-crop').classList.toggle('active', st.mode === 'crop');
@@ -3763,9 +3901,20 @@ function igPreviewNav(step) {
         const frame = document.getElementById('ig-preview-frame');
         if (!frame) return;
         let drag = null;
+        frame.addEventListener('click', function(e) {
+            // Drop a people-tag where the user clicked (tag mode, armed)
+            const st = window._igPv;
+            if (!st || st.editorMode !== 'tag' || !st.tagArming) return;
+            const r = frame.getBoundingClientRect();
+            igPlaceTag(
+                (e.clientX - r.left) / r.width,
+                (e.clientY - r.top) / r.height
+            );
+        });
         frame.addEventListener('pointerdown', function(e) {
             const st = window._igPv;
-            if (!st || st.mode !== 'crop' || !st.dims) return;
+            if (!st || st.editorMode !== 'preview') return;
+            if (st.mode !== 'crop' || !st.dims) return;
             if (st.items[st.index].kind === 'video') return;
             const fw = frame.clientWidth, fh = frame.clientHeight;
             const scale = Math.max(fw / st.dims.w, fh / st.dims.h);
@@ -3774,7 +3923,7 @@ function igPreviewNav(step) {
             if (overflowX < 1 && overflowY < 1) return;
             drag = { x: e.clientX, y: e.clientY, fx: st.focusX, fy: st.focusY, ox: overflowX, oy: overflowY };
             frame.classList.add('ig-dragging');
-            frame.setPointerCapture(e.pointerId);
+            try { frame.setPointerCapture(e.pointerId); } catch (err) { /* synthetic pointers */ }
             e.preventDefault();
         });
         frame.addEventListener('pointermove', function(e) {
@@ -3841,7 +3990,7 @@ function igApplyFix(btn) {
     .finally(() => { btn.disabled = false; btn.innerHTML = original; });
 }
 
-function igApplyFixedUrlToPost(postId, type, index, newUrl) {
+function igApplyFixedUrlToPost(postId, type, index, newUrl, kind) {
     if (type === 'feed') {
         // Persist and update the single-image UI bits
         fetch(`/compose/post/${postId}/image`, {
@@ -3869,11 +4018,296 @@ function igApplyFixedUrlToPost(postId, type, index, newUrl) {
     } else {
         const items = window._igMedia[postId] || [];
         if (items[index]) {
-            items[index] = { url: newUrl, kind: 'image' };
+            items[index] = { url: newUrl, kind: kind || 'image' };
             renderIgStrip(postId);
             igSaveMedia(postId);
         }
     }
+}
+
+// ============ Instagram text overlays & people-tags ============
+
+function igSetEditorMode(mode) {
+    const st = window._igPv;
+    if (!st) return;
+    if (mode === 'tag' && st.type !== 'feed') {
+        showToast('Instagram only supports people-tags on feed photos. For stories, add an @name as text instead.', 'warning');
+        return;
+    }
+    st.editorMode = mode;
+    st.tagArming = null;
+    if (mode !== 'text') st.selectedLayer = null;
+    renderIgPreview();
+}
+
+function igAddTextLayer(initialText) {
+    const st = window._igPv;
+    if (!st) return;
+    if (st.textLayers.length >= 10) {
+        showToast('Up to 10 text layers per media.', 'warning');
+        return;
+    }
+    const isMention = (initialText || '').startsWith('@');
+    st.textLayers.push({
+        text: initialText || 'Your text',
+        x: 0.5,
+        y: Math.min(0.85, 0.35 + st.textLayers.length * 0.12),
+        size: 0.07,
+        color: '#FFFFFF',
+        bg: isMention ? 'dark' : 'none',
+    });
+    st.selectedLayer = st.textLayers.length - 1;
+    renderIgPreview();
+    const ta = document.getElementById('ig-text-input');
+    if (ta) { ta.focus(); ta.select(); }
+}
+
+function igRenderTextLayers() {
+    const st = window._igPv;
+    const host = document.getElementById('ig-text-layer-host');
+    if (!host) return;
+    host.innerHTML = '';
+    if (!st || !st.textLayers.length) return;
+    const frame = document.getElementById('ig-preview-frame');
+    const frameW = frame.clientWidth || 250;
+    const bgCss = {
+        none: 'transparent',
+        dark: 'rgba(0,0,0,0.6)',
+        light: 'rgba(255,255,255,0.75)',
+        black: '#000',
+        white: '#fff',
+    };
+    st.textLayers.forEach((L, i) => {
+        const el = document.createElement('div');
+        el.className = 'ig-text-layer bg-' + L.bg +
+            (i === st.selectedLayer && st.editorMode === 'text' ? ' selected' : '');
+        el.style.left = (L.x * 100) + '%';
+        el.style.top = (L.y * 100) + '%';
+        el.style.fontSize = (L.size * frameW) + 'px';
+        el.style.color = L.color;
+        el.style.background = bgCss[L.bg] || 'transparent';
+        el.textContent = L.text;
+        el.addEventListener('pointerdown', function(ev) { igLayerDragStart(ev, i, el); });
+        host.appendChild(el);
+    });
+}
+
+function igLayerDragStart(ev, idx, el) {
+    const st = window._igPv;
+    if (!st || st.editorMode !== 'text') return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    const frame = document.getElementById('ig-preview-frame');
+    const L = st.textLayers[idx];
+    const start = { x: ev.clientX, y: ev.clientY, lx: L.x, ly: L.y };
+    const onMove = function(e) {
+        const fw = frame.clientWidth, fh = frame.clientHeight;
+        if (fw < 10 || fh < 10) return;
+        const dx = e.clientX - start.x, dy = e.clientY - start.y;
+        L.x = Math.min(1, Math.max(0, start.lx + dx / fw));
+        L.y = Math.min(1, Math.max(0, start.ly + dy / fh));
+        el.style.left = (L.x * 100) + '%';
+        el.style.top = (L.y * 100) + '%';
+    };
+    const onUp = function() {
+        el.classList.remove('dragging');
+        el.removeEventListener('pointermove', onMove);
+        el.removeEventListener('pointerup', onUp);
+        el.removeEventListener('pointercancel', onUp);
+        st.selectedLayer = idx;
+        renderIgPreview();
+    };
+    el.addEventListener('pointermove', onMove);
+    el.addEventListener('pointerup', onUp);
+    el.addEventListener('pointercancel', onUp);
+    el.classList.add('dragging');
+    try { el.setPointerCapture(ev.pointerId); } catch (e) { /* synthetic pointers */ }
+}
+
+function igSyncTextEditForm() {
+    const st = window._igPv;
+    const form = document.getElementById('ig-text-edit-form');
+    if (!form) return;
+    const L = st && st.selectedLayer !== null ? st.textLayers[st.selectedLayer] : null;
+    form.classList.toggle('d-none', !L || st.editorMode !== 'text');
+    // Build the color swatches once
+    const colorRow = document.getElementById('ig-text-colors');
+    if (colorRow && !colorRow.querySelector('.ig-color-swatch')) {
+        IG_TEXT_COLORS.forEach(c => {
+            const sw = document.createElement('span');
+            sw.className = 'ig-color-swatch';
+            sw.style.background = c;
+            sw.dataset.color = c;
+            sw.title = c;
+            sw.onclick = function() { igUpdateSelectedProp('color', c); };
+            colorRow.appendChild(sw);
+        });
+    }
+    if (!L) return;
+    const ta = document.getElementById('ig-text-input');
+    if (ta && ta.value !== L.text) ta.value = L.text;
+    const slider = document.getElementById('ig-text-size');
+    if (slider) slider.value = L.size;
+    document.querySelectorAll('#ig-text-colors .ig-color-swatch').forEach(sw =>
+        sw.classList.toggle('selected', sw.dataset.color.toUpperCase() === L.color.toUpperCase()));
+    document.querySelectorAll('#ig-text-bgs [data-bg]').forEach(b =>
+        b.classList.toggle('active', b.dataset.bg === L.bg));
+}
+
+function igUpdateSelectedText(value) {
+    const st = window._igPv;
+    if (!st || st.selectedLayer === null) return;
+    st.textLayers[st.selectedLayer].text = value;
+    igRenderTextLayers();
+}
+
+function igUpdateSelectedProp(prop, value) {
+    const st = window._igPv;
+    if (!st || st.selectedLayer === null) return;
+    st.textLayers[st.selectedLayer][prop] = value;
+    igRenderTextLayers();
+    igSyncTextEditForm();
+}
+
+function igDeleteSelectedLayer() {
+    const st = window._igPv;
+    if (!st || st.selectedLayer === null) return;
+    st.textLayers.splice(st.selectedLayer, 1);
+    st.selectedLayer = st.textLayers.length ? Math.min(st.selectedLayer, st.textLayers.length - 1) : null;
+    renderIgPreview();
+}
+
+function igBakeText(btn) {
+    const st = window._igPv;
+    if (!st) return;
+    const item = st.items[st.index];
+    const layers = st.textLayers
+        .map(L => ({ text: (L.text || '').trimEnd(), x: L.x, y: L.y, size: L.size, color: L.color, bg: L.bg }))
+        .filter(L => L.text.trim());
+    if (!layers.length) {
+        showToast('Add some text first (＋ Add text).', 'warning');
+        return;
+    }
+    const isVideo = item.kind === 'video';
+    const original = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = isVideo ? '⏳ Rendering video… (can take a minute)' : '⏳ Baking text…';
+    fetch('/compose/media/annotate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: item.url, kind: item.kind, layers: layers }),
+    })
+    .then(r => r.json())
+    .then(data => {
+        const newUrl = data.image_url || data.video_url;
+        if (!data.success || !newUrl) {
+            showToast(data.error || 'Could not add text', 'error');
+            return;
+        }
+        igApplyFixedUrlToPost(st.postId, st.type, st.index, newUrl, item.kind);
+        st.items[st.index] = { url: newUrl, kind: item.kind };
+        st.textLayers = [];
+        st.selectedLayer = null;
+        st.editorMode = 'preview';
+        renderIgPreview();
+        showToast('Text baked into the ' + item.kind + ' and saved to the post!', 'success');
+    })
+    .catch(err => showToast('Error: ' + err.message, 'error'))
+    .finally(() => { btn.disabled = false; btn.innerHTML = original; });
+}
+
+// ---- People-tags (real Instagram feed tags) ----
+
+function igRenderTagPins() {
+    const st = window._igPv;
+    const host = document.getElementById('ig-tag-pin-host');
+    if (!host) return;
+    host.innerHTML = '';
+    if (!st || st.type !== 'feed' || st.editorMode === 'text') return;
+    (st.userTags || []).forEach((tag, i) => {
+        const pin = document.createElement('div');
+        pin.className = 'ig-tag-pin';
+        pin.style.left = (tag.x * 100) + '%';
+        pin.style.top = (tag.y * 100) + '%';
+        pin.textContent = '@' + tag.username;
+        pin.title = 'Click to remove this tag';
+        pin.onclick = function(e) { e.stopPropagation(); igRemoveTag(i); };
+        host.appendChild(pin);
+    });
+}
+
+function igRenderTagList() {
+    const st = window._igPv;
+    const list = document.getElementById('ig-tag-list');
+    if (!list) return;
+    if (!st || st.type !== 'feed' || !(st.userTags || []).length) {
+        list.innerHTML = st && st.editorMode === 'tag'
+            ? '<span class="text-muted small">No one tagged yet.</span>' : '';
+        return;
+    }
+    list.innerHTML = st.userTags.map((tag, i) =>
+        `<span class="badge text-bg-secondary">@${tag.username}
+            <a href="#" class="text-white text-decoration-none" onclick="igRemoveTag(${i}); return false;">✕</a>
+        </span>`).join('');
+}
+
+function igArmTagPlacement() {
+    const st = window._igPv;
+    if (!st || st.type !== 'feed') return;
+    const input = document.getElementById('ig-tag-username');
+    const username = (input.value || '').trim().replace(/^@/, '');
+    if (!/^[A-Za-z0-9._]{1,30}$/.test(username)) {
+        showToast('Enter a valid Instagram username (letters, numbers, dots, underscores).', 'warning');
+        return;
+    }
+    if ((st.userTags || []).length >= 20) {
+        showToast('At most 20 people can be tagged.', 'warning');
+        return;
+    }
+    st.tagArming = username;
+    document.getElementById('ig-preview-frame').classList.add('ig-tag-arming');
+    document.getElementById('ig-tag-note').textContent =
+        `Now tap the photo where @${username} is.`;
+}
+
+function igPlaceTag(x, y) {
+    const st = window._igPv;
+    if (!st || !st.tagArming) return;
+    st.userTags = st.userTags || [];
+    st.userTags.push({
+        username: st.tagArming,
+        x: Math.min(1, Math.max(0, x)),
+        y: Math.min(1, Math.max(0, y)),
+    });
+    st.tagArming = null;
+    const input = document.getElementById('ig-tag-username');
+    if (input) input.value = '';
+    document.getElementById('ig-tag-note').textContent =
+        'Type a username, then tap the photo where they are. Tags are saved with the post and applied when it publishes (feed photos only — click a pin to remove it).';
+    igSaveUserTags();
+    renderIgPreview();
+}
+
+function igRemoveTag(idx) {
+    const st = window._igPv;
+    if (!st) return;
+    (st.userTags || []).splice(idx, 1);
+    igSaveUserTags();
+    renderIgPreview();
+}
+
+function igSaveUserTags() {
+    const st = window._igPv;
+    if (!st) return;
+    window._igTags[st.postId] = (st.userTags || []).slice();
+    fetch(`/compose/post/${st.postId}/user-tags`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_tags: st.userTags || [] }),
+    })
+    .then(r => r.json())
+    .then(d => { if (!d.success) showToast(d.error || 'Could not save tags', 'warning'); })
+    .catch(() => showToast('Could not save tags', 'warning'));
 }
 
 // Load the next page of saved posts for a platform and append them.

@@ -7,6 +7,7 @@ Feed posts REQUIRE an image — Instagram has no text-only posts.
 
 from __future__ import annotations
 
+import json
 import os
 import logging
 import secrets
@@ -419,6 +420,7 @@ class InstagramClient:
         access_token: str,
         caption: str,
         image_url: str,
+        user_tags: Optional[list] = None,
     ) -> dict:
         """Publish a single-image feed post to Instagram.
 
@@ -430,6 +432,9 @@ class InstagramClient:
             access_token: Valid Instagram access token
             caption: The post caption (max 2200 characters)
             image_url: Public URL of the image to post
+            user_tags: Optional list of {"username": str, "x": float, "y": float}
+                people-tags (x/y are 0..1 positions on the photo). Feed photos
+                only — the API ignores/rejects tags elsewhere.
 
         Returns:
             Dict with success status and post details
@@ -443,11 +448,25 @@ class InstagramClient:
 
         caption = self._truncate_caption(caption)
         logger.info("Creating Instagram image container with image: %s", image_url)
-        container_id, error = self._create_container({
+        params = {
             "caption": caption,
             "image_url": image_url,
             "access_token": access_token,
-        })
+        }
+        if user_tags:
+            clean_tags = []
+            for tag in user_tags:
+                username = (tag or {}).get("username", "").strip().lstrip("@")
+                if not username:
+                    continue
+                clean_tags.append({
+                    "username": username,
+                    "x": min(max(float(tag.get("x", 0.5)), 0.0), 1.0),
+                    "y": min(max(float(tag.get("y", 0.5)), 0.0), 1.0),
+                })
+            if clean_tags:
+                params["user_tags"] = json.dumps(clean_tags)
+        container_id, error = self._create_container(params)
         if error:
             return error
         return self._poll_and_publish(container_id, access_token)
