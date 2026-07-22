@@ -980,7 +980,14 @@
                 {% endfor %}
             </select>
             {% endif %}
-            <button class="btn btn-sm btn-outline-secondary" onclick="clearPostFilters()" title="Clear Filters">✕</button>
+            <span class="text-muted small ms-2">Sort:</span>
+            <select class="form-select form-select-sm" style="width: auto;" id="filter-sort" onchange="applyPostFilters()" title="Order the saved posts">
+                <option value="">🕒 Newest First</option>
+                <option value="oldest">🕰️ Oldest First</option>
+                <option value="longest">📏 Longest First</option>
+                <option value="shortest">✂️ Shortest First</option>
+            </select>
+            <button class="btn btn-sm btn-outline-secondary" onclick="clearPostFilters()" title="Clear Filters &amp; Sort">✕</button>
             <span class="text-muted small ms-2" id="filter-results-count"></span>
         </div>
 
@@ -4131,8 +4138,16 @@ function currentPostFilters() {
         image: val('filter-image'),
         source: val('filter-source'),
         brief: val('filter-brief'),
+        // Not a filter — it rides along so every endpoint that renders a list
+        // returns it in the chosen order, but see NARROWING_FILTER_KEYS.
+        sort: val('filter-sort'),
     };
 }
+
+// The keys of currentPostFilters() that actually narrow the result set. `sort`
+// only reorders it, so choosing one must not make the page claim it is showing
+// a subset ("12 of 60 posts") when every post is still listed.
+const NARROWING_FILTER_KEYS = ['platform', 'used', 'queued', 'image', 'source', 'brief'];
 
 function postFilterQuery(filters, extra) {
     const params = new URLSearchParams();
@@ -4143,11 +4158,11 @@ function postFilterQuery(filters, extra) {
 }
 
 function anyFilterActive(filters) {
-    return Object.keys(filters).some(k => !!filters[k]);
+    return NARROWING_FILTER_KEYS.some(k => !!filters[k]);
 }
 
 function nonPlatformFiltersActive(filters) {
-    return Object.keys(filters).some(k => k !== 'platform' && !!filters[k]);
+    return NARROWING_FILTER_KEYS.some(k => k !== 'platform' && !!filters[k]);
 }
 
 // Per-platform counts for the selection, so the toolbar can size the
@@ -5621,7 +5636,7 @@ let filterRequestSeq = 0;
 // What the posts currently in the DOM were rendered under. The server already
 // renders the unfiltered first page, so an identical filter set needs no fetch.
 let renderedFilterSignature = JSON.stringify(
-    { platform: '', used: '', queued: '', image: '', source: '', brief: '' });
+    { platform: '', used: '', queued: '', image: '', source: '', brief: '', sort: '' });
 
 // Put freshly rendered posts into the same state as the ones they replaced.
 function initLoadedPosts(container) {
@@ -5748,6 +5763,8 @@ function clearPostFilters() {
     if (sourceEl) sourceEl.value = '';
     const briefEl = document.getElementById('filter-brief');
     if (briefEl) briefEl.value = '';
+    const sortEl = document.getElementById('filter-sort');
+    if (sortEl) sortEl.value = '';   // back to newest first
     applyPostFilters();
 }
 

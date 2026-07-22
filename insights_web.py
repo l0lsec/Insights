@@ -5876,6 +5876,7 @@ def compose_posts_more():
     # The card being paged decides the platform; the filter bar supplies the rest.
     filters = {key: request.args.get(key) for key in _POST_FILTER_KEYS}
     filters['platform'] = platform
+    filters['sort'] = request.args.get('sort')
     rows, index_by_id = _filtered_standalone_posts(filters)
 
     total = len(rows)
@@ -5917,6 +5918,29 @@ def _valid_post_platform(raw):
 # The Compose filter bar's non-platform filters, in the same vocabulary the
 # <select> options use, so the server can reproduce the client's predicate.
 _POST_FILTER_KEYS = ('used', 'queued', 'image', 'source', 'brief')
+
+
+# Sort orders for the Compose list, keyed by the <select> values. The default
+# ('' / unknown) is the newest-first order list_standalone_posts() already
+# returns. Sorts are ascending by key: 'longest' negates the length rather than
+# reversing so that ties keep the newest-first order in every case.
+_POST_SORT_KEYS = {
+    'oldest': lambda row: row['created_at'] or '',
+    'longest': lambda row: -len(row['content'] or ''),
+    'shortest': lambda row: len(row['content'] or ''),
+}
+
+
+def _sort_standalone_posts(rows, sort):
+    """Order matched posts for the Compose sort control.
+
+    Applied after filtering, and after the display indexes are taken, so a post
+    keeps the same "Post N" label whichever order it is shown in.
+    """
+    key = _POST_SORT_KEYS.get((sort or '').strip())
+    if key is None:
+        return rows
+    return sorted(rows, key=key)
 
 
 def _post_matches_filters(post, filters, scheduled_info):
@@ -5987,7 +6011,7 @@ def _filtered_standalone_posts(args):
         scheduled_info = get_pending_schedules_for_standalone_posts(ids) if ids else {}
 
     matched = [r for r in rows if _post_matches_filters(r, filters, scheduled_info)]
-    return matched, index_by_id
+    return _sort_standalone_posts(matched, args.get('sort')), index_by_id
 
 
 def _selected_standalone_posts(payload):
