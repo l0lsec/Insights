@@ -295,6 +295,10 @@ def init_db(db_path: str = DB_PATH) -> None:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN ig_post_type TEXT")
         if "media_items" not in standalone_columns:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN media_items TEXT")
+        # ig_user_tags is a JSON list of {"username", "x", "y"} people-tags used
+        # when publishing Instagram feed photos (the API supports tags there only).
+        if "ig_user_tags" not in standalone_columns:
+            conn.execute("ALTER TABLE standalone_posts ADD COLUMN ig_user_tags TEXT")
         # URL sources - stores extracted content from URLs for reuse
         conn.execute(
             """
@@ -3253,6 +3257,28 @@ def set_standalone_post_media(
                 "UPDATE standalone_posts SET ig_post_type = ?, media_items = ? WHERE id = ?",
                 (ig_post_type, json.dumps(items), post_id),
             )
+        conn.commit()
+
+
+def set_standalone_post_user_tags(
+    post_id: int,
+    user_tags: Optional[list],
+    db_path: str = DB_PATH,
+) -> None:
+    """Set the Instagram people-tags for a standalone post.
+
+    Args:
+        post_id: The post ID
+        user_tags: list of {"username": str, "x": float, "y": float} with x/y
+            in 0..1 image coordinates, or None/[] to clear. Only used when
+            publishing feed photos (the Instagram API supports tags there only).
+    """
+    payload = json.dumps(user_tags) if user_tags else None
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE standalone_posts SET ig_user_tags = ? WHERE id = ?",
+            (payload, post_id),
+        )
         conn.commit()
 
 
