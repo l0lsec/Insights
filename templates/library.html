@@ -1,0 +1,542 @@
+{% extends "base.html" %}
+{% block title %}Content Library | Insights{% endblock %}
+{% block header %}📚 Content Library{% endblock %}
+{% block content %}
+<p class="lead text-muted mb-4">
+    Catalogue a media archive and sort it by <strong>year</strong> and <strong>category</strong>.
+    The scan reads only file metadata, so it never downloads anything. Categories are learned
+    from a folder you have already sorted by hand, and nothing is copied until you approve it.
+</p>
+
+<!-- ── Environment ──────────────────────────────────────────────────────── -->
+<div class="row g-3 mb-4">
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-body py-3">
+                <div class="text-muted small text-uppercase">Local AI</div>
+                {% if ollama.available %}
+                    <div class="fw-semibold">
+                        {% if ollama.vision_ready %}✅{% else %}⚠️{% endif %} {{ ollama.vision_model }}
+                    </div>
+                    <div class="text-muted small">
+                        {% if ollama.vision_ready %}Vision ready — captions run free on this Mac.
+                        {% else %}Not installed. Run <code>ollama pull {{ ollama.vision_model }}</code>.{% endif %}
+                    </div>
+                {% else %}
+                    <div class="fw-semibold text-danger">⛔ Ollama unreachable</div>
+                    <div class="text-muted small">Start it with <code>ollama serve</code>.</div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-body py-3">
+                <div class="text-muted small text-uppercase">Media tools</div>
+                <div class="fw-semibold">
+                    {{ '✅' if tools.sips else '⛔' }} sips
+                    &nbsp;{{ '✅' if tools.ffmpeg else '⛔' }} ffmpeg
+                </div>
+                <div class="text-muted small">HEIC conversion and video frame grabs.</div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-4">
+        <div class="card h-100">
+            <div class="card-body py-3">
+                <div class="text-muted small text-uppercase">Free disk</div>
+                <div class="fw-semibold">{{ '%.1f'|format(free_gb) }} GB</div>
+                <div class="text-muted small">Caps how much of a cloud archive can be inspected.</div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ── Folders ──────────────────────────────────────────────────────────── -->
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>Folders</strong>
+        <button class="btn btn-sm btn-primary" onclick="document.getElementById('addRoot').classList.toggle('d-none')">
+            ➕ Add folder
+        </button>
+    </div>
+    <div class="card-body">
+        <form id="addRoot" class="row g-2 mb-3 d-none" method="post" action="{{ url_for('library_add_root') }}">
+            <div class="col-md-7">
+                <input class="form-control" name="path" placeholder="/Users/you/Pictures/Archive" required>
+            </div>
+            <div class="col-md-3">
+                <select class="form-select" name="role">
+                    <option value="source">Archive to sort</option>
+                    <option value="taxonomy">Already sorted (teaches categories)</option>
+                </select>
+            </div>
+            <div class="col-md-2"><button class="btn btn-primary w-100">Add</button></div>
+        </form>
+
+        {% if roots %}
+        <table class="table table-sm align-middle mb-0">
+            <tbody>
+            {% for r in roots %}
+                <tr>
+                    <td>
+                        <div class="fw-semibold">{{ r.label }}</div>
+                        <div class="text-muted small font-monospace">{{ r.path }}</div>
+                    </td>
+                    <td style="width:11rem">
+                        <span class="badge {{ 'bg-info' if r.role == 'taxonomy' else 'bg-secondary' }}">
+                            {{ 'Teaches categories' if r.role == 'taxonomy' else 'To sort' }}
+                        </span>
+                    </td>
+                    <td class="text-end" style="width:20rem">
+                        {% if r.role == 'taxonomy' %}
+                            <form method="post" action="{{ url_for('library_learn_taxonomy') }}" class="d-inline">
+                                <input type="hidden" name="root_id" value="{{ r.id }}">
+                                <button class="btn btn-sm btn-outline-info">Learn categories</button>
+                            </form>
+                        {% else %}
+                            <form method="post" action="{{ url_for('library_start_scan') }}" class="d-inline">
+                                <input type="hidden" name="root_id" value="{{ r.id }}">
+                                <button class="btn btn-sm btn-outline-primary">Scan (free)</button>
+                            </form>
+                        {% endif %}
+                        <form method="post" action="{{ url_for('library_delete_root', root_id=r.id) }}"
+                              class="d-inline" onsubmit="return confirm('Remove this folder from the library? Files are not touched.')">
+                            <button class="btn btn-sm btn-outline-danger">✕</button>
+                        </form>
+                    </td>
+                </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p class="text-muted mb-0">
+            Add the archive you want sorted, and — if you have one — a folder you have already
+            sorted by hand. Its subfolder names become the categories.
+        </p>
+        {% endif %}
+    </div>
+</div>
+
+<!-- ── Categories ───────────────────────────────────────────────────────── -->
+{% if categories %}
+<div class="card mb-4">
+    <div class="card-header"><strong>Categories</strong>
+        <span class="text-muted small">— learned from your sorted folder; untick to exclude</span>
+    </div>
+    <div class="card-body">
+        {% for c in categories %}
+            <div class="form-check form-check-inline mb-2">
+                <input class="form-check-input" type="checkbox" id="cat{{ loop.index }}"
+                       {% if c.active %}checked{% endif %}
+                       onchange="toggleCategory('{{ c.name|e }}', this.checked)">
+                <label class="form-check-label" for="cat{{ loop.index }}">
+                    {{ c.name }} <span class="text-muted small">({{ c.example_count }})</span>
+                </label>
+            </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% if not scan %}
+<div class="alert alert-secondary">
+    No catalogue yet. Add an archive folder above and press <strong>Scan</strong> — it reads
+    metadata only, so it costs nothing and takes seconds even for tens of thousands of files.
+</div>
+{% else %}
+
+<!-- ── Scan status ──────────────────────────────────────────────────────── -->
+<div class="card mb-4" id="scanCard" data-scan-id="{{ scan.id }}">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <div>
+            <strong>{{ scan.root_label }}</strong>
+            <span class="badge bg-secondary ms-2" id="scanStatus">{{ scan.status }}</span>
+        </div>
+        <div>
+            <button class="btn btn-sm btn-outline-danger d-none" id="stopBtn" onclick="stopJob()">Stop</button>
+        </div>
+    </div>
+    <div class="card-body">
+        <div class="row text-center g-3 mb-3">
+            <div class="col"><div class="h4 mb-0" id="mFiles">{{ summary.totals.files or 0 }}</div>
+                <div class="text-muted small">files</div></div>
+            <div class="col"><div class="h4 mb-0">{{ summary.totals.events or 0 }}</div>
+                <div class="text-muted small">events</div></div>
+            <div class="col"><div class="h4 mb-0">{{ '%.0f'|format((summary.totals.bytes or 0) / 1073741824) }} GB</div>
+                <div class="text-muted small">archive size</div></div>
+            <div class="col"><div class="h4 mb-0" id="mDown">{{ '%.1f'|format((scan.bytes_downloaded or 0) / 1073741824) }} GB</div>
+                <div class="text-muted small">downloaded</div></div>
+            <div class="col"><div class="h4 mb-0" id="mDone">{{ scan.events_done or 0 }}</div>
+                <div class="text-muted small">events classified</div></div>
+        </div>
+
+        <div class="progress mb-3" style="height:8px" id="progWrap">
+            <div class="progress-bar" id="progBar" style="width:0%"></div>
+        </div>
+
+        {% if scan.error_message %}
+            <div class="alert alert-danger py-2 mb-3"><strong>Failed:</strong> {{ scan.error_message }}</div>
+        {% endif %}
+
+        <!-- Classification controls -->
+        <div class="border rounded p-3">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+                <strong>Classify with AI</strong>
+                <button class="btn btn-sm btn-outline-secondary" onclick="loadEstimate()">Estimate cost</button>
+            </div>
+            <div id="estimate" class="small text-muted mb-3">
+                Press <em>Estimate cost</em> to see exactly how much this will download before running it.
+            </div>
+            <div class="row g-2 align-items-end">
+                <div class="col-md-2">
+                    <label class="form-label small mb-1">Download cap</label>
+                    <div class="input-group input-group-sm">
+                        <input type="number" class="form-control" id="budgetGb" value="12" min="1">
+                        <span class="input-group-text">GB</span>
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small mb-1">Max file size</label>
+                    <div class="input-group input-group-sm">
+                        <input type="number" class="form-control" id="capMb" value="16" min="1">
+                        <span class="input-group-text">MB</span>
+                    </div>
+                </div>
+                <div class="col-md-2">
+                    <label class="form-label small mb-1">Samples / event</label>
+                    <input type="number" class="form-control form-control-sm" id="maxSamples" value="2" min="1" max="5">
+                </div>
+                <div class="col-md-3">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="useCloud">
+                        <label class="form-check-label small" for="useCloud">Cloud mapping (more accurate, ~$1)</label>
+                    </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="useSpeech">
+                        <label class="form-check-label small" for="useSpeech">Transcribe speech (slow)</label>
+                    </div>
+                </div>
+                <div class="col-md-3">
+                    <button class="btn btn-primary btn-sm w-100" id="classifyBtn" onclick="startClassify()">
+                        ▶ Run classification
+                    </button>
+                </div>
+            </div>
+            <div class="form-text mt-2">
+                Images are captioned locally and free. Only the short text mapping step can go to
+                the cloud — your photos never leave this Mac.
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ── Breakdown ────────────────────────────────────────────────────────── -->
+<div class="row g-3 mb-4">
+    <div class="col-md-5">
+        <div class="card h-100">
+            <div class="card-header"><strong>By year</strong></div>
+            <div class="card-body p-0" style="max-height:20rem;overflow:auto">
+                <table class="table table-sm mb-0">
+                    <tbody>
+                    {% for y in summary.by_year %}
+                        <tr>
+                            <td><a href="#" onclick="browse({year:{{ y.year or 0 }}});return false">{{ y.year or 'Undated' }}</a></td>
+                            <td class="text-end">{{ y.files }}</td>
+                            <td class="text-end text-muted small">{{ '%.1f'|format(y.bytes / 1073741824) }} GB</td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-7">
+        <div class="card h-100">
+            <div class="card-header d-flex justify-content-between">
+                <strong>By category</strong>
+                <a href="#" class="small" onclick="loadDuplicates();return false">Find duplicates</a>
+            </div>
+            <div class="card-body p-0" style="max-height:20rem;overflow:auto">
+                <table class="table table-sm mb-0">
+                    <tbody>
+                    {% for c in summary.by_category %}
+                        <tr>
+                            <td><a href="#" onclick="browse({category:'{{ c.category|e }}'});return false">{{ c.category }}</a></td>
+                            <td class="text-end">{{ c.files }}</td>
+                            <td class="text-end text-muted small">{{ '%.1f'|format(c.bytes / 1073741824) }} GB</td>
+                            <td class="text-end text-muted small">
+                                {% if c.avg_confidence %}{{ '%.0f'|format(c.avg_confidence * 100) }}%{% endif %}
+                            </td>
+                        </tr>
+                    {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- ── Copy plan ────────────────────────────────────────────────────────── -->
+<div class="card mb-4">
+    <div class="card-header"><strong>Copy plan</strong>
+        <span class="text-muted small">— review, approve, then copy. Originals are never moved.</span>
+    </div>
+    <div class="card-body">
+        <div class="row g-2 align-items-end mb-3">
+            <div class="col-md-3">
+                <label class="form-label small mb-1">Folder layout</label>
+                <select class="form-select form-select-sm" id="layout">
+                    <option value="category_year">Category / Year</option>
+                    <option value="year_category">Year / Category</option>
+                </select>
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small mb-1">Minimum confidence</label>
+                <input type="number" class="form-control form-control-sm" id="minConf"
+                       value="0.5" min="0" max="1" step="0.05">
+            </div>
+            <div class="col-md-3">
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="inclUnsorted">
+                    <label class="form-check-label small" for="inclUnsorted">Include Unsorted</label>
+                </div>
+            </div>
+            <div class="col-md-3">
+                <button class="btn btn-outline-primary btn-sm w-100" onclick="buildPlan()">Build plan</button>
+            </div>
+        </div>
+
+        <div id="planSummary" class="small text-muted">No plan built yet.</div>
+
+        <div class="row g-2 align-items-end mt-3">
+            <div class="col-md-7">
+                <label class="form-label small mb-1">Copy approved files into</label>
+                <input class="form-control form-control-sm" id="destRoot"
+                       placeholder="/Users/you/Pictures/Sorted">
+            </div>
+            <div class="col-md-5">
+                <button class="btn btn-success btn-sm w-100" onclick="applyPlan()">
+                    Copy approved files
+                </button>
+            </div>
+        </div>
+        <div class="form-text">
+            Copying a cloud-only file downloads it first, so the approved size is a real download.
+            An undo manifest is written into the destination folder.
+        </div>
+    </div>
+</div>
+
+<!-- ── Browser ──────────────────────────────────────────────────────────── -->
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <strong>Browse</strong>
+        <div class="d-flex gap-2">
+            <input class="form-control form-control-sm" id="searchBox" placeholder="search path or caption"
+                   style="width:16rem" onkeydown="if(event.key==='Enter')browse({q:this.value})">
+            <button class="btn btn-sm btn-outline-secondary" onclick="browse({unsorted:'1'})">Unsorted only</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="browse({})">All</button>
+        </div>
+    </div>
+    <div class="card-body p-0">
+        <div id="browseResults" class="p-3 text-muted small">
+            Pick a year or category above, or search.
+        </div>
+    </div>
+</div>
+{% endif %}
+
+<script>
+const SCAN_ID = {{ scan.id if scan else 'null' }};
+const fmtGb = b => (b / 1073741824).toFixed(2) + ' GB';
+
+function toggleCategory(name, active) {
+    fetch('{{ url_for("library_toggle_category") }}', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({name: name, active: active ? '1' : '0'})
+    });
+}
+
+async function loadEstimate() {
+    const box = document.getElementById('estimate');
+    box.textContent = 'Estimating…';
+    const cap = document.getElementById('capMb').value;
+    const n = document.getElementById('maxSamples').value;
+    const r = await fetch(`/library/scan/${SCAN_ID}/estimate?max_sample_mb=${cap}&max_samples=${n}`);
+    const e = await r.json();
+    if (e.error) { box.textContent = e.error; return; }
+    const warn = e.fits ? '' :
+        `<div class="text-danger mt-1">⚠ This exceeds free disk space (${e.free_gb} GB).
+         Lower the max file size, or run it in stages.</div>`;
+    box.innerHTML = `
+        <strong>${e.ai_events.toLocaleString()}</strong> events need AI
+        (${e.resolved_by_rule.toLocaleString()} already resolved by folder or file name).
+        Will caption <strong>${e.sample_files.toLocaleString()}</strong> sample files,
+        downloading <strong>${e.download_gb} GB</strong> of ${e.free_gb} GB free.
+        <div class="mt-1">
+          Roughly <strong>${e.est_hours} h</strong> total —
+          ${e.download_hours} h of downloading at ${e.mb_per_s} MB/s
+          ${e.measured ? '(just measured on your archive)' : '(estimated)'},
+          overlapped with ${e.vision_hours} h of captioning.
+        </div>
+        <div class="mt-1">
+          Covers <strong>${(e.coverage * 100).toFixed(1)}%</strong> of the archive;
+          ${e.deferred_files.toLocaleString()} files sit in events whose smallest file
+          exceeds the size cap.
+        </div>${warn}`;
+}
+
+async function startClassify() {
+    document.getElementById('classifyBtn').disabled = true;
+    await fetch(`/library/scan/${SCAN_ID}/classify`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            budget_gb: document.getElementById('budgetGb').value,
+            max_sample_mb: document.getElementById('capMb').value,
+            max_samples: document.getElementById('maxSamples').value,
+            use_cloud_mapping: document.getElementById('useCloud').checked ? '1' : '',
+            use_speech: document.getElementById('useSpeech').checked ? '1' : '',
+        })
+    });
+    poll();
+}
+
+async function stopJob() {
+    await fetch(`/library/scan/${SCAN_ID}/stop`, {method: 'POST'});
+}
+
+async function poll() {
+    if (!SCAN_ID) return;
+    const r = await fetch(`/library/scan/${SCAN_ID}/status`);
+    const s = await r.json();
+    document.getElementById('scanStatus').textContent = s.status + (s.phase ? ' · ' + s.phase : '');
+    document.getElementById('mFiles').textContent = (s.files_total || 0).toLocaleString();
+    document.getElementById('mDone').textContent = (s.events_done || 0).toLocaleString();
+    document.getElementById('mDown').textContent = fmtGb(s.bytes_downloaded || 0);
+    document.getElementById('stopBtn').classList.toggle('d-none', !s.running);
+    document.getElementById('classifyBtn').disabled = s.running;
+
+    const pct = s.events_total ? (100 * (s.events_done || 0) / s.events_total) : 0;
+    document.getElementById('progBar').style.width = pct.toFixed(1) + '%';
+
+    if (s.running) setTimeout(poll, 3000);
+    else if (s.status === 'classified' || s.status === 'applied') setTimeout(() => location.reload(), 1200);
+}
+
+async function buildPlan() {
+    const r = await fetch(`/library/scan/${SCAN_ID}/plan`, {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+            layout: document.getElementById('layout').value,
+            min_confidence: document.getElementById('minConf').value,
+            include_unsorted: document.getElementById('inclUnsorted').checked ? '1' : '',
+        })
+    });
+    const d = await r.json();
+    renderPlan(d.summary, d.items);
+}
+
+function renderPlan(summary, total) {
+    const box = document.getElementById('planSummary');
+    if (!summary || !summary.by_category || !summary.by_category.length) {
+        box.textContent = 'Plan is empty — try lowering the minimum confidence.';
+        return;
+    }
+    let html = `<div class="mb-2"><strong>${(total || 0).toLocaleString()}</strong> files planned.
+        <button class="btn btn-sm btn-outline-success ms-2" onclick="approveAll()">Approve all</button></div>
+        <table class="table table-sm"><thead><tr><th>Category</th><th class="text-end">Files</th>
+        <th class="text-end">Size</th><th class="text-end">Approved</th><th></th></tr></thead><tbody>`;
+    for (const c of summary.by_category) {
+        html += `<tr><td>${c.category}</td><td class="text-end">${c.items.toLocaleString()}</td>
+            <td class="text-end text-muted">${fmtGb(c.bytes)}</td>
+            <td class="text-end">${c.approved || 0}</td>
+            <td class="text-end">
+              <button class="btn btn-sm btn-outline-success py-0" onclick="approveCat('${c.category.replace(/'/g, "\\'")}')">Approve</button>
+            </td></tr>`;
+    }
+    box.innerHTML = html + '</tbody></table>';
+}
+
+async function approveCat(cat) {
+    const r = await fetch(`/library/scan/${SCAN_ID}/plan/approve`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({state: 'approved', categories: [cat]})
+    });
+    const d = await r.json();
+    renderPlan(d.summary, null);
+}
+
+async function approveAll() {
+    const r = await fetch(`/library/scan/${SCAN_ID}/plan/approve`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({state: 'approved'})
+    });
+    const d = await r.json();
+    renderPlan(d.summary, null);
+}
+
+async function applyPlan() {
+    const dest = document.getElementById('destRoot').value.trim();
+    if (!dest) { alert('Enter a destination folder.'); return; }
+    if (!confirm(`Copy approved files into ${dest}?\n\nOriginals stay where they are.`)) return;
+    const r = await fetch(`/library/scan/${SCAN_ID}/apply`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({dest_root: dest})
+    });
+    const d = await r.json();
+    if (d.error) { alert(d.error); return; }
+    alert(`Copying ${d.items} files (${fmtGb(d.bytes)}).\nUndo manifest: ${d.manifest}`);
+    poll();
+}
+
+async function browse(filters) {
+    const p = new URLSearchParams(filters);
+    const r = await fetch(`/library/scan/${SCAN_ID}/files?limit=100&` + p.toString());
+    const d = await r.json();
+    const box = document.getElementById('browseResults');
+    if (!d.files.length) { box.textContent = 'No matches.'; return; }
+    let html = `<div class="mb-2 text-muted small">${d.total.toLocaleString()} matching files
+        (showing ${d.files.length})</div>
+        <table class="table table-sm align-middle"><thead><tr><th></th><th>File</th><th>Year</th>
+        <th>Category</th><th>What the model saw</th></tr></thead><tbody>`;
+    for (const f of d.files) {
+        const thumb = f.materialized
+            ? `<img src="/library/thumb?path=${encodeURIComponent(f.path)}" style="height:38px" loading="lazy">`
+            : '<span class="text-muted small">☁</span>';
+        html += `<tr>
+            <td style="width:3rem">${thumb}</td>
+            <td><div class="font-monospace small">${f.rel_path}</div>
+                ${f.dup_group > 1 ? `<span class="badge bg-warning text-dark">×${f.dup_group} duplicate</span>` : ''}</td>
+            <td>${f.year || ''}</td>
+            <td><span class="badge bg-secondary">${f.category}</span>
+                <div class="text-muted small">${f.classified_by || ''}</div></td>
+            <td class="text-muted small">${(f.caption || '').slice(0, 110)}</td>
+        </tr>`;
+    }
+    box.innerHTML = html + '</tbody></table>';
+}
+
+async function loadDuplicates() {
+    const r = await fetch(`/library/scan/${SCAN_ID}/duplicates`);
+    const d = await r.json();
+    const box = document.getElementById('browseResults');
+    let html = `<div class="mb-2"><strong>${d.total_groups}</strong> duplicate groups —
+        ${fmtGb(d.reclaimable_bytes)} reclaimable if you keep one copy of each.</div>
+        <table class="table table-sm"><thead><tr><th>File</th><th class="text-end">Copies</th>
+        <th class="text-end">Reclaimable</th></tr></thead><tbody>`;
+    for (const g of d.groups.slice(0, 100)) {
+        html += `<tr><td class="font-monospace small">${g.name}</td>
+            <td class="text-end">${g.count}</td>
+            <td class="text-end text-muted">${fmtGb(g.reclaimable_bytes)}</td></tr>`;
+    }
+    box.innerHTML = html + '</tbody></table>';
+    box.scrollIntoView({behavior: 'smooth'});
+}
+
+if (SCAN_ID) poll();
+</script>
+{% endblock %}

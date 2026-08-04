@@ -515,6 +515,155 @@ def init_db(db_path: str = DB_PATH) -> None:
             conn.execute("ALTER TABLE articles ADD COLUMN brief_run_id INTEGER")
         if "source_type" not in art_cols:
             conn.execute("ALTER TABLE articles ADD COLUMN source_type TEXT")
+        # ── Content Library ────────────────────────────────────────────────
+        # Catalogue of an on-disk media archive, sorted by year and category.
+        # A "root" is a folder the user has registered: either a source archive
+        # to classify, or a hand-sorted folder whose subfolder names supply the
+        # taxonomy.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS library_roots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                path TEXT NOT NULL UNIQUE,
+                label TEXT,
+                role TEXT NOT NULL DEFAULT 'source',
+                created_at TEXT
+            )
+            """
+        )
+        # One scan run. Holds the aggregate counters shown on the dashboard and
+        # the JSON stats blob from the classifier so a finished run stays fully
+        # inspectable without recomputing anything.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS library_scans (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                root_id INTEGER NOT NULL,
+                status TEXT NOT NULL DEFAULT 'scanning',
+                phase TEXT,
+                files_total INTEGER DEFAULT 0,
+                events_total INTEGER DEFAULT 0,
+                events_done INTEGER DEFAULT 0,
+                bytes_downloaded INTEGER DEFAULT 0,
+                stats TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                error_message TEXT,
+                FOREIGN KEY(root_id) REFERENCES library_roots(id) ON DELETE CASCADE
+            )
+            """
+        )
+        # One row per catalogued file. Deliberately denormalised: the whole
+        # point of the catalogue is to answer "show me 2019 MMA video" without
+        # touching the filesystem, and the archives involved are large enough
+        # that a join per row would be felt.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS library_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id INTEGER NOT NULL,
+                path TEXT NOT NULL,
+                rel_path TEXT,
+                name TEXT,
+                ext TEXT,
+                kind TEXT,
+                size INTEGER DEFAULT 0,
+                mtime REAL,
+                materialized INTEGER DEFAULT 0,
+                captured_at TEXT,
+                date_source TEXT,
+                year INTEGER,
+                month INTEGER,
+                event_key TEXT,
+                dup_group INTEGER DEFAULT 1,
+                category TEXT,
+                subcategory TEXT,
+                confidence REAL DEFAULT 0,
+                classified_by TEXT,
+                caption TEXT,
+                notes TEXT,
+                FOREIGN KEY(scan_id) REFERENCES library_scans(id) ON DELETE CASCADE
+            )
+            """
+        )
+        for stmt in (
+            "CREATE INDEX IF NOT EXISTS idx_lib_files_scan ON library_files(scan_id)",
+            "CREATE INDEX IF NOT EXISTS idx_lib_files_cat ON library_files(scan_id, category)",
+            "CREATE INDEX IF NOT EXISTS idx_lib_files_year ON library_files(scan_id, year)",
+            "CREATE INDEX IF NOT EXISTS idx_lib_files_event ON library_files(scan_id, event_key)",
+            "CREATE INDEX IF NOT EXISTS idx_lib_files_dup ON library_files(scan_id, dup_group)",
+        ):
+            conn.execute(stmt)
+        # Events are the unit the classifier actually labels; files inherit.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS library_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id INTEGER NOT NULL,
+                event_key TEXT NOT NULL,
+                directory TEXT,
+                file_count INTEGER DEFAULT 0,
+                total_bytes INTEGER DEFAULT 0,
+                year INTEGER,
+                date_start TEXT,
+                date_end TEXT,
+                category TEXT,
+                confidence REAL DEFAULT 0,
+                classified_by TEXT,
+                reason TEXT,
+                captions TEXT,
+                transcript TEXT,
+                FOREIGN KEY(scan_id) REFERENCES library_scans(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_lib_events_key ON library_events(scan_id, event_key)"
+        )
+        # The taxonomy, learned from a triaged folder but editable afterwards.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS library_categories (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                subcategories TEXT,
+                keywords TEXT,
+                example_count INTEGER DEFAULT 0,
+                source TEXT DEFAULT 'learned',
+                active INTEGER DEFAULT 1,
+                created_at TEXT
+            )
+            """
+        )
+        # Proposed copy operations awaiting approval. Kept separate from
+        # library_files so a plan can be rebuilt, re-approved, or discarded
+        # without disturbing the catalogue it was derived from.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS library_plan_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                scan_id INTEGER NOT NULL,
+                file_id INTEGER NOT NULL,
+                dest_rel TEXT NOT NULL,
+                size INTEGER DEFAULT 0,
+                category TEXT,
+                year INTEGER,
+                confidence REAL DEFAULT 0,
+                collision INTEGER DEFAULT 0,
+                state TEXT NOT NULL DEFAULT 'proposed',
+                applied_at TEXT,
+                error_message TEXT,
+                FOREIGN KEY(scan_id) REFERENCES library_scans(id) ON DELETE CASCADE,
+                FOREIGN KEY(file_id) REFERENCES library_files(id) ON DELETE CASCADE
+            )
+            """
+        )
+        for stmt in (
+            "CREATE INDEX IF NOT EXISTS idx_lib_plan_scan ON library_plan_items(scan_id, state)",
+            "CREATE INDEX IF NOT EXISTS idx_lib_plan_file ON library_plan_items(file_id)",
+        ):
+            conn.execute(stmt)
+
         # Upgrade any existing DB with newer columns
         cur = conn.execute("PRAGMA table_info(episodes)")
         columns = [row[1] for row in cur.fetchall()]
@@ -4685,3 +4834,460 @@ def get_active_brief_run(brief_id: int, db_path: str = DB_PATH) -> Optional[sqli
             (brief_id,),
         )
         return cur.fetchone()
+
+
+# ── Content Library ─────────────────────────────────────────────────────────
+
+def add_library_root(path: str, label: str = "", role: str = "source",
+                     db_path: str = DB_PATH) -> int:
+    """Register a folder as a source archive or a taxonomy example folder."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO library_roots (path, label, role, created_at) VALUES (?,?,?,?)",
+            (path, label or path.rstrip("/").split("/")[-1], role,
+             datetime.now().isoformat(timespec="seconds")),
+        )
+        cur = conn.execute("SELECT id FROM library_roots WHERE path = ?", (path,))
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+
+
+def list_library_roots(role: Optional[str] = None, db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        if role:
+            cur = conn.execute("SELECT * FROM library_roots WHERE role = ? ORDER BY id", (role,))
+        else:
+            cur = conn.execute("SELECT * FROM library_roots ORDER BY id")
+        return cur.fetchall()
+
+
+def get_library_root(root_id: int, db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM library_roots WHERE id = ?", (root_id,))
+        return cur.fetchone()
+
+
+def delete_library_root(root_id: int, db_path: str = DB_PATH) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("DELETE FROM library_roots WHERE id = ?", (root_id,))
+
+
+def create_library_scan(root_id: int, db_path: str = DB_PATH) -> int:
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO library_scans (root_id, status, phase, started_at) VALUES (?,?,?,?)",
+            (root_id, "scanning", "walking", datetime.now().isoformat(timespec="seconds")),
+        )
+        return int(cur.lastrowid)
+
+
+def update_library_scan(scan_id: int, db_path: str = DB_PATH, **fields) -> None:
+    """Patch a scan row. ``stats`` is JSON-encoded automatically."""
+    if not fields:
+        return
+    allowed = {"status", "phase", "files_total", "events_total", "events_done",
+               "bytes_downloaded", "stats", "finished_at", "error_message"}
+    sets, params = [], []
+    for key, value in fields.items():
+        if key not in allowed:
+            continue
+        if key == "stats" and not isinstance(value, str):
+            value = json.dumps(value, default=str)
+        sets.append(f"{key} = ?")
+        params.append(value)
+    if not sets:
+        return
+    params.append(scan_id)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(f"UPDATE library_scans SET {', '.join(sets)} WHERE id = ?", params)
+
+
+def get_library_scan(scan_id: int, db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            """
+            SELECT s.*, r.path AS root_path, r.label AS root_label
+            FROM library_scans s JOIN library_roots r ON r.id = s.root_id
+            WHERE s.id = ?
+            """,
+            (scan_id,),
+        )
+        return cur.fetchone()
+
+
+def latest_library_scan(root_id: Optional[int] = None, db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        sql = """
+            SELECT s.*, r.path AS root_path, r.label AS root_label
+            FROM library_scans s JOIN library_roots r ON r.id = s.root_id
+        """
+        params: list = []
+        if root_id:
+            sql += " WHERE s.root_id = ?"
+            params.append(root_id)
+        sql += " ORDER BY s.id DESC LIMIT 1"
+        cur = conn.execute(sql, params)
+        return cur.fetchone()
+
+
+def list_library_scans(limit: int = 20, db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            """
+            SELECT s.*, r.path AS root_path, r.label AS root_label
+            FROM library_scans s JOIN library_roots r ON r.id = s.root_id
+            ORDER BY s.id DESC LIMIT ?
+            """,
+            (limit,),
+        )
+        return cur.fetchall()
+
+
+def bulk_insert_library_files(scan_id: int, rows: Iterable[dict], db_path: str = DB_PATH) -> int:
+    """Insert catalogued files in one transaction.
+
+    A scan produces tens of thousands of rows, so this uses executemany rather
+    than per-row inserts; the difference is seconds versus minutes.
+    """
+    payload = [
+        (scan_id, r.get("path"), r.get("rel_path"), r.get("name"), r.get("ext"),
+         r.get("kind"), r.get("size", 0), r.get("mtime"),
+         1 if r.get("materialized") else 0, r.get("captured_at"), r.get("date_source"),
+         r.get("year"), r.get("month"), r.get("event_key"), r.get("dup_group", 1),
+         r.get("category"), r.get("subcategory"), r.get("confidence", 0),
+         r.get("classified_by"), r.get("caption"), r.get("notes"))
+        for r in rows
+    ]
+    if not payload:
+        return 0
+    with sqlite3.connect(db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO library_files
+              (scan_id, path, rel_path, name, ext, kind, size, mtime, materialized,
+               captured_at, date_source, year, month, event_key, dup_group,
+               category, subcategory, confidence, classified_by, caption, notes)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """,
+            payload,
+        )
+        return len(payload)
+
+
+def upsert_library_event(scan_id: int, event: dict, db_path: str = DB_PATH) -> None:
+    """Record or update one classified event."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO library_events
+              (scan_id, event_key, directory, file_count, total_bytes, year,
+               date_start, date_end, category, confidence, classified_by, reason,
+               captions, transcript)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(scan_id, event_key) DO UPDATE SET
+              category = excluded.category,
+              confidence = excluded.confidence,
+              classified_by = excluded.classified_by,
+              reason = excluded.reason,
+              captions = excluded.captions,
+              transcript = excluded.transcript
+            """,
+            (scan_id, event.get("event_key"), event.get("directory"),
+             event.get("file_count", 0), event.get("total_bytes", 0), event.get("year"),
+             event.get("date_start"), event.get("date_end"), event.get("category"),
+             event.get("confidence", 0), event.get("classified_by"), event.get("reason"),
+             json.dumps(event.get("captions") or []), event.get("transcript")),
+        )
+
+
+def apply_event_labels(scan_id: int, event_key: str, category: str,
+                       confidence: float = 0, classified_by: str = "",
+                       notes: str = "", db_path: str = DB_PATH) -> int:
+    """Propagate an event's label onto every file in it."""
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            """
+            UPDATE library_files
+            SET category = ?, confidence = ?, classified_by = ?, notes = ?
+            WHERE scan_id = ? AND event_key = ?
+            """,
+            (category, confidence, classified_by, notes, scan_id, event_key),
+        )
+        return cur.rowcount
+
+
+def set_file_caption(file_path: str, scan_id: int, caption: str, db_path: str = DB_PATH) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE library_files SET caption = ? WHERE scan_id = ? AND path = ?",
+            (caption, scan_id, file_path),
+        )
+
+
+def library_summary(scan_id: int, db_path: str = DB_PATH) -> dict:
+    """Aggregate counts for the dashboard: totals, by-year, by-category."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        totals = conn.execute(
+            """
+            SELECT COUNT(*) AS files, COALESCE(SUM(size),0) AS bytes,
+                   COALESCE(SUM(materialized),0) AS local_files,
+                   COUNT(DISTINCT event_key) AS events,
+                   COUNT(DISTINCT category) AS categories
+            FROM library_files WHERE scan_id = ?
+            """,
+            (scan_id,),
+        ).fetchone()
+
+        by_year = conn.execute(
+            """
+            SELECT year, COUNT(*) AS files, COALESCE(SUM(size),0) AS bytes
+            FROM library_files WHERE scan_id = ? GROUP BY year ORDER BY year
+            """,
+            (scan_id,),
+        ).fetchall()
+
+        by_category = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(category,''),'Unsorted') AS category,
+                   COUNT(*) AS files, COALESCE(SUM(size),0) AS bytes,
+                   AVG(confidence) AS avg_confidence
+            FROM library_files WHERE scan_id = ?
+            GROUP BY 1 ORDER BY files DESC
+            """,
+            (scan_id,),
+        ).fetchall()
+
+        by_kind = conn.execute(
+            "SELECT kind, COUNT(*) AS files FROM library_files WHERE scan_id = ? GROUP BY kind",
+            (scan_id,),
+        ).fetchall()
+
+        dupes = conn.execute(
+            """
+            SELECT COUNT(*) AS files, COALESCE(SUM(size),0) AS bytes
+            FROM library_files WHERE scan_id = ? AND dup_group > 1
+            """,
+            (scan_id,),
+        ).fetchone()
+
+        return {
+            "totals": dict(totals) if totals else {},
+            "by_year": [dict(r) for r in by_year],
+            "by_category": [dict(r) for r in by_category],
+            "by_kind": {r["kind"]: r["files"] for r in by_kind},
+            "duplicates": dict(dupes) if dupes else {},
+        }
+
+
+def query_library_files(
+    scan_id: int,
+    year: Optional[int] = None,
+    category: Optional[str] = None,
+    kind: Optional[str] = None,
+    search: Optional[str] = None,
+    unsorted_only: bool = False,
+    duplicates_only: bool = False,
+    limit: int = 200,
+    offset: int = 0,
+    db_path: str = DB_PATH,
+) -> tuple[List[sqlite3.Row], int]:
+    """Filtered page of catalogued files, plus the total matching count."""
+    conditions = ["scan_id = ?"]
+    params: list = [scan_id]
+
+    if year:
+        conditions.append("year = ?")
+        params.append(int(year))
+    if category:
+        conditions.append("COALESCE(NULLIF(category,''),'Unsorted') = ?")
+        params.append(category)
+    if kind:
+        conditions.append("kind = ?")
+        params.append(kind)
+    if unsorted_only:
+        conditions.append("COALESCE(NULLIF(category,''),'Unsorted') = 'Unsorted'")
+    if duplicates_only:
+        conditions.append("dup_group > 1")
+    if search:
+        conditions.append("(rel_path LIKE ? OR caption LIKE ?)")
+        like = f"%{search}%"
+        params.extend([like, like])
+
+    where = " WHERE " + " AND ".join(conditions)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        total = conn.execute(
+            f"SELECT COUNT(*) FROM library_files{where}", params
+        ).fetchone()[0]
+        rows = conn.execute(
+            f"""SELECT * FROM library_files{where}
+                ORDER BY year DESC, rel_path LIMIT ? OFFSET ?""",
+            params + [int(limit), int(offset)],
+        ).fetchall()
+        return rows, int(total)
+
+
+def list_library_events(scan_id: int, category: Optional[str] = None,
+                        limit: int = 200, offset: int = 0,
+                        db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    conditions = ["scan_id = ?"]
+    params: list = [scan_id]
+    if category:
+        conditions.append("COALESCE(NULLIF(category,''),'Unsorted') = ?")
+        params.append(category)
+    where = " WHERE " + " AND ".join(conditions)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            f"""SELECT * FROM library_events{where}
+                ORDER BY date_start DESC, event_key LIMIT ? OFFSET ?""",
+            params + [int(limit), int(offset)],
+        )
+        return cur.fetchall()
+
+
+def save_library_categories(categories: Iterable[dict], source: str = "learned",
+                            db_path: str = DB_PATH) -> int:
+    """Persist the taxonomy, refreshing counts for categories already present."""
+    now = datetime.now().isoformat(timespec="seconds")
+    count = 0
+    with sqlite3.connect(db_path) as conn:
+        for cat in categories:
+            conn.execute(
+                """
+                INSERT INTO library_categories
+                  (name, subcategories, keywords, example_count, source, active, created_at)
+                VALUES (?,?,?,?,?,1,?)
+                ON CONFLICT(name) DO UPDATE SET
+                  subcategories = excluded.subcategories,
+                  keywords = excluded.keywords,
+                  example_count = excluded.example_count
+                """,
+                (cat.get("name"), json.dumps(cat.get("subcategories") or []),
+                 json.dumps(cat.get("keywords") or []), cat.get("example_count", 0),
+                 source, now),
+            )
+            count += 1
+    return count
+
+
+def list_library_categories(active_only: bool = True, db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        sql = "SELECT * FROM library_categories"
+        if active_only:
+            sql += " WHERE active = 1"
+        sql += " ORDER BY example_count DESC, name"
+        return conn.execute(sql).fetchall()
+
+
+def set_library_category_active(name: str, active: bool, db_path: str = DB_PATH) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("UPDATE library_categories SET active = ? WHERE name = ?",
+                     (1 if active else 0, name))
+
+
+def replace_library_plan(scan_id: int, items: Iterable[dict], db_path: str = DB_PATH) -> int:
+    """Discard any existing plan for a scan and store a freshly built one."""
+    payload = [
+        (scan_id, it.get("file_id"), it.get("dest_rel"), it.get("size", 0),
+         it.get("category"), it.get("year"), it.get("confidence", 0),
+         1 if it.get("collision") else 0)
+        for it in items
+    ]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute("DELETE FROM library_plan_items WHERE scan_id = ?", (scan_id,))
+        if payload:
+            conn.executemany(
+                """
+                INSERT INTO library_plan_items
+                  (scan_id, file_id, dest_rel, size, category, year, confidence, collision)
+                VALUES (?,?,?,?,?,?,?,?)
+                """,
+                payload,
+            )
+    return len(payload)
+
+
+def library_plan_summary(scan_id: int, db_path: str = DB_PATH) -> dict:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT state, COUNT(*) AS items, COALESCE(SUM(size),0) AS bytes
+            FROM library_plan_items WHERE scan_id = ? GROUP BY state
+            """,
+            (scan_id,),
+        ).fetchall()
+        by_cat = conn.execute(
+            """
+            SELECT category, COUNT(*) AS items, COALESCE(SUM(size),0) AS bytes,
+                   SUM(CASE WHEN state='approved' THEN 1 ELSE 0 END) AS approved,
+                   SUM(collision) AS collisions
+            FROM library_plan_items WHERE scan_id = ?
+            GROUP BY category ORDER BY items DESC
+            """,
+            (scan_id,),
+        ).fetchall()
+        return {
+            "by_state": {r["state"]: {"items": r["items"], "bytes": r["bytes"]} for r in rows},
+            "by_category": [dict(r) for r in by_cat],
+        }
+
+
+def set_plan_state(scan_id: int, state: str, categories: Optional[List[str]] = None,
+                   item_ids: Optional[List[int]] = None, db_path: str = DB_PATH) -> int:
+    """Approve or reject plan items, by category or by explicit id list."""
+    conditions = ["scan_id = ?"]
+    params: list = [state, scan_id]
+    if categories:
+        conditions.append(f"category IN ({','.join('?' * len(categories))})")
+        params.extend(categories)
+    if item_ids:
+        conditions.append(f"id IN ({','.join('?' * len(item_ids))})")
+        params.extend(int(i) for i in item_ids)
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            f"UPDATE library_plan_items SET state = ? WHERE {' AND '.join(conditions)}",
+            params,
+        )
+        return cur.rowcount
+
+
+def list_plan_items(scan_id: int, state: Optional[str] = None, limit: int = 500,
+                    offset: int = 0, db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    conditions = ["p.scan_id = ?"]
+    params: list = [scan_id]
+    if state:
+        conditions.append("p.state = ?")
+        params.append(state)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute(
+            f"""
+            SELECT p.*, f.path AS src_path, f.rel_path AS src_rel, f.kind
+            FROM library_plan_items p JOIN library_files f ON f.id = p.file_id
+            WHERE {' AND '.join(conditions)}
+            ORDER BY p.category, p.year, p.dest_rel
+            LIMIT ? OFFSET ?
+            """,
+            params + [int(limit), int(offset)],
+        )
+        return cur.fetchall()
+
+
+def mark_plan_item_applied(item_id: int, error: str = "", db_path: str = DB_PATH) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """UPDATE library_plan_items
+               SET state = ?, applied_at = ?, error_message = ? WHERE id = ?""",
+            ("failed" if error else "applied",
+             datetime.now().isoformat(timespec="seconds"), error or None, item_id),
+        )
