@@ -5734,30 +5734,117 @@ def schedule_debug():
 POSTS_PAGE_SIZE = 20
 
 
-def _enrich_standalone_posts(rows, scheduled_info, posted_info, brief_names):
-    """Turn standalone_posts rows into template dicts (scheduled/posted/media/brief)."""
-    enriched = []
-    for post in rows:
-        post_dict = dict(post)
-        post_dict['scheduled'] = scheduled_info.get(post['id'], {})
-        post_dict['posted'] = posted_info.get(post['id'], {})
-        # Instagram media format + parsed media list (feed by default)
-        post_dict['ig_post_type'] = post_dict.get('ig_post_type') or 'feed'
-        _raw_media = post_dict.get('media_items')
-        try:
-            post_dict['media_items'] = json.loads(_raw_media) if _raw_media else []
-        except (ValueError, TypeError):
-            post_dict['media_items'] = []
-        _raw_tags = post_dict.get('ig_user_tags')
-        try:
-            post_dict['ig_user_tags'] = json.loads(_raw_tags) if _raw_tags else []
-        except (ValueError, TypeError):
-            post_dict['ig_user_tags'] = []
-        # Attach the originating brief's name (agent-curated posts only)
-        brief_id = post_dict.get('brief_id')
-        post_dict['brief_name'] = brief_names.get(brief_id) if brief_id else None
-        enriched.append(post_dict)
-    return enriched
+# Every platform a saved post can target, in the order a Compose card draws its
+# ticks. One list so the chips, the composer and the filter bar agree.
+COMPOSE_PLATFORMS = ('linkedin', 'threads', 'twitter', 'facebook', 'instagram')
+
+
+def _group_standalone_posts(rows):
+    """Collapse per-platform rows into one entry per distinct post.
+
+    Compose shows a single card per piece of copy, with a tick for each platform
+    it goes to. The database still stores one row per (platform, content) — that
+    row is what queueing, scheduling and publishing key on — so the card is a
+    view over a set of rows, not a new kind of record.
+
+    Rows group when they share both the content and the image, capped at one row
+    per platform: a deliberate repost (the importer's ``repost`` column writes a
+    second identical row for the same platform) opens its own card instead of
+    disappearing into the first one.
+
+    ``rows`` must already be in display order; each group takes the position of
+    its first row, kept as ``head`` so sorts have a representative row.
+    """
+    groups = []
+    by_key = {}
+    for row in rows:
+        key = (row['content'] or '', row['image_url'] or '')
+        candidates = by_key.setdefault(key, [])
+        for group in candidates:
+            if row['platform'] not in group['platforms']:
+                group['platforms'][row['platform']] = row
+                break
+        else:
+            group = {'platforms': {row['platform']: row}, 'head': row}
+            groups.append(group)
+            candidates.append(group)
+    return groups
+
+
+def _ordered_group_rows(group):
+    """A card's rows in the order its platform chips are drawn."""
+    platforms = group['platforms']
+    known = [platforms[p] for p in COMPOSE_PLATFORMS if p in platforms]
+    # Anything unrecognised (older or hand-written data) still gets shown.
+    return known + [row for p, row in platforms.items() if p not in COMPOSE_PLATFORMS]
+
+
+def _rows_for_groups(groups, platform=None):
+    """Flatten cards back to the rows the row-level endpoints act on."""
+    rows = []
+    for group in groups:
+        for row in _ordered_group_rows(group):
+            if not platform or row['platform'] == platform:
+                rows.append(row)
+    return rows
+
+
+def _json_list_column(row, column):
+    """Read a JSON-list column, tolerating NULL and older malformed values."""
+    raw = row[column] if column in row.keys() else None
+    try:
+        value = json.loads(raw) if raw else []
+    except (ValueError, TypeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _enrich_post_group(group, scheduled_info, posted_info, brief_names):
+    """Turn a group of standalone_posts rows into the template's card dict."""
+    rows = _ordered_group_rows(group)
+    # Instagram's row carries the extra media state (format, carousel items,
+    # people tags) and its own controls, so it is the card's primary row when
+    # present: every DOM id and every /compose/post/<id>/... call the card makes
+    # then points at the one row that has that state.
+    primary = group['platforms'].get('instagram') or rows[0]
+
+    platforms = [
+        {
+            'platform': row['platform'],
+            'id': row['id'],
+            'queued': scheduled_info.get(row['id'], {}).get(row['platform']),
+            'posted': posted_info.get(row['id'], {}).get(row['platform']),
+        }
+        for row in rows
+    ]
+
+    brief_id = primary['brief_id'] if 'brief_id' in primary.keys() else None
+    card = {
+        'id': primary['id'],
+        'post_ids': [row['id'] for row in rows],
+        'platform_ids': {row['platform']: row['id'] for row in rows},
+        'platforms': platforms,
+        'content': primary['content'],
+        'image_url': primary['image_url'],
+        # A card only reads as used once every platform it targets is done.
+        'used': all(row['used'] for row in rows),
+        'source_type': primary['source_type'],
+        'created_at': primary['created_at'],
+        'brief_id': brief_id,
+        'brief_name': brief_names.get(brief_id) if brief_id else None,
+        'display_index': group.get('display_index'),
+        'ig': None,
+    }
+
+    ig_row = group['platforms'].get('instagram')
+    if ig_row is not None:
+        card['ig'] = {
+            'id': ig_row['id'],
+            'ig_post_type': (ig_row['ig_post_type'] if 'ig_post_type' in ig_row.keys() else None) or 'feed',
+            'media_items': _json_list_column(ig_row, 'media_items'),
+            'ig_user_tags': _json_list_column(ig_row, 'ig_user_tags'),
+        }
+    return card
 
 
 @app.route('/compose')
@@ -5769,22 +5856,26 @@ def compose_page():
     # Map brief ids -> names so agent-curated posts can show/filter by their brief
     brief_names = {brief['id']: brief['name'] for brief in list_content_briefs()}
 
-    # Group raw rows by platform and count totals (for the "Load more" controls)
-    raw_by_platform = {}
+    # One card per distinct post; only the first page of cards is enriched and
+    # rendered, so the payload stays small however many posts are saved.
+    groups = _group_standalone_posts(posts)
+    for position, group in enumerate(groups, start=1):
+        group['display_index'] = position
+    first_page = groups[:POSTS_PAGE_SIZE]
+
+    page_ids = [row['id'] for group in first_page for row in group['platforms'].values()]
+    scheduled_info = get_pending_schedules_for_standalone_posts(page_ids) if page_ids else {}
+    posted_info = get_posted_info_for_standalone_posts(page_ids) if page_ids else {}
+    post_groups = [
+        _enrich_post_group(group, scheduled_info, posted_info, brief_names)
+        for group in first_page
+    ]
+
+    # Row counts per platform still drive the "Queue All" modal and the sizing of
+    # an across-pages selection, both of which act one platform-row at a time.
+    platform_totals = {}
     for post in posts:
-        raw_by_platform.setdefault(post['platform'], []).append(post)
-    platform_totals = {p: len(rows) for p, rows in raw_by_platform.items()}
-
-    # Only enrich + render the first page per platform (keeps the payload small).
-    capped_by_platform = {p: rows[:POSTS_PAGE_SIZE] for p, rows in raw_by_platform.items()}
-    capped_ids = [r['id'] for rows in capped_by_platform.values() for r in rows]
-    scheduled_info = get_pending_schedules_for_standalone_posts(capped_ids) if capped_ids else {}
-    posted_info = get_posted_info_for_standalone_posts(capped_ids) if capped_ids else {}
-
-    posts_by_platform = {
-        platform: _enrich_standalone_posts(rows, scheduled_info, posted_info, brief_names)
-        for platform, rows in capped_by_platform.items()
-    }
+        platform_totals[post['platform']] = platform_totals.get(post['platform'], 0) + 1
 
     # Distinct briefs across ALL saved posts (not just the first page), for the filter
     briefs_in_posts = {}
@@ -5845,8 +5936,10 @@ def compose_page():
 
     return render_template(
         'compose.html',
-        posts_by_platform=posts_by_platform,
+        post_groups=post_groups,
+        group_total=len(groups),
         platform_totals=platform_totals,
+        compose_platforms=list(COMPOSE_PLATFORMS),
         page_size=POSTS_PAGE_SIZE,
         brief_filter_options=brief_filter_options,
         next_slots=next_slots,
@@ -5866,51 +5959,39 @@ def compose_page():
 
 @app.route('/compose/posts/more')
 def compose_posts_more():
-    """Return a page of a platform's saved posts as an HTML fragment.
+    """Return a page of saved post cards as an HTML fragment.
 
     Honours the Compose filter bar. The page renders only the first
-    POSTS_PAGE_SIZE posts per platform, so filtering in the browser could only
-    ever reveal matches that happened to be loaded already — a post further down
-    the list stayed invisible no matter what the filter said. Paging through the
-    *filtered* set here is what lets a filter reach the whole platform.
+    POSTS_PAGE_SIZE cards, so filtering in the browser could only ever reveal
+    matches that happened to be loaded already — a post further down the list
+    stayed invisible no matter what the filter said. Paging through the
+    *filtered* set here is what lets a filter reach every saved post.
 
-    ``total`` is how many posts match, which the caller needs for the count
+    ``total`` is how many cards match, which the caller needs for the count
     badge and the "Load more (N of total)" label.
     """
-    platform = (request.args.get('platform') or '').strip()
-    if not platform:
-        return jsonify({"error": "platform is required"}), 400
     offset = request.args.get('offset', 0, type=int) or 0
     if offset < 0:
         offset = 0
 
-    # The card being paged decides the platform; the filter bar supplies the rest.
-    filters = {key: request.args.get(key) for key in _POST_FILTER_KEYS}
-    filters['platform'] = platform
-    filters['sort'] = request.args.get('sort')
-    rows, index_by_id = _filtered_standalone_posts(filters)
+    groups, _ = _filtered_post_groups(request.args)
 
-    total = len(rows)
-    page = rows[offset:offset + POSTS_PAGE_SIZE]
+    total = len(groups)
+    page = groups[offset:offset + POSTS_PAGE_SIZE]
     has_more = total > offset + len(page)
 
-    ids = [r['id'] for r in page]
+    ids = [row['id'] for group in page for row in group['platforms'].values()]
     scheduled_info = get_pending_schedules_for_standalone_posts(ids) if ids else {}
     posted_info = get_posted_info_for_standalone_posts(ids) if ids else {}
     brief_names = {brief['id']: brief['name'] for brief in list_content_briefs()}
-    enriched = _enrich_standalone_posts(page, scheduled_info, posted_info, brief_names)
-
-    # Label posts by their position in the *unfiltered* platform list, so "Post 7"
-    # means the same thing however the list is filtered — and matches what Find &
-    # Replace shows for the same post.
-    for post in enriched:
-        post['display_index'] = index_by_id.get(post['id'])
+    enriched = [
+        _enrich_post_group(group, scheduled_info, posted_info, brief_names)
+        for group in page
+    ]
 
     html = render_template(
         'partials/post_items.html',
-        posts=enriched,
-        platform=platform,
-        start_index=offset,
+        groups=enriched,
     )
     return jsonify({
         "html": html,
@@ -5942,87 +6023,127 @@ _POST_SORT_KEYS = {
 }
 
 
-def _sort_standalone_posts(rows, sort):
-    """Order matched posts for the Compose sort control.
+def _sort_post_groups(groups, sort):
+    """Order matched cards for the Compose sort control.
 
     Applied after filtering, and after the display indexes are taken, so a post
-    keeps the same "Post N" label whichever order it is shown in.
+    keeps the same "Post N" label whichever order it is shown in. Each card
+    sorts by its ``head`` row — the one whose position put the card where the
+    unsorted list had it — so a card can't change places just because one of its
+    platforms was added later.
     """
     key = _POST_SORT_KEYS.get((sort or '').strip())
     if key is None:
-        return rows
-    return sorted(rows, key=key)
+        return groups
+    return sorted(groups, key=lambda group: key(group['head']))
 
 
-def _post_matches_filters(post, filters, scheduled_info):
-    """Mirror the client-side applyPostFilters() predicate for one saved post."""
-    used = filters.get('used')
-    if used == 'used' and not post['used']:
+def _group_matches_filters(rows, filters, scheduled_info):
+    """Mirror the client-side filter bar's predicate for one card.
+
+    A card is the same copy on one or more platforms, so the filters that read
+    per-platform state match on *any* of them: a post already queued on Threads
+    but not on X still belongs in the "Not Queued" list, or its X tick could
+    never be queued from there. A platform filter narrows that to the platform
+    being asked about.
+    """
+    platform = filters.get('platform')
+    if platform and platform not in {row['platform'] for row in rows}:
         return False
-    if used == 'unused' and post['used']:
+
+    used = filters.get('used')
+    all_used = all(row['used'] for row in rows)
+    if used == 'used' and not all_used:
+        return False
+    if used == 'unused' and all_used:
         return False
 
     queued = filters.get('queued')
     if queued:
-        # The page only renders a queue button for the post's own platform, so
-        # "queued" means a pending schedule on that platform.
-        is_queued = bool(scheduled_info.get(post['id'], {}).get(post['platform']))
-        if queued == 'queued' and not is_queued:
+        asked = [row for row in rows if not platform or row['platform'] == platform]
+        states = [bool(scheduled_info.get(row['id'], {}).get(row['platform'])) for row in asked]
+        if queued == 'queued' and not any(states):
             return False
-        if queued == 'not-queued' and is_queued:
+        if queued == 'not-queued' and states and all(states):
             return False
 
     image = filters.get('image')
-    if image == 'has-image' and not post['image_url']:
+    has_image = any(row['image_url'] for row in rows)
+    if image == 'has-image' and not has_image:
         return False
-    if image == 'no-image' and post['image_url']:
+    if image == 'no-image' and has_image:
         return False
 
     source = filters.get('source')
     if source:
-        if ('agent' if post['source_type'] == 'agent' else 'manual') != source:
+        kinds = {'agent' if row['source_type'] == 'agent' else 'manual' for row in rows}
+        if source not in kinds:
             return False
 
     brief = filters.get('brief')
     if brief:
-        brief_id = post['brief_id'] if 'brief_id' in post.keys() else None
-        if str(brief_id or '') != brief:
+        brief_ids = {
+            str((row['brief_id'] if 'brief_id' in row.keys() else None) or '')
+            for row in rows
+        }
+        if brief not in brief_ids:
             return False
 
     return True
 
 
-def _filtered_standalone_posts(args):
-    """Return (matching rows, index_by_id) for the Compose filters in ``args``.
+def _filtered_post_groups(args):
+    """Return (matching cards, index_by_id) for the Compose filters in ``args``.
 
-    Reproduces the client-side filter bar server-side so "select all across
-    every page" and Find & Replace act on exactly the filtered set rather than
-    only the posts currently rendered. ``index_by_id`` is the 1-based
-    per-platform position in the *unfiltered* list, matching the page's
-    "Post N" label.
+    Reproduces the filter bar server-side so "select all across every page",
+    "Load more" and Find & Replace all act on exactly the filtered set rather
+    than only the posts currently rendered.
+
+    Cards are grouped over *every* saved post before filtering, so a card always
+    shows every platform its copy goes to — including platforms the current
+    filter excludes, which is what the ticks have to reflect to be honest.
+    ``index_by_id`` maps each row to its card's 1-based position in the
+    unfiltered list: the "Post N" label the page and Find & Replace both show.
 
     ``args`` is a request.args multidict or a plain dict of the same keys.
     """
-    platform = _valid_post_platform(args.get('platform'))
     filters = {key: (args.get(key) or '').strip() for key in _POST_FILTER_KEYS}
+    filters['platform'] = _valid_post_platform(args.get('platform'))
 
-    rows = list_standalone_posts(platform=platform)
+    groups = _group_standalone_posts(list_standalone_posts())
 
     index_by_id = {}
-    per_platform = {}
-    for row in rows:
-        p = row['platform']
-        per_platform[p] = per_platform.get(p, 0) + 1
-        index_by_id[row['id']] = per_platform[p]
+    for position, group in enumerate(groups, start=1):
+        group['display_index'] = position
+        for row in group['platforms'].values():
+            index_by_id[row['id']] = position
 
     # Pending schedules are only needed (and only paid for) by the queued filter.
     scheduled_info = {}
     if filters['queued']:
-        ids = [r['id'] for r in rows]
+        ids = list(index_by_id)
         scheduled_info = get_pending_schedules_for_standalone_posts(ids) if ids else {}
 
-    matched = [r for r in rows if _post_matches_filters(r, filters, scheduled_info)]
-    return _sort_standalone_posts(matched, args.get('sort')), index_by_id
+    matched = [
+        group for group in groups
+        if _group_matches_filters(_ordered_group_rows(group), filters, scheduled_info)
+    ]
+    return _sort_post_groups(matched, args.get('sort')), index_by_id
+
+
+def _filtered_standalone_posts(args):
+    """Return (rows behind the matching cards, index_by_id) for ``args``.
+
+    Find & Replace and the bulk actions still work one post row at a time, so
+    they take the rows of every matching card. Deriving both from
+    _filtered_post_groups is what keeps them acting on exactly the cards the
+    page is showing — there is no second copy of the predicate to drift.
+
+    A platform filter narrows to that platform's rows: with the list showing
+    only X, a bulk delete must not take the Threads twin with it.
+    """
+    groups, index_by_id = _filtered_post_groups(args)
+    return _rows_for_groups(groups, _valid_post_platform(args.get('platform'))), index_by_id
 
 
 def _selected_standalone_posts(payload):
@@ -6063,7 +6184,8 @@ def compose_posts_ids():
     (Post Now, which publishes one post per request). Pass ``count_only=1`` to
     get just the totals (used to size the "select all" offer banner).
     """
-    rows, _ = _filtered_standalone_posts(request.args)
+    groups, _ = _filtered_post_groups(request.args)
+    rows = _rows_for_groups(groups, _valid_post_platform(request.args.get('platform')))
 
     by_platform = {}
     for row in rows:
@@ -6071,7 +6193,9 @@ def compose_posts_ids():
 
     payload = {
         "success": True,
+        # Rows are what the actions touch; cards are what the page counts.
         "count": len(rows),
+        "group_count": len(groups),
         "by_platform": by_platform,
     }
     if not request.args.get('count_only'):
@@ -6128,15 +6252,23 @@ def compose_posts_search():
     if limit is None or limit < 0:
         limit = POST_SEARCH_RESULT_LIMIT
 
-    rows, index_by_id = _filtered_standalone_posts(request.args)
+    # One result per card, not per platform row. The rows behind a card all hold
+    # the same copy, so listing them separately would show the same hit two or
+    # three times over — and replacing in only some of them would split the card.
+    groups, _ = _filtered_post_groups(request.args)
+    platform = _valid_post_platform(request.args.get('platform'))
     pattern = _post_search_pattern(find_text, case_sensitive, whole_word)
 
     posts = []
     matched_posts = 0
     total_matches = 0
     excluded_posts = 0
-    for row in rows:
-        content = row['content'] or ''
+    for group in groups:
+        rows = _rows_for_groups([group], platform)
+        if not rows:
+            continue
+        primary = rows[0]
+        content = primary['content'] or ''
         if not content.strip():
             continue
         if exclude_words:
@@ -6153,10 +6285,12 @@ def compose_posts_search():
         total_matches += count
         if len(posts) < limit:
             posts.append({
-                'id': row['id'],
-                'platform': row['platform'],
+                'id': primary['id'],
+                'post_ids': [row['id'] for row in rows],
+                'platform': primary['platform'],
+                'platforms': [row['platform'] for row in rows],
                 'content': content,
-                'index': index_by_id.get(row['id']),
+                'index': group.get('display_index'),
                 'match_count': count,
             })
 
@@ -6166,7 +6300,7 @@ def compose_posts_search():
         "matched_posts": matched_posts,
         "total_matches": total_matches,
         "excluded_posts": excluded_posts,
-        "searched": len(rows),
+        "searched": len(groups),
         "truncated": matched_posts > len(posts),
     })
 
@@ -6203,7 +6337,33 @@ def compose_posts_replace():
     except (TypeError, ValueError):
         return jsonify({"error": "Invalid post IDs"}), 400
 
-    rows, _ = _filtered_standalone_posts(filters)
+    groups, _ = _filtered_post_groups(filters)
+    platform = _valid_post_platform(filters.get('platform'))
+    rows = _rows_for_groups(groups, platform)
+
+    # The results list shows one entry per card, so a post the user unticked —
+    # or an individual match they clicked to skip — has to carry to every row
+    # behind that card. Applying it to the listed row alone would leave the other
+    # platforms with the old text, splitting the card in two.
+    siblings = {}
+    for group in groups:
+        ids = [row['id'] for row in _rows_for_groups([group], platform)]
+        for pid in ids:
+            siblings[pid] = ids
+
+    deselected = {sid for pid in deselected for sid in siblings.get(pid, [pid])}
+
+    # excluded_matches is keyed "<post id>-<match index>"; re-key each entry onto
+    # every row of its card.
+    expanded_matches = {}
+    for key, value in excluded_matches.items():
+        listed_id, _, match_index = str(key).partition('-')
+        if not listed_id.isdigit():
+            continue
+        for sid in siblings.get(int(listed_id), [int(listed_id)]):
+            expanded_matches[f"{sid}-{match_index}"] = value
+    excluded_matches = expanded_matches
+
     pattern = _post_search_pattern(find_text, case_sensitive, whole_word)
 
     target_ids = []
@@ -6900,39 +7060,270 @@ def compose_get_post(post_id: int):
 
 @app.route('/compose/post/create', methods=['POST'])
 def compose_create_post():
-    """Create a standalone post manually (no AI generation)."""
-    platform = request.form.get('platform', '').strip().lower()
+    """Create a standalone post manually (no AI generation).
+
+    Takes one ``platform`` or several (repeated or comma-joined ``platforms``):
+    the composer writes one row per ticked platform, which is exactly the set of
+    rows the resulting card is a view over.
+    """
+    platforms = _requested_platforms('platforms') or _requested_platforms('platform')
     content = request.form.get('content', '').strip()
     image_url = request.form.get('image_url', '').strip() or None
 
-    if not platform:
+    if not platforms:
         return jsonify({"error": "Platform is required"}), 400
     if not content:
         return jsonify({"error": "Content is required"}), 400
 
-    valid_platforms = ['linkedin', 'threads', 'twitter', 'facebook', 'instagram']
-    if platform not in valid_platforms:
-        return jsonify({"error": f"Invalid platform. Must be one of: {', '.join(valid_platforms)}"}), 400
+    invalid = [p for p in platforms if p not in COMPOSE_PLATFORMS]
+    if invalid:
+        return jsonify({
+            "error": f"Invalid platform. Must be one of: {', '.join(COMPOSE_PLATFORMS)}"
+        }), 400
 
-    post_id = add_standalone_post(
-        source_type='manual',
-        source_content='Manual post',
-        platform=platform,
-        content=content,
-        image_url=image_url,
-    )
+    post_ids = [
+        add_standalone_post(
+            source_type='manual',
+            source_content='Manual post',
+            platform=platform,
+            content=content,
+            image_url=image_url,
+        )
+        for platform in platforms
+    ]
 
     if not image_url:
-        _maybe_attach_link_image(post_id, content)
+        # One fetch for the card, applied to every platform's row — otherwise the
+        # rows would end up with different images and stop being one card.
+        _maybe_attach_link_image(post_ids[0], content, sibling_ids=post_ids[1:])
 
     return jsonify({
         "success": True,
         "post": {
-            "id": post_id,
-            "platform": platform,
+            "id": post_ids[0],
+            "platform": platforms[0],
             "content": content,
             "image_url": image_url,
-        }
+        },
+        "post_ids": post_ids,
+        "platforms": platforms,
+    })
+
+
+# ---------------------------------------------------------------------------
+# Compose card helpers
+#
+# A card is one piece of copy plus the platforms it goes to. The database still
+# stores a row per (platform, content), so most per-card actions have to touch
+# every row behind the card: editing the text or the image of one platform's row
+# alone would split the card in two, since (content, image) is what groups the
+# rows in the first place.
+# ---------------------------------------------------------------------------
+
+
+def _requested_platforms(field):
+    """Read a repeated or comma-joined platform field, lowercased and deduped."""
+    values = request.form.getlist(field)
+    if not values:
+        payload = request.get_json(silent=True) or {}
+        raw = payload.get(field)
+        values = raw if isinstance(raw, list) else ([raw] if raw else [])
+
+    platforms = []
+    for value in values:
+        for part in str(value).split(','):
+            part = part.strip().lower()
+            if part and part not in platforms:
+                platforms.append(part)
+    return platforms
+
+
+def _requested_post_ids(default_id):
+    """The card's rows as sent by the page, always including ``default_id``.
+
+    Accepts repeated or comma-joined ``post_ids`` in a form body or JSON. When
+    it is absent (older callers, direct API use) the action stays a single-post
+    action, exactly as it behaved before cards existed.
+    """
+    values = request.form.getlist('post_ids')
+    if not values:
+        payload = request.get_json(silent=True) or {}
+        raw = payload.get('post_ids')
+        values = raw if isinstance(raw, list) else ([raw] if raw else [])
+
+    ids = []
+    for value in values:
+        for part in str(value).split(','):
+            part = part.strip()
+            if part.isdigit() and int(part) not in ids:
+                ids.append(int(part))
+    if default_id not in ids:
+        ids.append(default_id)
+    return ids
+
+
+def _card_rows(post, post_ids):
+    """The rows of ``post_ids`` that really are ``post``'s card, ``post`` first.
+
+    Ids from the browser can be stale — a twin may have been edited, deleted or
+    regrouped in another tab — so a row only counts while it still holds the
+    same copy. That keeps a card-wide edit from rewriting an unrelated post.
+    """
+    rows = [post]
+    for pid in post_ids:
+        if pid == post['id']:
+            continue
+        row = get_standalone_post(pid)
+        if row and (row['content'] or '') == (post['content'] or ''):
+            rows.append(row)
+    return rows
+
+
+def _apply_card_image(post, image_url):
+    """Set an image on every row of ``post``'s card; returns the ids written.
+
+    Every path that attaches an image (upload, URL, library, stock, og:image,
+    source refresh) goes through here so the card's rows keep matching images —
+    they would otherwise drift apart into separate cards.
+    """
+    rows = _card_rows(post, _requested_post_ids(post['id']))
+    for row in rows:
+        update_standalone_post_image(row['id'], image_url)
+    return [row['id'] for row in rows]
+
+
+def _post_card_html(post_ids, display_index=None):
+    """Render one Compose card for ``post_ids``, or '' if none of them survive.
+
+    Handing the freshly rendered card back to the page is what keeps a platform
+    toggle simple: ticking Instagram brings a whole set of Instagram-only
+    controls with it, and re-rendering beats patching them in by hand.
+    """
+    rows = [row for row in (get_standalone_post(pid) for pid in post_ids) if row]
+    if not rows:
+        return ''
+
+    group = {
+        'platforms': {row['platform']: row for row in rows},
+        'head': rows[0],
+        'display_index': display_index,
+    }
+    ids = [row['id'] for row in rows]
+    card = _enrich_post_group(
+        group,
+        get_pending_schedules_for_standalone_posts(ids),
+        get_posted_info_for_standalone_posts(ids),
+        {brief['id']: brief['name'] for brief in list_content_briefs()},
+    )
+    return render_template('partials/post_items.html', groups=[card])
+
+
+@app.route('/compose/post/<int:post_id>/card', methods=['POST'])
+def compose_render_post_card(post_id: int):
+    """Re-render one Compose card.
+
+    Used when a card loses some of its platforms but not all of them — a bulk
+    delete run under a platform filter, say — where patching the leftover DOM
+    is more error-prone than asking for the card again.
+    """
+    if not get_standalone_post(post_id):
+        return jsonify({"error": "Post not found"}), 404
+
+    return jsonify({
+        "success": True,
+        "html": _post_card_html(
+            _requested_post_ids(post_id), request.form.get('display_index', type=int)
+        ),
+    })
+
+
+@app.route('/compose/post/<int:post_id>/platform', methods=['POST'])
+def compose_toggle_post_platform(post_id: int):
+    """Tick or untick one of a card's platforms.
+
+    ``action=add`` copies the card's copy and image into a new saved post for
+    ``platform`` — ticking Instagram is what creates the Instagram post.
+    ``action=remove`` deletes that platform's row, which is the only thing that
+    ever recorded "this post also goes to Instagram".
+
+    Removing is guarded: a row that is queued or already published should not go
+    on a stray click, so those answer 409 until the caller repeats the request
+    with ``force=1``. Forcing a queued row also takes it out of the queue, since
+    leaving a schedule pointing at a deleted post would publish nothing.
+    """
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    platform = (request.form.get('platform') or '').strip().lower()
+    if platform not in COMPOSE_PLATFORMS:
+        return jsonify({
+            "error": f"Invalid platform. Must be one of: {', '.join(COMPOSE_PLATFORMS)}"
+        }), 400
+
+    action = (request.form.get('action') or 'add').strip().lower()
+    if action not in ('add', 'remove'):
+        return jsonify({"error": "action must be 'add' or 'remove'"}), 400
+
+    rows = _card_rows(post, _requested_post_ids(post_id))
+    display_index = request.form.get('display_index', type=int)
+    existing = next((row for row in rows if row['platform'] == platform), None)
+
+    if action == 'add':
+        if existing:
+            return jsonify({"error": f"This post already goes to {platform.capitalize()}"}), 400
+
+        new_id = add_standalone_post(
+            source_type=post['source_type'],
+            source_content=post['source_content'],
+            platform=platform,
+            content=post['content'],
+            image_url=post['image_url'],
+            brief_id=post['brief_id'] if 'brief_id' in post.keys() else None,
+            brief_run_id=post['brief_run_id'] if 'brief_run_id' in post.keys() else None,
+        )
+        ids = [row['id'] for row in rows] + [new_id]
+        return jsonify({
+            "success": True,
+            "action": "add",
+            "platform": platform,
+            "post_id": new_id,
+            "post_ids": ids,
+            "html": _post_card_html(ids, display_index),
+        })
+
+    if existing is None:
+        return jsonify({"error": f"This post does not go to {platform.capitalize()}"}), 400
+
+    target_id = existing['id']
+    scheduled = get_pending_schedules_for_standalone_posts([target_id]).get(target_id, {})
+    posted = get_posted_info_for_standalone_posts([target_id]).get(target_id, {})
+    force = str(request.form.get('force') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+    if (scheduled or posted) and not force:
+        return jsonify({
+            "success": False,
+            "needs_confirm": True,
+            "platform": platform,
+            "queued": bool(scheduled),
+            "posted": bool(posted),
+            "scheduled_for": scheduled.get(platform),
+        }), 409
+
+    if scheduled:
+        for entry in list_scheduled_posts(status='pending'):
+            if entry['standalone_post_id'] == target_id:
+                delete_scheduled_post(entry['id'])
+
+    delete_standalone_post(target_id)
+    ids = [row['id'] for row in rows if row['id'] != target_id]
+    return jsonify({
+        "success": True,
+        "action": "remove",
+        "platform": platform,
+        "post_id": target_id,
+        "post_ids": ids,
+        "html": _post_card_html(ids, display_index) if ids else '',
     })
 
 
@@ -7113,16 +7504,22 @@ def compose_import_file():
 
 @app.route('/compose/post/<int:post_id>/edit', methods=['POST'])
 def compose_edit_post(post_id: int):
-    """Edit a standalone post's content."""
+    """Edit a standalone post's content.
+
+    Applies to every row of the card (see _requested_post_ids): the copy is the
+    card, so editing it on one platform only would silently split the card.
+    """
     post = get_standalone_post(post_id)
     if not post:
         return jsonify({"error": "Post not found"}), 404
-    
+
     new_content = request.form.get('content', '').strip()
     if not new_content:
         return jsonify({"error": "Content is required"}), 400
-    
-    update_standalone_post(post_id, new_content)
+
+    rows = _card_rows(post, _requested_post_ids(post_id))
+    for row in rows:
+        update_standalone_post(row['id'], new_content)
 
     # If the edit introduced a URL and the post still has no image, kick off a
     # background fetch of the og:image. Skip when the body did not change or
@@ -7134,22 +7531,34 @@ def compose_edit_post(post_id: int):
         old_urls = set(extract_urls_from_text(existing_content or ''))
         new_urls = extract_urls_from_text(new_content)
         if any(u not in old_urls for u in new_urls):
-            _maybe_attach_link_image(post_id, new_content)
+            _maybe_attach_link_image(
+                post_id, new_content, sibling_ids=[r['id'] for r in rows if r['id'] != post_id]
+            )
 
-    return jsonify({"success": True, "content": new_content})
+    return jsonify({
+        "success": True,
+        "content": new_content,
+        "updated_ids": [row['id'] for row in rows],
+    })
 
 
 @app.route('/compose/post/<int:post_id>/image', methods=['POST'])
 def compose_update_post_image(post_id: int):
-    """Update a standalone post's image URL."""
+    """Update a standalone post's image URL.
+
+    Applies to every row of the card: the image is part of what groups them.
+    """
     post = get_standalone_post(post_id)
     if not post:
         return jsonify({"error": "Post not found"}), 404
-    
+
     image_url = request.form.get('image_url', '').strip() or None
 
-    update_standalone_post_image(post_id, image_url)
-    return jsonify({"success": True, "image_url": image_url})
+    return jsonify({
+        "success": True,
+        "image_url": image_url,
+        "updated_ids": _apply_card_image(post, image_url),
+    })
 
 
 @app.route('/compose/post/<int:post_id>/media', methods=['POST'])
@@ -7341,8 +7750,12 @@ def compose_apply_stock_image(post_id: int):
             app.logger.warning(f"Failed to save stock image to library: {e}, using original URL")
             saved_url = image_url
     
-    update_standalone_post_image(post_id, saved_url)
-    return jsonify({"success": True, "image_url": saved_url, "saved_to_library": saved_url != image_url})
+    return jsonify({
+        "success": True,
+        "image_url": saved_url,
+        "saved_to_library": saved_url != image_url,
+        "updated_ids": _apply_card_image(post, saved_url),
+    })
 
 
 @app.route('/compose/post/<int:post_id>/link-image', methods=['GET', 'POST'])
@@ -7431,13 +7844,13 @@ def compose_apply_link_image(post_id: int):
             "og_image_url": og_image,
         }), 422
 
-    update_standalone_post_image(post_id, saved_url)
     return jsonify({
         "success": True,
         "image_url": saved_url,
         "source_url": target,
         "og_image_url": og_image,
         "detected_urls": detected,
+        "updated_ids": _apply_card_image(post, saved_url),
     })
 
 
@@ -7496,21 +7909,28 @@ def compose_refresh_source_image(post_id: int):
             "og_image_url": og_image,
         }), 422
 
-    update_standalone_post_image(post_id, saved_url)
     return jsonify({
         "success": True,
         "image_url": saved_url,
         "source_url": url,
         "og_image_url": og_image,
+        "updated_ids": _apply_card_image(post, saved_url),
     })
 
 
-def _maybe_attach_link_image(post_id: int, content: str | None, kind: str = 'standalone') -> None:
+def _maybe_attach_link_image(
+    post_id: int,
+    content: str | None,
+    kind: str = 'standalone',
+    sibling_ids: list | None = None,
+) -> None:
     """Schedule a background fetch of the first URL's og:image for the post.
 
     No-op if the post already has an image, has no URLs, or all fetches fail.
     Designed to be called from request handlers without blocking the response.
     `kind` is 'standalone' (compose) or 'social' (per-article posts).
+    `sibling_ids` are the other rows of the same Compose card: one fetch, one
+    image, applied to all of them so they stay a single card.
     """
     if not content:
         return
@@ -7546,13 +7966,14 @@ def _maybe_attach_link_image(post_id: int, content: str | None, kind: str = 'sta
                         "Could not save og:image %s for post %s: %s", og_image, pid, exc
                     )
                     continue
-                latest = loader(pid)
-                latest_image = latest['image_url'] if latest and 'image_url' in latest.keys() else None
-                if latest and not latest_image:
-                    updater(pid, saved_url)
-                    app.logger.info(
-                        "Auto-attached og:image to %s post %s from %s", kind, pid, candidate
-                    )
+                for target in [pid] + list(sibling_ids or []):
+                    latest = loader(target)
+                    latest_image = latest['image_url'] if latest and 'image_url' in latest.keys() else None
+                    if latest and not latest_image:
+                        updater(target, saved_url)
+                        app.logger.info(
+                            "Auto-attached og:image to %s post %s from %s", kind, target, candidate
+                        )
                 return
         except Exception:
             app.logger.exception("Background link-image worker failed for post %s", pid)
@@ -8461,13 +8882,15 @@ def compose_list_images():
 
 @app.route('/compose/post/<int:post_id>/delete', methods=['POST'])
 def compose_delete_post(post_id: int):
-    """Delete a standalone post."""
+    """Delete a standalone post — the whole card when the page sends its rows."""
     post = get_standalone_post(post_id)
     if not post:
         return jsonify({"error": "Post not found"}), 404
-    
-    delete_standalone_post(post_id)
-    return jsonify({"success": True})
+
+    rows = _card_rows(post, _requested_post_ids(post_id))
+    for row in rows:
+        delete_standalone_post(row['id'])
+    return jsonify({"success": True, "deleted_ids": [row['id'] for row in rows]})
 
 
 @app.route('/compose/posts/delete-bulk', methods=['POST'])
@@ -8544,14 +8967,24 @@ def compose_bulk_update_images():
 
 @app.route('/compose/post/<int:post_id>/toggle-used', methods=['POST'])
 def compose_toggle_used(post_id: int):
-    """Toggle a standalone post's used status."""
+    """Toggle a standalone post's used status, card-wide.
+
+    A card reads as used only once every platform it targets is done, so the
+    toggle flips them together rather than leaving a half-used card.
+    """
     post = get_standalone_post(post_id)
     if not post:
         return jsonify({"error": "Post not found"}), 404
-    
-    new_status = not bool(post['used'])
-    mark_standalone_post_used(post_id, new_status)
-    return jsonify({"success": True, "used": new_status})
+
+    rows = _card_rows(post, _requested_post_ids(post_id))
+    new_status = not all(bool(row['used']) for row in rows)
+    for row in rows:
+        mark_standalone_post_used(row['id'], new_status)
+    return jsonify({
+        "success": True,
+        "used": new_status,
+        "updated_ids": [row['id'] for row in rows],
+    })
 
 
 @app.route('/compose/posts/bulk-toggle-used', methods=['POST'])
@@ -8909,7 +9342,8 @@ def compose_remove_from_queue(post_id: int):
     scheduled_posts = list_scheduled_posts(status='pending')
     removed = 0
     for sp in scheduled_posts:
-        if sp.get('standalone_post_id') == post_id:
+        # list_scheduled_posts hands back sqlite3.Row, which has no .get()
+        if sp['standalone_post_id'] == post_id:
             delete_scheduled_post(sp['id'])
             removed += 1
     

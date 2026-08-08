@@ -2,6 +2,7 @@
 {% block title %}Command Center | Insights{% endblock %}
 {% block header %}Command Center{% endblock %}
 {% block content %}
+{% from 'partials/post_item.html' import render_post_item, PLATFORM_META, PLATFORM_ORDER %}
 <style>
     /* Command Center specific styles */
     .compose-header {
@@ -195,13 +196,92 @@
         background-color: rgba(0, 0, 0, 0.02);
     }
     
-    /* Platform colors */
-    :root {
-        --platform-linkedin-color: #0077B5;
-        --platform-twitter-color: #1DA1F2;
-        --platform-facebook-color: #1877F2;
-        --platform-threads-color: #000000;
-        --platform-instagram-color: #E4405F;
+    /* One list of posts, so cards need their own separator. */
+    .posts-container .post-item + .post-item {
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid #e9ecef;
+    }
+
+    /* Platform chips: the tick says where a post goes, the ➕/✅ is its queue. */
+    .platform-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.375rem;
+    }
+    .platform-chip {
+        display: inline-flex;
+        align-items: stretch;
+        border: 1px solid #dee2e6;
+        border-radius: 999px;
+        background: #fff;
+        overflow: hidden;
+        font-size: 0.8rem;
+        line-height: 1;
+        transition: border-color 0.15s, background-color 0.15s, box-shadow 0.15s;
+    }
+    .platform-chip .chip-toggle,
+    .platform-chip .chip-queue,
+    .platform-chip .chip-posted {
+        border: 0;
+        background: transparent;
+        color: #6c757d;
+        padding: 0.3rem 0.55rem;
+        display: inline-flex;
+        align-items: center;
+        gap: 0.3rem;
+        text-decoration: none;
+        cursor: pointer;
+    }
+    .platform-chip .chip-toggle:hover {
+        background: rgba(0, 0, 0, 0.04);
+    }
+    .platform-chip .chip-box {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 14px;
+        height: 14px;
+        border: 1px solid #adb5bd;
+        border-radius: 3px;
+        font-size: 0.65rem;
+        color: #fff;
+        background: #fff;
+        flex: 0 0 auto;
+    }
+    .platform-chip.is-on {
+        border-color: var(--chip-color, #6c757d);
+        background: var(--chip-tint, rgba(108, 117, 125, 0.08));
+        box-shadow: inset 0 0 0 1px var(--chip-color, #6c757d);
+    }
+    .platform-chip.is-on .chip-toggle {
+        color: var(--chip-color, #212529);
+        font-weight: 600;
+    }
+    .platform-chip.is-on .chip-box {
+        background: var(--chip-color, #6c757d);
+        border-color: var(--chip-color, #6c757d);
+    }
+    /* The queue control only makes sense once the platform is ticked. */
+    .platform-chip .chip-queue,
+    .platform-chip .chip-posted {
+        border-left: 1px solid #dee2e6;
+        padding-inline: 0.45rem;
+    }
+    .platform-chip.is-on .chip-queue,
+    .platform-chip.is-on .chip-posted {
+        border-left-color: var(--chip-color, #dee2e6);
+    }
+    .platform-chip .chip-queue:hover,
+    .platform-chip .chip-posted:hover {
+        background: rgba(0, 0, 0, 0.06);
+    }
+{% for platform, meta in PLATFORM_META.items() %}
+    .platform-chip[data-platform="{{ platform }}"] { --chip-color: {{ meta.color }}; --chip-tint: {{ meta.tint }}; }
+{%- endfor %}
+    @media (max-width: 576px) {
+        /* Icons alone still identify the platform when space is tight. */
+        .platform-chip .chip-name { display: none; }
     }
     
     /* Show more/less button styles */
@@ -941,16 +1021,52 @@
 </div>
 
 <!-- Saved Posts Section -->
-{% from 'partials/post_item.html' import render_post_item %}
-{% if posts_by_platform %}
+
+{# The composer for a brand new post: one body, ticks for where it should go.
+   Saving writes one saved post per ticked platform — the same rows a card is a
+   view over — so a new post lands as a single card. #}
+{% macro new_post_composer() %}
+<div class="mt-3 pt-3 border-top add-post-area" id="add-post-area">
+    <button class="btn btn-sm btn-outline-primary w-100 add-post-toggle-btn" id="add-post-btn" onclick="showAddPostForm()">
+        ✏️ Write a New Post
+    </button>
+    <div class="d-none" id="add-post-form">
+        <label class="form-label fw-bold small mb-1">New Post</label>
+        <div class="platform-chips mb-2" id="new-post-platforms">
+            {% for platform in PLATFORM_ORDER %}
+            {% set meta = PLATFORM_META[platform] %}
+            <span class="platform-chip {% if platform != 'instagram' %}is-on{% endif %}" data-platform="{{ platform }}">
+                <button type="button" class="chip-toggle" onclick="toggleNewPostPlatform(this)"
+                        title="{{ meta.label }}{% if platform == 'instagram' %} — needs an image before it can publish{% endif %}">
+                    <span class="chip-box">{% if platform != 'instagram' %}✓{% endif %}</span>
+                    <span class="chip-icon">{{ meta.icon }}</span>
+                    {% if platform != 'twitter' %}<span class="chip-name">{{ meta.label }}</span>{% endif %}
+                </button>
+            </span>
+            {% endfor %}
+        </div>
+        <textarea class="form-control mb-2" id="add-post-textarea" rows="4"
+                  placeholder="Write your post here..." oninput="updateManualCharCount()"></textarea>
+        <div class="d-flex justify-content-between align-items-center">
+            <small class="text-muted" id="add-post-charcount"></small>
+            <div class="d-flex gap-2">
+                <button class="btn btn-sm btn-success" onclick="createManualPost()">
+                    💾 Save Post
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" onclick="hideAddPostForm()">
+                    Cancel
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endmacro %}
+
+{% if post_groups %}
 <div class="card mb-4" id="saved-posts-section">
     <div class="card-header bg-gradient d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white;">
         <strong>📬 Generated Posts</strong>
-        {% set total_posts = namespace(count=0) %}
-        {% for platform, posts in posts_by_platform.items() %}
-            {% set total_posts.count = total_posts.count + posts|length %}
-        {% endfor %}
-        <span class="badge bg-light text-dark" id="posts-count">{{ total_posts.count }} saved post{% if total_posts.count != 1 %}s{% endif %}</span>
+        <span class="badge bg-light text-dark" id="posts-count">{{ group_total }} saved post{% if group_total != 1 %}s{% endif %}</span>
     </div>
     <div class="card-body">
         <div class="d-flex justify-content-between align-items-center mb-3 flex-wrap gap-2">
@@ -1056,144 +1172,40 @@
         </div>
 
         <div id="saved-posts-container">
-            {% for platform, posts in posts_by_platform.items() %}
-            <div class="social-copy-card mb-3" data-platform="{{ platform }}">
-                <div class="social-copy-header d-flex justify-content-between align-items-center" style="background-color: var(--platform-{{ platform }}-color, #6c757d)">
-                    <div>
-                        <span class="social-icon">
-                            {% if platform == 'twitter' %}𝕏{% elif platform == 'linkedin' %}💼{% elif platform == 'facebook' %}📘{% elif platform == 'threads' %}🧵{% elif platform == 'instagram' %}📷{% else %}📱{% endif %}
-                        </span>
-                        <span class="social-platform">{{ platform|capitalize }}</span>
-                        <span class="badge bg-light text-dark ms-2">{{ posts|length }} post{% if posts|length != 1 %}s{% endif %}</span>
+            <div class="social-copy-card">
+                <div class="social-copy-body">
+                    <div class="posts-container" id="posts-container">
+                    {% for group in post_groups %}{{ render_post_item(group) }}{% endfor %}
                     </div>
-                    <button type="button" class="btn btn-sm btn-light d-none select-mode-btn platform-select-all" 
-                            onclick="selectPlatformPosts('{{ platform }}')" title="Select all {{ platform }} posts">
-                        ☑️ All
-                    </button>
-                </div>
-                <div class="social-copy-body" data-platform="{{ platform }}">
-                    <div class="posts-container" id="posts-container-{{ platform }}">
-                    {% for post in posts %}{{ render_post_item(post, platform, loop.index) }}{% endfor %}
-                    </div>
-                    {% set _shown = posts|length %}
-                    {% set _total = platform_totals.get(platform, _shown) if platform_totals is defined else _shown %}
-                    {% if _total > _shown %}
+                    {% if group_total > post_groups|length %}
                     <div class="text-center mt-3 pt-3 border-top load-more-container">
-                        <button class="btn btn-sm btn-outline-secondary load-more-btn" data-platform="{{ platform }}" data-offset="{{ _shown }}" onclick="loadMorePosts('{{ platform }}', this)">
-                            Load more ({{ _shown }} of {{ _total }}) ▼
+                        <button class="btn btn-sm btn-outline-secondary load-more-btn" data-offset="{{ post_groups|length }}" onclick="loadMorePosts(this)">
+                            Load more ({{ post_groups|length }} of {{ group_total }}) ▼
                         </button>
                     </div>
                     {% endif %}
-                    <!-- Inline Add Post -->
-                    <div class="mt-3 pt-3 border-top add-post-area" data-platform="{{ platform }}">
-                        <button class="btn btn-sm btn-outline-primary w-100 add-post-toggle-btn" id="add-post-btn-{{ platform }}" onclick="showAddPostForm('{{ platform }}')">
-                            ✏️ Write a New {{ platform|capitalize }} Post
-                        </button>
-                        <div class="d-none" id="add-post-form-{{ platform }}">
-                            <label class="form-label fw-bold small mb-1">New {{ platform|capitalize }} Post</label>
-                            <textarea class="form-control mb-2" id="add-post-textarea-{{ platform }}" rows="4"
-                                      placeholder="Write your {{ platform }} post here..." oninput="updateManualCharCount('{{ platform }}')"></textarea>
-                            <div class="d-flex justify-content-between align-items-center">
-                                <small class="text-muted" id="add-post-charcount-{{ platform }}"></small>
-                                <div class="d-flex gap-2">
-                                    <button class="btn btn-sm btn-success" onclick="createManualPost('{{ platform }}')">
-                                        💾 Save Post
-                                    </button>
-                                    <button class="btn btn-sm btn-outline-secondary" onclick="hideAddPostForm('{{ platform }}')">
-                                        Cancel
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+                    {{ new_post_composer() }}
                 </div>
             </div>
-            {% endfor %}
-            {# Manual-create cards for supported platforms that have no posts yet,
-               so any platform (e.g. Instagram) can be authored from scratch. #}
-            {% for platform in ['linkedin', 'threads', 'twitter', 'facebook', 'instagram'] if platform not in posts_by_platform %}
-            <div class="social-copy-card mb-3" data-platform="{{ platform }}">
-                <div class="social-copy-header d-flex justify-content-between align-items-center" style="background-color: var(--platform-{{ platform }}-color, #6c757d)">
-                    <div>
-                        <span class="social-icon">
-                            {% if platform == 'twitter' %}𝕏{% elif platform == 'linkedin' %}💼{% elif platform == 'facebook' %}📘{% elif platform == 'threads' %}🧵{% elif platform == 'instagram' %}📷{% else %}📱{% endif %}
-                        </span>
-                        <span class="social-platform">{{ platform|capitalize }}</span>
-                    </div>
-                </div>
-                <div class="social-copy-body" data-platform="{{ platform }}">
-                    <div class="add-post-area" data-platform="{{ platform }}">
-                        <button class="btn btn-sm btn-outline-primary w-100 add-post-toggle-btn" id="add-post-btn-{{ platform }}" onclick="showAddPostForm('{{ platform }}')">
-                            ✏️ Write a New {{ platform|capitalize }} Post
-                        </button>
-                        <div class="d-none" id="add-post-form-{{ platform }}">
-                            <label class="form-label fw-bold small mb-1">New {{ platform|capitalize }} Post</label>
-                            <textarea class="form-control mb-2" id="add-post-textarea-{{ platform }}" rows="4"
-                                      placeholder="Write your {{ platform }} post here..." oninput="updateManualCharCount('{{ platform }}')"></textarea>
-                            <div class="d-flex justify-content-between align-items-center">
-                                <small class="text-muted" id="add-post-charcount-{{ platform }}"></small>
-                                <div class="d-flex gap-2">
-                                    <button class="btn btn-sm btn-success" onclick="createManualPost('{{ platform }}')">
-                                        💾 Save Post
-                                    </button>
-                                    <button class="btn btn-sm btn-outline-secondary" onclick="hideAddPostForm('{{ platform }}')">
-                                        Cancel
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            {% endfor %}
         </div>
     </div>
 </div>
 {% else %}
-<!-- Empty state: allow creating first manual posts -->
+<!-- Empty state: allow creating a first manual post -->
 <div class="card mb-4" id="saved-posts-section">
     <div class="card-header bg-gradient d-flex justify-content-between align-items-center" style="background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white;">
         <strong>📬 Posts</strong>
         <span class="badge bg-light text-dark">0 posts</span>
     </div>
     <div class="card-body">
-        <p class="text-muted mb-3">No posts yet. Generate posts above or write one manually for a platform:</p>
+        <p class="text-muted mb-3">No posts yet. Generate posts above, or write one and tick where it should go:</p>
         <div id="saved-posts-container">
-            {% for platform in ['linkedin', 'threads', 'twitter', 'facebook', 'instagram'] %}
-            <div class="social-copy-card mb-3" data-platform="{{ platform }}">
-                <div class="social-copy-header d-flex justify-content-between align-items-center" style="background-color: var(--platform-{{ platform }}-color, #6c757d)">
-                    <div>
-                        <span class="social-icon">
-                            {% if platform == 'twitter' %}𝕏{% elif platform == 'linkedin' %}💼{% elif platform == 'facebook' %}📘{% elif platform == 'threads' %}🧵{% elif platform == 'instagram' %}📷{% else %}📱{% endif %}
-                        </span>
-                        <span class="social-platform">{{ platform|capitalize }}</span>
-                    </div>
-                </div>
-                <div class="social-copy-body" data-platform="{{ platform }}">
-                    <div class="add-post-area" data-platform="{{ platform }}">
-                        <button class="btn btn-sm btn-outline-primary w-100 add-post-toggle-btn" id="add-post-btn-{{ platform }}" onclick="showAddPostForm('{{ platform }}')">
-                            ✏️ Write a New {{ platform|capitalize }} Post
-                        </button>
-                        <div class="d-none" id="add-post-form-{{ platform }}">
-                            <label class="form-label fw-bold small mb-1">New {{ platform|capitalize }} Post</label>
-                            <textarea class="form-control mb-2" id="add-post-textarea-{{ platform }}" rows="4"
-                                      placeholder="Write your {{ platform }} post here..." oninput="updateManualCharCount('{{ platform }}')"></textarea>
-                            <div class="d-flex justify-content-between align-items-center">
-                                <small class="text-muted" id="add-post-charcount-{{ platform }}"></small>
-                                <div class="d-flex gap-2">
-                                    <button class="btn btn-sm btn-success" onclick="createManualPost('{{ platform }}')">
-                                        💾 Save Post
-                                    </button>
-                                    <button class="btn btn-sm btn-outline-secondary" onclick="hideAddPostForm('{{ platform }}')">
-                                        Cancel
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
+            <div class="social-copy-card">
+                <div class="social-copy-body">
+                    <div class="posts-container" id="posts-container"></div>
+                    {{ new_post_composer() }}
                 </div>
             </div>
-            {% endfor %}
         </div>
     </div>
 </div>
@@ -2405,9 +2417,13 @@ function autoSavePost(postId, element, postType) {
     
     const formData = new FormData();
     formData.append('content', newContent);
-    
+    if (postType === 'standalone') {
+        // Card-wide: the copy is what holds a card's platform rows together.
+        formData.append('post_ids', cardIdsParam(postId));
+    }
+
     // Use different endpoint based on post type
-    const endpoint = postType === 'standalone' 
+    const endpoint = postType === 'standalone'
         ? `/compose/post/${postId}/edit`
         : `/social/${postId}/edit`;
     
@@ -2536,7 +2552,9 @@ function refreshPostImage(postId, btn) {
     btn.disabled = true;
     btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status"></span>';
 
-    fetch(`/compose/post/${postId}/refresh-source-image`, { method: 'POST' })
+    const refreshBody = new FormData();
+    refreshBody.append('post_ids', cardIdsParam(postId));
+    fetch(`/compose/post/${postId}/refresh-source-image`, { method: 'POST', body: refreshBody })
         .then(r => r.json().then(data => ({ ok: r.ok, data })))
         .then(({ ok, data }) => {
             if (ok && data.success && data.image_url) {
@@ -2596,7 +2614,10 @@ function fetchLinkImage(postId, kind) {
     fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: target })
+        body: JSON.stringify(
+            kind === 'social'
+                ? { url: target }
+                : { url: target, post_ids: cardIdsParam(postId) })
     })
     .then(r => r.json().then(d => ({ ok: r.ok, data: d })))
     .then(({ ok, data }) => {
@@ -2669,7 +2690,8 @@ function savePostImage(postId) {
     fetch(`/compose/post/${postId}/image`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `image_url=${encodeURIComponent(imageUrl)}`
+        // Card-wide: the image is part of what groups a card's rows.
+        body: `image_url=${encodeURIComponent(imageUrl)}&post_ids=${encodeURIComponent(cardIdsParam(postId))}`
     })
     .then(response => response.json())
     .then(data => {
@@ -2904,7 +2926,7 @@ function selectStockImage(postId, imageUrl) {
     fetch(`/compose/post/${postId}/stock-image`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image_url: imageUrl })
+        body: JSON.stringify({ image_url: imageUrl, post_ids: cardIdsParam(postId) })
     })
     .then(response => response.json())
     .then(data => {
@@ -2993,7 +3015,8 @@ function savePostImageWithUrl(postId, imageUrl) {
     fetch(`/compose/post/${postId}/image`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: `image_url=${encodeURIComponent(imageUrl)}`
+        // Card-wide: the image is part of what groups a card's rows.
+        body: `image_url=${encodeURIComponent(imageUrl)}&post_ids=${encodeURIComponent(cardIdsParam(postId))}`
     })
     .then(response => response.json())
     .then(data => {
@@ -3033,7 +3056,8 @@ function savePostEdit(postId) {
     
     const formData = new FormData();
     formData.append('content', content);
-    
+    formData.append('post_ids', cardIdsParam(postId));
+
     fetch(`/compose/post/${postId}/edit`, {
         method: 'POST',
         body: formData
@@ -3058,7 +3082,9 @@ function savePostEdit(postId) {
 }
 
 function toggleUsed(postId, btn) {
-    fetch(`/compose/post/${postId}/toggle-used`, { method: 'POST' })
+    const usedBody = new FormData();
+    usedBody.append('post_ids', cardIdsParam(postId));
+    fetch(`/compose/post/${postId}/toggle-used`, { method: 'POST', body: usedBody })
         .then(response => response.json())
         .then(data => {
             if (data.success) {
@@ -3086,37 +3112,23 @@ function toggleUsed(postId, btn) {
         });
 }
 
+// Deletes the post everywhere it goes — untick a platform to drop just one.
 function deletePost(postId, btn) {
-    if (!confirm('Delete this post?')) return;
-    
-    fetch(`/compose/post/${postId}/delete`, { method: 'POST' })
+    const postItem = btn.closest('.post-item');
+    const platforms = Object.keys(cardPlatforms(postItem));
+    const where = platforms.length > 1
+        ? ` It goes to ${platforms.map(p => PLATFORM_LABELS[p] || p).join(', ')} — all of them will be deleted.`
+        : '';
+    if (!confirm(`Delete this post?${where}`)) return;
+
+    const body = new FormData();
+    body.append('post_ids', cardIdsParam(postId));
+    fetch(`/compose/post/${postId}/delete`, { method: 'POST', body: body })
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                const postItem = btn.closest('.post-item');
-                const card = postItem.closest('.social-copy-card');
-                const allPosts = card.querySelectorAll('.post-item');
-                
-                if (allPosts.length === 1) {
-                    card.remove();
-                    const container = document.getElementById('saved-posts-container');
-                    if (container && container.children.length === 0) {
-                        document.getElementById('saved-posts-section').remove();
-                    }
-                } else {
-                    postItem.remove();
-                    const remainingPosts = card.querySelectorAll('.post-item');
-                    remainingPosts.forEach((p, i) => {
-                        const badge = p.querySelector('.badge.bg-secondary');
-                        if (badge) badge.textContent = `Post ${i + 1}`;
-                        p.classList.remove('mt-3', 'pt-3', 'border-top');
-                        if (i > 0) p.classList.add('mt-3', 'pt-3', 'border-top');
-                    });
-                    const countBadge = card.querySelector('.social-copy-header .badge');
-                    if (countBadge) {
-                        countBadge.textContent = `${remainingPosts.length} post${remainingPosts.length !== 1 ? 's' : ''}`;
-                    }
-                }
+                postItem.remove();
+                adjustPostCountBadge(-1);
                 showToast('Post deleted', 'success');
             }
         });
@@ -3139,227 +3151,132 @@ function toggleShowMore(btn, platform) {
     }
 }
 
-function addPostedBadge(postItem, platform, url) {
+// ============ Publishing from a card ============
+// A card is one post and the platforms it goes to, so publishing is always
+// "this platform's row, now". Each platform's endpoint reports the new post's
+// link under its own key.
+const PLATFORM_META = {{ PLATFORM_META | tojson }};
+const PLATFORM_LABELS = {};
+const PLATFORM_CHIP_ICONS = {};
+const PLATFORM_CHIP_COLORS = {};
+Object.entries(PLATFORM_META).forEach(([platform, meta]) => {
+    PLATFORM_LABELS[platform] = meta.label;
+    PLATFORM_CHIP_ICONS[platform] = meta.icon;
+    PLATFORM_CHIP_COLORS[platform] = meta.color;
+});
+
+function platformConnected(platform) {
+    return {
+        linkedin: () => linkedinConnected,
+        threads: () => threadsConnected,
+        facebook: () => facebookConnected,
+        twitter: () => twitterConnected,
+        instagram: () => instagramConnected,
+    }[platform]?.() ?? false;
+}
+
+function postedUrlFrom(platform, data) {
+    if (platform !== 'linkedin') return data.permalink || '';
+    const urn = data.post_urn;
+    if (!urn) return '';
+    return urn.startsWith('http') ? urn : `https://www.linkedin.com/feed/update/${urn}`;
+}
+
+// Show a published platform as a 🔗 on its own chip, next to its queue control.
+function markChipPosted(postItem, platform, url) {
     if (!postItem || !url) return;
-    const header = postItem.querySelector('.post-header .d-flex.align-items-center.gap-2');
-    if (!header) return;
-    const badgeClasses = {
-        'linkedin': 'bg-primary',
-        'threads': 'bg-dark',
-        'twitter': 'bg-success',
-        'facebook': 'bg-info',
-        'instagram': 'bg-danger',
-    };
+    const chip = postItem.querySelector(`.platform-chip[data-platform="${platform}"]`);
+    if (!chip || chip.querySelector('.chip-posted')) return;
     const link = document.createElement('a');
     link.href = url;
     link.target = '_blank';
     link.rel = 'noopener';
-    link.className = `badge text-decoration-none ${badgeClasses[platform] || 'bg-success'}`;
-    link.title = 'Click to view';
-    link.textContent = `🔗 ${platform.charAt(0).toUpperCase() + platform.slice(1)}`;
-    header.appendChild(link);
+    link.className = 'chip-posted';
+    link.title = 'Posted just now — click to view';
+    link.textContent = '🔗';
+    chip.appendChild(link);
 }
 
-function postToLinkedIn(postId, btn) {
-    if (!linkedinConnected) {
-        alert('Please connect LinkedIn first');
-        return;
+// Publish one platform of a card. Resolves to true when it went out, so
+// "post to all" can report a tally.
+async function publishCardPlatform(postItem, postId, platform) {
+    const label = PLATFORM_LABELS[platform] || platform;
+    if (!platformConnected(platform)) {
+        alert(`Please connect ${label} first`);
+        return false;
     }
-    if (!confirm('Post to LinkedIn now?')) return;
-    
-    const originalText = btn.innerHTML;
-    btn.innerHTML = '⏳';
-    btn.disabled = true;
-    
-    fetch(`/compose/post/${postId}/linkedin`, { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                btn.innerHTML = '✅';
-                btn.classList.remove('btn-outline-info');
-                btn.classList.add('btn-success');
-                showToast('Posted to LinkedIn!', 'success');
-                const postItem = btn.closest('.post-item');
-                const urn = data.post_urn;
-                if (urn) {
-                    const url = urn.startsWith('http') ? urn : `https://www.linkedin.com/feed/update/${urn}`;
-                    addPostedBadge(postItem, 'linkedin', url);
-                }
-                const usedBtn = postItem.querySelector('button[title="Mark as used"]');
-                if (usedBtn && !usedBtn.classList.contains('btn-outline-success')) {
-                    toggleUsed(postId, usedBtn);
-                }
-            } else {
-                btn.innerHTML = originalText;
-                btn.disabled = false;
-                alert('Error: ' + (data.error || 'Failed to post'));
-            }
-        })
-        .catch(error => {
-            btn.innerHTML = originalText;
-            btn.disabled = false;
-            alert('Error: ' + error.message);
-        });
+    try {
+        const res = await fetch(`/compose/post/${postId}/${platform}`, { method: 'POST' });
+        const data = await res.json();
+        if (!data.success) {
+            alert(`${label}: ${data.error || 'Failed to post'}`);
+            return false;
+        }
+        markChipPosted(postItem, platform, postedUrlFrom(platform, data));
+        return true;
+    } catch (e) {
+        alert(`${label}: ${e.message}`);
+        return false;
+    }
 }
 
-function postToThreads(postId, btn) {
-    if (!threadsConnected) {
-        alert('Please connect Threads first');
-        return;
-    }
-    if (!confirm('Post to Threads now?')) return;
-    
-    const originalText = btn.innerHTML;
-    btn.innerHTML = '⏳';
-    btn.disabled = true;
-    
-    fetch(`/compose/post/${postId}/threads`, { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                btn.innerHTML = '✅';
-                btn.classList.remove('btn-outline-dark');
-                btn.classList.add('btn-success');
-                showToast('Posted to Threads!', 'success');
-                const postItem = btn.closest('.post-item');
-                if (data.permalink) {
-                    addPostedBadge(postItem, 'threads', data.permalink);
-                }
-                const usedBtn = postItem.querySelector('button[title="Mark as used"]');
-                if (usedBtn && !usedBtn.classList.contains('btn-outline-success')) {
-                    toggleUsed(postId, usedBtn);
-                }
-            } else {
-                btn.innerHTML = originalText;
-                btn.disabled = false;
-                alert('Error: ' + (data.error || 'Failed to post'));
-            }
-        })
-        .catch(error => {
-            btn.innerHTML = originalText;
-            btn.disabled = false;
-            alert('Error: ' + error.message);
-        });
+// A card counts as used once every platform it targets has gone out, which is
+// what the server records too — so re-read it rather than guessing.
+async function refreshCardUsedState(postItem) {
+    if (!postItem) return;
+    const ids = cardPostIds(postItem, false);
+    if (!ids.length) return;
+    const states = await Promise.all(ids.map(id =>
+        fetch(`/compose/post/${id}`)
+            .then(res => res.ok ? res.json() : null)
+            .then(post => !!(post && post.used))
+            .catch(() => false)));
+    setCardUsedUI(postItem, states.every(Boolean));
 }
 
-function postToFacebook(postId, btn) {
-    if (!facebookConnected) {
-        alert('Please connect Facebook first');
-        return;
-    }
-    if (!confirm('Post to Facebook now?')) return;
+async function postNowFromCard(btn, postId, platform) {
+    const label = PLATFORM_LABELS[platform] || platform;
+    const extra = platform === 'instagram'
+        ? ' An image is required and will be auto-attached if the post has none.'
+        : '';
+    if (!confirm(`Post to ${label} now?${extra}`)) return;
 
-    const originalText = btn.innerHTML;
-    btn.innerHTML = '⏳';
+    const postItem = btn.closest('.post-item');
+    const original = btn.innerHTML;
+    btn.innerHTML = '⏳ Posting...';
     btn.disabled = true;
-
-    fetch(`/compose/post/${postId}/facebook`, { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                btn.innerHTML = '✅';
-                btn.classList.remove('btn-outline-primary');
-                btn.classList.add('btn-success');
-                showToast('Posted to Facebook!', 'success');
-                const postItem = btn.closest('.post-item');
-                if (data.permalink) {
-                    addPostedBadge(postItem, 'facebook', data.permalink);
-                }
-                const usedBtn = postItem.querySelector('button[title="Mark as used"]');
-                if (usedBtn && !usedBtn.classList.contains('btn-outline-success')) {
-                    toggleUsed(postId, usedBtn);
-                }
-            } else {
-                btn.innerHTML = originalText;
-                btn.disabled = false;
-                alert('Error: ' + (data.error || 'Failed to post'));
-            }
-        })
-        .catch(error => {
-            btn.innerHTML = originalText;
-            btn.disabled = false;
-            alert('Error: ' + error.message);
-        });
+    const posted = await publishCardPlatform(postItem, postId, platform);
+    btn.innerHTML = original;
+    btn.disabled = false;
+    if (posted) {
+        showToast(`Posted to ${label}!`, 'success');
+        refreshCardUsedState(postItem);
+    }
 }
 
-function postToTwitter(postId, btn) {
-    if (!twitterConnected) {
-        alert('Please connect X/Twitter first');
-        return;
-    }
-    if (!confirm('Post to X now?')) return;
+async function postNowAllFromCard(btn) {
+    const postItem = btn.closest('.post-item');
+    const platforms = cardPlatforms(postItem);
+    const names = Object.keys(platforms);
+    if (names.length === 0) return;
+    const labels = names.map(p => PLATFORM_LABELS[p] || p).join(', ');
+    if (!confirm(`Publish this post to ${labels} now? This cannot be undone.`)) return;
 
-    const originalText = btn.innerHTML;
-    btn.innerHTML = '⏳';
+    const original = btn.innerHTML;
+    btn.innerHTML = '⏳ Posting...';
     btn.disabled = true;
-
-    fetch(`/compose/post/${postId}/twitter`, { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                btn.innerHTML = '✅';
-                btn.classList.remove('btn-outline-info');
-                btn.classList.add('btn-success');
-                showToast('Posted to X!', 'success');
-                const postItem = btn.closest('.post-item');
-                if (data.permalink) {
-                    addPostedBadge(postItem, 'twitter', data.permalink);
-                }
-                const usedBtn = postItem.querySelector('button[title="Mark as used"]');
-                if (usedBtn && !usedBtn.classList.contains('btn-outline-success')) {
-                    toggleUsed(postId, usedBtn);
-                }
-            } else {
-                btn.innerHTML = originalText;
-                btn.disabled = false;
-                alert('Error: ' + (data.error || 'Failed to post'));
-            }
-        })
-        .catch(error => {
-            btn.innerHTML = originalText;
-            btn.disabled = false;
-            alert('Error: ' + error.message);
-        });
-}
-
-function postToInstagram(postId, btn) {
-    if (!instagramConnected) {
-        alert('Please connect Instagram first');
-        return;
+    let posted = 0;
+    for (const platform of names) {
+        if (await publishCardPlatform(postItem, platforms[platform], platform)) posted++;
     }
-    if (!confirm('Post to Instagram now? An image is required and will be auto-attached if the post has none.')) return;
-
-    const originalText = btn.innerHTML;
-    btn.innerHTML = '⏳';
-    btn.disabled = true;
-
-    fetch(`/compose/post/${postId}/instagram`, { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                btn.innerHTML = '✅';
-                btn.classList.remove('btn-outline-danger');
-                btn.classList.add('btn-success');
-                showToast('Posted to Instagram!', 'success');
-                const postItem = btn.closest('.post-item');
-                if (data.permalink) {
-                    addPostedBadge(postItem, 'instagram', data.permalink);
-                }
-                const usedBtn = postItem.querySelector('button[title="Mark as used"]');
-                if (usedBtn && !usedBtn.classList.contains('btn-outline-success')) {
-                    toggleUsed(postId, usedBtn);
-                }
-            } else {
-                btn.innerHTML = originalText;
-                btn.disabled = false;
-                alert('Error: ' + (data.error || 'Failed to post'));
-            }
-        })
-        .catch(error => {
-            btn.innerHTML = originalText;
-            btn.disabled = false;
-            alert('Error: ' + error.message);
-        });
+    btn.innerHTML = original;
+    btn.disabled = false;
+    showToast(
+        posted === names.length
+            ? `Posted to ${posted} platform${posted !== 1 ? 's' : ''}`
+            : `Posted to ${posted} of ${names.length} platforms`,
+        posted === names.length ? 'success' : 'warning');
+    refreshCardUsedState(postItem);
 }
 
 // ============ Instagram media builder (carousel / reel / story) ============
@@ -4317,8 +4234,167 @@ function igSaveUserTags() {
     .catch(() => showToast('Could not save tags', 'warning'));
 }
 
-// Load the next page of saved posts for a platform and append them.
-async function loadMorePosts(platform, btn) {
+// ============ Reading a card off the DOM ============
+// A card renders one saved post per ticked platform. `data-post-ids` is every
+// row behind it and `data-platforms` maps platform -> that platform's row id.
+
+function cardPlatforms(postItem) {
+    if (!postItem) return {};
+    try {
+        return JSON.parse(postItem.dataset.platforms || '{}');
+    } catch (e) {
+        return {};
+    }
+}
+
+// Every row behind a card. With a platform filter active the list is showing
+// that platform only, so bulk actions stay inside it — deleting from a list
+// filtered to X must not take the Threads twin with it.
+function cardPostIds(postItem, respectFilter = true) {
+    if (!postItem) return [];
+    if (respectFilter) {
+        const el = document.getElementById('filter-platform');
+        const platform = el ? el.value : '';
+        if (platform) {
+            const id = cardPlatforms(postItem)[platform];
+            return id ? [id] : [];
+        }
+    }
+    return (postItem.dataset.postIds || '').split(',').filter(Boolean).map(Number);
+}
+
+// Card-wide edits (content, image, used, delete) send the card's rows so the
+// server applies them to all of them — the copy and image are what group the
+// rows, so changing them on one platform alone would split the card.
+function cardIdsParam(postId) {
+    const postItem = document.querySelector(`.post-item[data-post-id="${postId}"]`);
+    return cardPostIds(postItem, false).join(',');
+}
+
+function setCardUsedUI(postItem, used) {
+    if (!postItem) return;
+    const toggleBtn = postItem.querySelector('button[title="Mark as used"]');
+    if (toggleBtn) {
+        toggleBtn.innerHTML = used ? '✓' : '○';
+        toggleBtn.classList.toggle('btn-outline-success', used);
+        toggleBtn.classList.toggle('btn-outline-secondary', !used);
+    }
+    const badge = postItem.querySelector('.used-badge');
+    if (used && !badge) {
+        const holder = postItem.querySelector('.post-header .d-flex.align-items-center.gap-2');
+        if (holder) {
+            const span = document.createElement('span');
+            span.className = 'badge bg-success used-badge';
+            span.textContent = '✓ Used';
+            holder.appendChild(span);
+        }
+    } else if (!used && badge) {
+        badge.remove();
+    }
+}
+
+// ============ Platform ticks ============
+// Ticking a platform creates that platform's saved post from this card's copy;
+// unticking deletes it. Both come back with the card re-rendered, because a
+// tick can bring a whole set of controls with it (Instagram's format picker and
+// media builder) that would be fiddly to graft on by hand.
+async function togglePostPlatform(btn, platform) {
+    const postItem = btn.closest('.post-item');
+    const chip = btn.closest('.platform-chip');
+    if (!postItem || !chip) return;
+
+    const adding = !chip.classList.contains('is-on');
+    const postId = adding
+        ? postItem.dataset.postId
+        : (chip.dataset.platformPostId || postItem.dataset.postId);
+
+    const send = (force) => {
+        const body = new FormData();
+        body.append('platform', platform);
+        body.append('action', adding ? 'add' : 'remove');
+        body.append('post_ids', cardPostIds(postItem, false).join(','));
+        if (postItem.dataset.postIndex) body.append('display_index', postItem.dataset.postIndex);
+        if (force) body.append('force', '1');
+        return fetch(`/compose/post/${postId}/platform`, { method: 'POST', body: body });
+    };
+
+    btn.disabled = true;
+    try {
+        let res = await send(false);
+        let data = await res.json();
+
+        // Queued or already-published platforms don't come off on a stray click.
+        if (res.status === 409 && data.needs_confirm) {
+            const label = PLATFORM_LABELS[platform] || platform;
+            const reason = data.queued
+                ? `This post is queued for ${label}${data.scheduled_for ? ' at ' + data.scheduled_for : ''}, and removing it will take it out of the queue.`
+                : `This post has already been published to ${label} (removing it here won't unpublish it).`;
+            if (!confirm(`${reason}\n\nRemove ${label} from this post?`)) {
+                btn.disabled = false;
+                return;
+            }
+            res = await send(true);
+            data = await res.json();
+        }
+
+        if (!res.ok || !data.success) {
+            btn.disabled = false;
+            showToast(data.error || 'Could not update platforms', 'error');
+            return;
+        }
+
+        const label = PLATFORM_LABELS[platform] || platform;
+        replaceCard(postItem, data.html);
+        showToast(adding ? `Added to ${label}` : `Removed from ${label}`, 'success');
+        if (adding && platform === 'instagram') {
+            const card = document.querySelector(`.post-item[data-post-id="${data.post_id}"]`);
+            if (card && !card.querySelector('#image-preview-' + data.post_id + ' img[src]:not([src=""])')) {
+                showToast('Instagram needs an image before it can publish', 'warning');
+            }
+        }
+    } catch (e) {
+        btn.disabled = false;
+        showToast('Could not update platforms: ' + e.message, 'error');
+    }
+}
+
+// Swap a card for its freshly rendered self (or drop it when nothing is left).
+function replaceCard(postItem, html) {
+    if (!html) {
+        postItem.remove();
+        adjustPostCountBadge(-1);
+        return;
+    }
+    postItem.insertAdjacentHTML('afterend', html);
+    const replacement = postItem.nextElementSibling;
+    postItem.remove();
+    // Scoped to the new card: re-initialising the whole list would reset any
+    // unsaved Instagram media the other cards are holding.
+    if (replacement) initLoadedPosts(replacement);
+    if (selectModeActive) updateSelectedCount();
+}
+
+function adjustPostCountBadge(delta) {
+    const badge = document.getElementById('posts-count');
+    if (!badge) return;
+    const current = parseInt((badge.textContent || '').replace(/[^0-9]/g, ''), 10);
+    if (isNaN(current)) return;
+    const next = Math.max(0, current + delta);
+    badge.textContent = `${next} saved post${next !== 1 ? 's' : ''}`;
+}
+
+// The ➕/✅ on a ticked chip is that platform's queue.
+function toggleChipQueue(btn) {
+    const chip = btn.closest('.platform-chip');
+    if (!chip) return;
+    const platform = chip.dataset.platform;
+    const postId = parseInt(chip.dataset.platformPostId, 10);
+    if (!postId) return;
+    toggleQueue(postId, 'standalone', platform, btn, btn.dataset.queued === 'true');
+}
+
+// Load the next page of saved posts and append them.
+async function loadMorePosts(btn) {
     const offset = parseInt(btn.dataset.offset || '0', 10);
     const original = btn.innerHTML;
     btn.disabled = true;
@@ -4328,7 +4404,7 @@ async function loadMorePosts(platform, btn) {
         // list was rendered under, so "Load more" can't surface non-matching posts.
         const filters = currentPostFilters();
         const res = await fetch('/compose/posts/more' + postFilterQuery(filters, {
-            platform: platform, offset: String(offset),
+            offset: String(offset),
         }));
         const data = await res.json();
         if (!res.ok || data.error) {
@@ -4337,7 +4413,7 @@ async function loadMorePosts(platform, btn) {
             btn.innerHTML = original;
             return;
         }
-        const container = document.getElementById(`posts-container-${platform}`);
+        const container = document.getElementById('posts-container');
         if (container && data.html) {
             container.insertAdjacentHTML('beforeend', data.html);
             initLoadedPosts(container);
@@ -4357,75 +4433,54 @@ async function loadMorePosts(platform, btn) {
     }
 }
 
-function repostPost(postId, platform, btn) {
-    // Reuses the same publish path as "Post Now". The publish endpoints have no
-    // duplicate guard, so already-posted content can be re-sent.
-    const handlers = {
-        linkedin: postToLinkedIn,
-        threads: postToThreads,
-        facebook: postToFacebook,
-        twitter: postToTwitter,
-        instagram: postToInstagram,
-    };
-    const handler = handlers[platform];
-    if (!handler) {
-        alert('Reposting is not supported for this platform.');
-        return;
-    }
-    handler(postId, btn);
+function setChipQueuedUI(btn, queued, scheduledFor) {
+    btn.innerHTML = queued ? '\u2705' : '\u2795';
+    btn.dataset.queued = queued ? 'true' : 'false';
+    btn.classList.toggle('is-queued', queued);
+    const chip = btn.closest('.platform-chip');
+    const label = chip ? (PLATFORM_LABELS[chip.dataset.platform] || chip.dataset.platform) : 'this platform';
+    btn.title = queued
+        ? `Queued${scheduledFor ? ' for ' + scheduledFor : ''} \u2014 click to remove`
+        : `Add to the ${label} queue`;
 }
 
+// Add or remove one platform's queue entry. `btn` is that platform's chip
+// control, so the card can be queued for X while Threads waits.
 function toggleQueue(postId, postType, platform, btn, isQueued) {
-    if (platform === 'linkedin' && !linkedinConnected) {
-        alert('Please connect LinkedIn first');
-        return;
-    }
-    if (platform === 'threads' && !threadsConnected) {
-        alert('Please connect Threads first');
-        return;
-    }
-    if (platform === 'facebook' && !facebookConnected) {
-        alert('Please connect Facebook first');
-        return;
-    }
-    if (platform === 'twitter' && !twitterConnected) {
-        alert('Please connect X/Twitter first');
-        return;
-    }
-    if (platform === 'instagram' && !instagramConnected) {
-        alert('Please connect Instagram first');
+    if (!platformConnected(platform)) {
+        alert(`Please connect ${PLATFORM_LABELS[platform] || platform} first`);
         return;
     }
 
     const originalText = btn.innerHTML;
-    btn.innerHTML = '⏳';
+    btn.innerHTML = '\u23f3';
     btn.disabled = true;
 
-    if (isQueued) {
-        // Remove from queue
-        const formData = new FormData();
-        formData.append('post_type', postType);
-        formData.append('post_id', postId);
-        formData.append('platform', platform);
-        
-        fetch('/schedule/remove-from-queue', {
-            method: 'POST',
-            body: formData
-        })
+    const request = isQueued
+        ? (() => {
+            const formData = new FormData();
+            formData.append('post_type', postType);
+            formData.append('post_id', postId);
+            formData.append('platform', platform);
+            return fetch('/schedule/remove-from-queue', { method: 'POST', body: formData });
+        })()
+        : (() => {
+            const formData = new FormData();
+            formData.append('platform', platform);
+            formData.append('post_type', postType);
+            return fetch(`/compose/post/${postId}/queue`, { method: 'POST', body: formData });
+        })();
+
+    request
         .then(response => response.json())
         .then(data => {
             btn.disabled = false;
             if (data.success) {
-                btn.innerHTML = '➕';
-                btn.classList.remove('btn-success');
-                btn.classList.add('btn-outline-success');
-                btn.setAttribute('data-queued', 'false');
-                btn.title = 'Add to Queue';
-                btn.onclick = function() { toggleQueue(postId, postType, platform, btn, false); };
+                setChipQueuedUI(btn, !isQueued, data.scheduled_for);
                 showToast(data.message, 'success');
             } else {
                 btn.innerHTML = originalText;
-                alert('Error: ' + (data.error || 'Failed to remove from queue'));
+                alert('Error: ' + (data.error || (isQueued ? 'Failed to remove from queue' : 'Failed to add to queue')));
             }
         })
         .catch(error => {
@@ -4433,38 +4488,6 @@ function toggleQueue(postId, postType, platform, btn, isQueued) {
             btn.disabled = false;
             alert('Error: ' + error.message);
         });
-    } else {
-        // Add to queue
-        const formData = new FormData();
-        formData.append('platform', platform);
-        formData.append('post_type', postType);
-        
-        fetch(`/compose/post/${postId}/queue`, {
-            method: 'POST',
-            body: formData
-        })
-        .then(response => response.json())
-        .then(data => {
-            btn.disabled = false;
-            if (data.success) {
-                btn.innerHTML = '✅';
-                btn.classList.remove('btn-outline-success');
-                btn.classList.add('btn-success');
-                btn.setAttribute('data-queued', 'true');
-                btn.title = 'Click to remove from queue';
-                btn.onclick = function() { toggleQueue(postId, postType, platform, btn, true); };
-                showToast(data.message, 'success');
-            } else {
-                btn.innerHTML = originalText;
-                alert('Error: ' + (data.error || 'Failed to add to queue'));
-            }
-        })
-        .catch(error => {
-            btn.innerHTML = originalText;
-            btn.disabled = false;
-            alert('Error: ' + error.message);
-        });
-    }
 }
 
 // Legacy function for backwards compatibility
@@ -4530,14 +4553,12 @@ function schedulePost() {
         if (data.success) {
             bootstrap.Modal.getInstance(document.getElementById('scheduleModal')).hide();
             showToast(`Scheduled for ${data.scheduled_for_display}`, 'success');
-            // Update the queue button
-            const queueBtn = document.querySelector(`.post-item[data-post-id="${postId}"] .btn-outline-success[data-platform="${platform}"]`);
-            if (queueBtn) {
-                queueBtn.innerHTML = '✅';
-                queueBtn.classList.remove('btn-outline-success');
-                queueBtn.classList.add('btn-success');
-                queueBtn.disabled = true;
-            }
+            // Show the platform's chip as queued
+            const card = cardForPostId(postId);
+            const queueBtn = card
+                ? card.querySelector(`.platform-chip[data-platform="${platform}"] .chip-queue`)
+                : null;
+            if (queueBtn) setChipQueuedUI(queueBtn, true, data.scheduled_for_display);
         } else {
             alert('Error: ' + (data.error || 'Failed to schedule'));
         }
@@ -4627,32 +4648,26 @@ function scopeLabel(filters, count) {
     return `${qualifier}${noun}${count !== 1 ? 's' : ''}`;
 }
 
-// Offer "select all across every page" once the loaded posts are all checked
-// but more matching posts exist behind "Load more". `platform` scopes the offer
-// to a single platform when triggered from a platform card's "All" button.
-async function offerSelectAllScope(loadedCount, platform) {
+// Offer "select all across every page" once the loaded cards are all checked
+// but more matching cards exist behind "Load more".
+async function offerSelectAllScope(loadedCount) {
     const banner = document.getElementById('select-all-scope-banner');
     if (!banner) return;
 
     const filters = currentPostFilters();
-    if (platform) filters.platform = platform;
 
-    // With filters active the page totals don't apply — ask the server how many
-    // posts actually match. Unfiltered, the totals we already have are exact.
-    let total, byPlatform;
-    if (anyFilterActive(filters)) {
-        try {
-            const res = await fetch('/compose/posts/ids' + postFilterQuery(filters, { count_only: '1' }));
-            const data = await res.json();
-            if (!res.ok || !data.success) return;
-            total = data.count;
-            byPlatform = data.by_platform;
-        } catch (e) {
-            return;  // Can't size the offer — leave the plain selection alone.
-        }
-    } else {
-        total = scopeCounts(null).total;
-        byPlatform = PLATFORM_TOTALS;
+    // Counts always come from the server: a card can stand for several posts,
+    // so the page's own numbers can't be totalled into a card count.
+    let total, rowTotal, byPlatform;
+    try {
+        const res = await fetch('/compose/posts/ids' + postFilterQuery(filters, { count_only: '1' }));
+        const data = await res.json();
+        if (!res.ok || !data.success) return;
+        total = data.group_count;
+        rowTotal = data.count;
+        byPlatform = data.by_platform;
+    } catch (e) {
+        return;  // Can't size the offer — leave the plain selection alone.
     }
 
     if (total <= loadedCount) {
@@ -4665,12 +4680,17 @@ async function offerSelectAllScope(loadedCount, platform) {
 
     const btn = document.getElementById('select-all-scope-btn');
     btn.textContent = `Select all ${total} ${scopeLabel(filters, total)} across every page`;
-    btn.onclick = () => enableSelectAllScope(filters, total, byPlatform);
+    btn.onclick = () => enableSelectAllScope(filters, total, byPlatform, rowTotal);
     banner.classList.remove('d-none');
 }
 
-function enableSelectAllScope(filters, total, byPlatform) {
-    selectAllScope = { filters: filters, total: total, byPlatform: byPlatform };
+function enableSelectAllScope(filters, total, byPlatform, rowTotal) {
+    selectAllScope = {
+        filters: filters,
+        total: total,
+        rowTotal: rowTotal === undefined ? total : rowTotal,
+        byPlatform: byPlatform,
+    };
 
     document.getElementById('select-all-scope-text').textContent =
         `All ${total} ${scopeLabel(filters, total)} selected — bulk actions apply to every page.`;
@@ -4750,10 +4770,7 @@ function toggleSelectMode() {
 
 function selectAllPosts() {
     // Only select VISIBLE posts (not hidden by filters or "show more")
-    const visibleCheckboxes = Array.from(document.querySelectorAll('.post-select-checkbox')).filter(cb => {
-        const postItem = cb.closest('.post-item');
-        return postItem && postItem.style.display !== 'none' && !postItem.classList.contains('d-none');
-    });
+    const visibleCheckboxes = visiblePostCheckboxes();
     const allChecked = visibleCheckboxes.length > 0 && visibleCheckboxes.every(cb => cb.checked);
     const selecting = !allChecked;
     visibleCheckboxes.forEach(cb => cb.checked = selecting);
@@ -4762,43 +4779,45 @@ function selectAllPosts() {
     const btn = document.getElementById('select-all-btn');
     btn.innerHTML = selecting ? '☐ Deselect All' : '☑️ Select All';
     if (selecting) {
-        offerSelectAllScope(visibleCheckboxes.length, null);
+        offerSelectAllScope(visibleCheckboxes.length);
     }
 }
 
-function selectPlatformPosts(platform) {
-    const card = document.querySelector(`.social-copy-card[data-platform="${platform}"]`);
-    if (!card) return;
-    // Only select VISIBLE posts within this platform
-    const visibleCheckboxes = Array.from(card.querySelectorAll('.post-select-checkbox')).filter(cb => {
+function visiblePostCheckboxes() {
+    return Array.from(document.querySelectorAll('.post-select-checkbox')).filter(cb => {
         const postItem = cb.closest('.post-item');
         return postItem && postItem.style.display !== 'none' && !postItem.classList.contains('d-none');
     });
-    const allChecked = visibleCheckboxes.length > 0 && visibleCheckboxes.every(cb => cb.checked);
-    const selecting = !allChecked;
-    visibleCheckboxes.forEach(cb => cb.checked = selecting);
-    clearSelectAllScope();
-    updateSelectedCount();
-    // Offer to widen to every page for this one platform when more exist.
-    if (selecting) {
-        offerSelectAllScope(visibleCheckboxes.length, platform);
-    }
+}
+
+// The cards ticked right now, as {postItem, ids, platforms}. One card can stand
+// for several saved posts, so every bulk action works from this rather than
+// from the checkbox's own id.
+function selectedCards() {
+    return Array.from(document.querySelectorAll('.post-select-checkbox:checked')).map(cb => {
+        const postItem = cb.closest('.post-item');
+        return {
+            postItem: postItem,
+            ids: cardPostIds(postItem),
+            platforms: cardPlatforms(postItem),
+        };
+    });
+}
+
+function selectedPostIds() {
+    return selectedCards().flatMap(card => card.ids);
 }
 
 function updateSelectedCount() {
     const scoped = !!selectAllScope;
-    const selected = document.querySelectorAll('.post-select-checkbox:checked');
+    const cards = selectedCards();
     const scopeInfo = scoped
         ? scopeCounts(selectAllScope.filters.platform || null, selectAllScope.byPlatform)
         : null;
-    const count = scoped ? selectAllScope.total : selected.length;
+    const count = scoped ? selectAllScope.total : cards.length;
     document.getElementById('selected-count').textContent = count;
 
-    // Count only visible checkboxes for "all selected" state
-    const visibleCheckboxes = Array.from(document.querySelectorAll('.post-select-checkbox')).filter(cb => {
-        const postItem = cb.closest('.post-item');
-        return postItem && postItem.style.display !== 'none' && !postItem.classList.contains('d-none');
-    });
+    const visibleCheckboxes = visiblePostCheckboxes();
 
     const deleteBtn = document.getElementById('delete-selected-btn');
     const queueBtn = document.getElementById('queue-selected-btn');
@@ -4832,13 +4851,7 @@ function updateSelectedCount() {
         // pages we can't know the used/unused split, so default to "Mark as Used".
         let allUsed = false;
         if (!scoped) {
-            let usedCount = 0;
-            selected.forEach(cb => {
-                const postItem = cb.closest('.post-item');
-                if (postItem && postItem.querySelector('.used-badge')) {
-                    usedCount++;
-                }
-            });
+            const usedCount = cards.filter(c => c.postItem && c.postItem.querySelector('.used-badge')).length;
             allUsed = usedCount === count;
         }
         document.getElementById('mark-used-count').textContent = count;
@@ -4854,6 +4867,8 @@ function updateSelectedCount() {
             markUsedBtn.dataset.action = 'use';
         }
 
+        // Queueing and publishing are per platform, so these count platform
+        // destinations across the selected cards, not the cards themselves.
         let queueableCount = 0;
         let queuedCount = 0;
         let postableCount = 0;
@@ -4864,44 +4879,28 @@ function updateSelectedCount() {
             queuedCount = 0;
             postableCount = scopeInfo.postable;
         } else {
-            selected.forEach(cb => {
-                const card = cb.closest('.social-copy-card');
-                const platform = card ? card.dataset.platform : '';
-                if (platform === 'linkedin' || platform === 'threads') {
-                    postableCount++;
-                    const postItem = cb.closest('.post-item');
-                    const queueToggleBtn = postItem.querySelector('.queue-toggle-btn');
-                    const isQueued = queueToggleBtn && queueToggleBtn.dataset.queued === 'true';
-                    if (isQueued) {
+            cards.forEach(card => {
+                selectedChips(card).forEach(chip => {
+                    const platform = chip.dataset.platform;
+                    if (SCOPE_POSTABLE_PLATFORMS.includes(platform)) postableCount++;
+                    if (!SCOPE_QUEUEABLE_PLATFORMS.includes(platform)) return;
+                    const queueChip = chip.querySelector('.chip-queue');
+                    if (queueChip && queueChip.dataset.queued === 'true') {
                         queuedCount++;
                     } else {
                         queueableCount++;
                     }
-                }
+                });
             });
         }
 
         document.getElementById('queue-selected-count').textContent = queueableCount;
         document.getElementById('unqueue-selected-count').textContent = queuedCount;
         document.getElementById('post-now-count').textContent = postableCount;
-        
-        if (queueableCount > 0) {
-            queueBtn.classList.remove('d-none');
-        } else {
-            queueBtn.classList.add('d-none');
-        }
-        
-        if (queuedCount > 0) {
-            unqueueBtn.classList.remove('d-none');
-        } else {
-            unqueueBtn.classList.add('d-none');
-        }
-        
-        if (postableCount > 0) {
-            postNowBtn.classList.remove('d-none');
-        } else {
-            postNowBtn.classList.add('d-none');
-        }
+
+        queueBtn.classList.toggle('d-none', queueableCount === 0);
+        unqueueBtn.classList.toggle('d-none', queuedCount === 0);
+        postNowBtn.classList.toggle('d-none', postableCount === 0);
     } else {
         deleteBtn.classList.add('d-none');
         queueBtn.classList.add('d-none');
@@ -4912,7 +4911,7 @@ function updateSelectedCount() {
         markUsedBtn.classList.add('d-none');
         postNowBtn.classList.add('d-none');
     }
-    
+
     const selectAllBtn = document.getElementById('select-all-btn');
     if (selectAllBtn) {
         // Check if all VISIBLE checkboxes are selected
@@ -4920,6 +4919,18 @@ function updateSelectedCount() {
         const allChecked = visibleCheckboxes.length > 0 && visibleCheckboxes.length === visibleSelected.length;
         selectAllBtn.innerHTML = allChecked ? '☐ Deselect All' : '☑️ Select All';
     }
+}
+
+// A card's ticked platforms, narrowed to the platform filter when one is set —
+// the same rule cardPostIds() follows, so counts match what actions will do.
+function selectedChips(card) {
+    if (!card.postItem) return [];
+    const el = document.getElementById('filter-platform');
+    const platform = el ? el.value : '';
+    const selector = platform
+        ? `.platform-chip.is-on[data-platform="${platform}"]`
+        : '.platform-chip.is-on';
+    return Array.from(card.postItem.querySelectorAll(selector));
 }
 
 async function deleteSelectedPosts() {
@@ -4961,15 +4972,15 @@ async function deleteSelectedPosts() {
         return;
     }
 
-    const selected = document.querySelectorAll('.post-select-checkbox:checked');
-    const postIds = Array.from(selected).map(cb => parseInt(cb.dataset.postId));
+    const cards = selectedCards();
+    const postIds = cards.flatMap(card => card.ids);
 
     if (postIds.length === 0) {
         alert('No posts selected');
         return;
     }
 
-    if (!confirm(`Delete ${postIds.length} selected post${postIds.length !== 1 ? 's' : ''}? This cannot be undone.`)) {
+    if (!confirm(`Delete ${cards.length} selected post${cards.length !== 1 ? 's' : ''}? This cannot be undone.`)) {
         return;
     }
 
@@ -4981,48 +4992,44 @@ async function deleteSelectedPosts() {
     .then(response => response.json())
     .then(data => {
         if (data.success) {
-            postIds.forEach(postId => {
-                const postItem = document.querySelector(`.post-item[data-post-id="${postId}"]`);
-                if (postItem) {
-                    const card = postItem.closest('.social-copy-card');
-                    const allPosts = card.querySelectorAll('.post-item');
-                    if (allPosts.length === 1) {
-                        card.remove();
-                    } else {
-                        postItem.remove();
-                    }
-                }
-            });
-            
-            document.querySelectorAll('.social-copy-card').forEach(card => {
-                const remainingPosts = card.querySelectorAll('.post-item');
-                if (remainingPosts.length === 0) {
-                    card.remove();
+            // A platform filter narrows a card to that platform's post, so what
+            // is left of the card has to be re-read rather than assumed gone.
+            cards.forEach(card => {
+                if (!card.postItem) return;
+                const remaining = cardPostIds(card.postItem, false).filter(id => !card.ids.includes(id));
+                if (remaining.length === 0) {
+                    card.postItem.remove();
+                    adjustPostCountBadge(-1);
                 } else {
-                    remainingPosts.forEach((p, i) => {
-                        const badge = p.querySelector('.badge.bg-secondary');
-                        if (badge) badge.textContent = `Post ${i + 1}`;
-                        p.classList.remove('mt-3', 'pt-3', 'border-top');
-                        if (i > 0) p.classList.add('mt-3', 'pt-3', 'border-top');
-                    });
-                    const countBadge = card.querySelector('.social-copy-header .badge');
-                    if (countBadge) {
-                        countBadge.textContent = `${remainingPosts.length} post${remainingPosts.length !== 1 ? 's' : ''}`;
-                    }
+                    refreshCard(card.postItem, remaining);
                 }
             });
-            
-            const container = document.getElementById('saved-posts-container');
-            if (container && container.children.length === 0) {
-                document.getElementById('saved-posts-section').remove();
-            }
-            
+
             toggleSelectMode();
-            showToast(`Deleted ${data.deleted_count} posts`, 'success');
+            showToast(`Deleted ${data.deleted_count} post${data.deleted_count !== 1 ? 's' : ''}`, 'success');
         } else {
             alert('Error: ' + (data.error || 'Failed to delete posts'));
         }
     });
+}
+
+// Re-render a card that lost some of its platforms, using any surviving row.
+async function refreshCard(postItem, remainingIds) {
+    if (!remainingIds.length) {
+        postItem.remove();
+        adjustPostCountBadge(-1);
+        return;
+    }
+    const body = new FormData();
+    body.append('post_ids', remainingIds.join(','));
+    if (postItem.dataset.postIndex) body.append('display_index', postItem.dataset.postIndex);
+    try {
+        const res = await fetch(`/compose/post/${remainingIds[0]}/card`, { method: 'POST', body: body });
+        const data = await res.json();
+        if (data.success) replaceCard(postItem, data.html);
+    } catch (e) {
+        // Leaving the stale card is better than blanking it; a reload fixes it.
+    }
 }
 
 async function markUsedSelectedPosts() {
@@ -5067,8 +5074,8 @@ async function markUsedSelectedPosts() {
         return;
     }
 
-    const selected = document.querySelectorAll('.post-select-checkbox:checked');
-    const postIds = Array.from(selected).map(cb => parseInt(cb.dataset.postId));
+    const cards = selectedCards();
+    const postIds = cards.flatMap(card => card.ids);
 
     if (postIds.length === 0) {
         alert('No posts selected');
@@ -5090,40 +5097,7 @@ async function markUsedSelectedPosts() {
         btn.disabled = false;
 
         if (data.success) {
-            postIds.forEach(postId => {
-                const postItem = document.querySelector(`.post-item[data-post-id="${postId}"]`);
-                if (!postItem) return;
-
-                const toggleBtn = postItem.querySelector('[onclick*="toggleUsed"]');
-                const usedBadge = postItem.querySelector('.used-badge');
-
-                if (markAsUsed) {
-                    if (toggleBtn) {
-                        toggleBtn.innerHTML = '✓';
-                        toggleBtn.classList.remove('btn-outline-secondary');
-                        toggleBtn.classList.add('btn-outline-success');
-                    }
-                    if (!usedBadge) {
-                        const badgeContainer = postItem.querySelector('.d-flex.align-items-center.gap-2');
-                        if (badgeContainer) {
-                            const newBadge = document.createElement('span');
-                            newBadge.className = 'badge bg-success used-badge';
-                            newBadge.textContent = '✓ Used';
-                            badgeContainer.appendChild(newBadge);
-                        }
-                    }
-                } else {
-                    if (toggleBtn) {
-                        toggleBtn.innerHTML = '○';
-                        toggleBtn.classList.remove('btn-outline-success');
-                        toggleBtn.classList.add('btn-outline-secondary');
-                    }
-                    if (usedBadge) {
-                        usedBadge.remove();
-                    }
-                }
-            });
-
+            cards.forEach(card => setCardUsedUI(card.postItem, markAsUsed));
             toggleSelectMode();
             const action = markAsUsed ? 'used' : 'unused';
             showToast(`Marked ${data.updated_count} post${data.updated_count !== 1 ? 's' : ''} as ${action}`, 'success');
@@ -5139,7 +5113,6 @@ async function markUsedSelectedPosts() {
 }
 
 async function postNowSelectedPosts() {
-    const postable = ['linkedin', 'threads', 'facebook', 'twitter', 'instagram'];
     const scoped = !!selectAllScope;
 
     const postsToPublish = [];
@@ -5153,40 +5126,37 @@ async function postNowSelectedPosts() {
             return;
         }
         posts.forEach(p => {
-            if (postable.includes(p.platform)) {
+            if (SCOPE_POSTABLE_PLATFORMS.includes(p.platform)) {
                 postsToPublish.push({
                     postId: p.id,
                     platform: p.platform,
-                    postItem: document.querySelector(`.post-item[data-post-id="${p.id}"]`),
+                    postItem: cardForPostId(p.id),
                 });
             }
         });
     } else {
-        const selected = document.querySelectorAll('.post-select-checkbox:checked');
-        selected.forEach(cb => {
-            const card = cb.closest('.social-copy-card');
-            const platform = card ? card.dataset.platform : '';
-            if (postable.includes(platform)) {
+        // One entry per ticked platform of every selected card.
+        selectedCards().forEach(card => {
+            selectedChips(card).forEach(chip => {
+                const platform = chip.dataset.platform;
+                if (!SCOPE_POSTABLE_PLATFORMS.includes(platform)) return;
                 postsToPublish.push({
-                    postId: parseInt(cb.dataset.postId),
+                    postId: parseInt(chip.dataset.platformPostId, 10),
                     platform: platform,
-                    postItem: cb.closest('.post-item'),
+                    postItem: card.postItem,
                 });
-            }
+            });
         });
     }
 
     if (postsToPublish.length === 0) {
-        alert('No LinkedIn, Threads, Facebook, Twitter, or Instagram posts selected');
+        alert('No publishable platforms selected');
         return;
     }
 
-    if ((postsToPublish.some(p => p.platform === 'linkedin') && !linkedinConnected) ||
-        (postsToPublish.some(p => p.platform === 'threads') && !threadsConnected) ||
-        (postsToPublish.some(p => p.platform === 'facebook') && !facebookConnected) ||
-        (postsToPublish.some(p => p.platform === 'twitter') && !twitterConnected) ||
-        (postsToPublish.some(p => p.platform === 'instagram') && !instagramConnected)) {
-        alert('Please connect the required platforms first');
+    const missing = [...new Set(postsToPublish.map(p => p.platform))].filter(p => !platformConnected(p));
+    if (missing.length) {
+        alert('Please connect these platforms first: ' + missing.map(p => PLATFORM_LABELS[p] || p).join(', '));
         return;
     }
 
@@ -5208,6 +5178,7 @@ async function postNowSelectedPosts() {
     let successCount = 0;
     let errorCount = 0;
     const errors = [];
+    const touched = new Set();
 
     for (const post of postsToPublish) {
         try {
@@ -5218,23 +5189,8 @@ async function postNowSelectedPosts() {
 
             if (data.success) {
                 successCount++;
-                if (post.postItem) {
-                    const toggleBtn = post.postItem.querySelector('[onclick*="toggleUsed"]');
-                    if (toggleBtn) {
-                        toggleBtn.innerHTML = '✓';
-                        toggleBtn.classList.remove('btn-outline-secondary');
-                        toggleBtn.classList.add('btn-outline-success');
-                    }
-                    if (!post.postItem.querySelector('.used-badge')) {
-                        const badgeContainer = post.postItem.querySelector('.d-flex.align-items-center.gap-2');
-                        if (badgeContainer) {
-                            const newBadge = document.createElement('span');
-                            newBadge.className = 'badge bg-success used-badge';
-                            newBadge.textContent = '✓ Used';
-                            badgeContainer.appendChild(newBadge);
-                        }
-                    }
-                }
+                markChipPosted(post.postItem, post.platform, postedUrlFrom(post.platform, data));
+                if (post.postItem) touched.add(post.postItem);
             } else {
                 errorCount++;
                 errors.push(`${post.platform} post ${post.postId}: ${data.error || 'Unknown error'}`);
@@ -5249,6 +5205,7 @@ async function postNowSelectedPosts() {
     btn.disabled = false;
 
     const wasScoped = scoped;
+    touched.forEach(item => refreshCardUsedState(item));
     toggleSelectMode();
 
     if (errorCount === 0) {
@@ -5282,9 +5239,9 @@ async function queueSelectedPosts() {
             alert('No queueable posts selected (only LinkedIn and Threads posts can be queued)');
             return;
         }
-        if ((queueablePlatforms.includes('linkedin') && !linkedinConnected) ||
-            (queueablePlatforms.includes('threads') && !threadsConnected)) {
-            alert('Please connect the required platforms first');
+        const missing = queueablePlatforms.filter(p => !platformConnected(p));
+        if (missing.length) {
+            alert('Please connect these platforms first: ' + missing.map(p => PLATFORM_LABELS[p] || p).join(', '));
             return;
         }
 
@@ -5326,19 +5283,19 @@ async function queueSelectedPosts() {
         return;
     }
 
-    const selected = document.querySelectorAll('.post-select-checkbox:checked');
-
+    // One queue entry per queueable, not-yet-queued platform of each card.
     const postsToQueue = [];
-    selected.forEach(cb => {
-        const card = cb.closest('.social-copy-card');
-        const platform = card ? card.dataset.platform : '';
-        if (platform === 'linkedin' || platform === 'threads') {
+    selectedCards().forEach(card => {
+        selectedChips(card).forEach(chip => {
+            if (!SCOPE_QUEUEABLE_PLATFORMS.includes(chip.dataset.platform)) return;
+            const queueChip = chip.querySelector('.chip-queue');
+            if (queueChip && queueChip.dataset.queued === 'true') return;
             postsToQueue.push({
-                postId: parseInt(cb.dataset.postId),
-                platform: platform,
-                btn: cb.closest('.post-item').querySelector('.btn-outline-success')
+                postId: parseInt(chip.dataset.platformPostId, 10),
+                platform: chip.dataset.platform,
+                btn: queueChip,
             });
-        }
+        });
     });
 
     if (postsToQueue.length === 0) {
@@ -5346,40 +5303,34 @@ async function queueSelectedPosts() {
         return;
     }
 
-    if ((postsToQueue.some(p => p.platform === 'linkedin') && !linkedinConnected) ||
-        (postsToQueue.some(p => p.platform === 'threads') && !threadsConnected) ||
-        (postsToQueue.some(p => p.platform === 'twitter') && !twitterConnected)) {
-        alert('Please connect the required platforms first');
+    const missing = [...new Set(postsToQueue.map(p => p.platform))].filter(p => !platformConnected(p));
+    if (missing.length) {
+        alert('Please connect these platforms first: ' + missing.map(p => PLATFORM_LABELS[p] || p).join(', '));
         return;
     }
-    
+
     const queueBtn = document.getElementById('queue-selected-btn');
     const originalText = queueBtn.innerHTML;
     queueBtn.innerHTML = '⏳ Adding...';
     queueBtn.disabled = true;
-    
+
     let successCount = 0;
     let errorCount = 0;
-    
+
     for (const post of postsToQueue) {
         try {
             const formData = new FormData();
             formData.append('platform', post.platform);
-            
+
             const response = await fetch(`/compose/post/${post.postId}/queue`, {
                 method: 'POST',
                 body: formData
             });
             const data = await response.json();
-            
+
             if (data.success) {
                 successCount++;
-                if (post.btn) {
-                    post.btn.innerHTML = '✅';
-                    post.btn.classList.remove('btn-outline-success');
-                    post.btn.classList.add('btn-success');
-                    post.btn.disabled = true;
-                }
+                if (post.btn) setChipQueuedUI(post.btn, true, data.scheduled_for);
             } else {
                 errorCount++;
             }
@@ -5387,70 +5338,60 @@ async function queueSelectedPosts() {
             errorCount++;
         }
     }
-    
+
     queueBtn.innerHTML = originalText;
     queueBtn.disabled = false;
-    
+
     if (errorCount === 0) {
         showToast(`Added ${successCount} post${successCount !== 1 ? 's' : ''} to queue`, 'success');
     } else {
         showToast(`Added ${successCount}, failed ${errorCount}`, errorCount > successCount ? 'error' : 'warning');
     }
-    
+
     toggleSelectMode();
 }
 
 async function unqueueSelectedPosts() {
-    const selected = document.querySelectorAll('.post-select-checkbox:checked');
-    
     const postsToUnqueue = [];
-    selected.forEach(cb => {
-        const postItem = cb.closest('.post-item');
-        const queueBtn = postItem.querySelector('.queue-toggle-btn');
-        if (queueBtn && queueBtn.dataset.queued === 'true') {
-            const card = cb.closest('.social-copy-card');
-            const platform = card ? card.dataset.platform : '';
+    selectedCards().forEach(card => {
+        selectedChips(card).forEach(chip => {
+            const queueChip = chip.querySelector('.chip-queue');
+            if (!queueChip || queueChip.dataset.queued !== 'true') return;
             postsToUnqueue.push({
-                postId: parseInt(cb.dataset.postId),
-                platform: platform,
-                queueBtn: queueBtn
+                postId: parseInt(chip.dataset.platformPostId, 10),
+                platform: chip.dataset.platform,
+                queueBtn: queueChip,
             });
-        }
+        });
     });
-    
+
     if (postsToUnqueue.length === 0) {
         alert('No queued posts selected');
         return;
     }
-    
+
     if (!confirm(`Remove ${postsToUnqueue.length} post${postsToUnqueue.length !== 1 ? 's' : ''} from the queue?`)) {
         return;
     }
-    
+
     const unqueueBtn = document.getElementById('unqueue-selected-btn');
     const originalText = unqueueBtn.innerHTML;
     unqueueBtn.innerHTML = '⏳ Removing...';
     unqueueBtn.disabled = true;
-    
+
     let successCount = 0;
     let errorCount = 0;
-    
+
     for (const post of postsToUnqueue) {
         try {
             const response = await fetch(`/compose/post/${post.postId}/unqueue`, {
                 method: 'POST'
             });
             const data = await response.json();
-            
+
             if (data.success) {
                 successCount++;
-                // Update the queue button UI
-                post.queueBtn.dataset.queued = 'false';
-                post.queueBtn.classList.remove('btn-success');
-                post.queueBtn.classList.add('btn-outline-success');
-                post.queueBtn.innerHTML = '➕';
-                post.queueBtn.disabled = false;
-                post.queueBtn.title = 'Add to queue';
+                setChipQueuedUI(post.queueBtn, false);
             } else {
                 errorCount++;
             }
@@ -5458,32 +5399,43 @@ async function unqueueSelectedPosts() {
             errorCount++;
         }
     }
-    
+
     unqueueBtn.innerHTML = originalText;
     unqueueBtn.disabled = false;
-    
+
     if (errorCount === 0) {
         showToast(`Removed ${successCount} post${successCount !== 1 ? 's' : ''} from queue`, 'success');
     } else {
         showToast(`Removed ${successCount}, failed ${errorCount}`, errorCount > successCount ? 'error' : 'warning');
     }
-    
+
     toggleSelectMode();
 }
 
 // Bulk image operations
 let bulkAddImageModal = null;
 
+// Bulk image ops always cover every row of the selected cards, even under a
+// platform filter: the image is part of what groups the rows, so changing it on
+// one platform alone would break the card apart.
+function selectedCardImageTargets() {
+    const cards = selectedCards();
+    return {
+        postIds: cards.flatMap(card => cardPostIds(card.postItem, false)),
+        // The per-card DOM (preview, hidden inputs) is keyed by the card's id.
+        domIds: cards.map(card => card.postItem.dataset.postId),
+    };
+}
+
 function removeImageFromSelected() {
-    const selected = document.querySelectorAll('.post-select-checkbox:checked');
-    const postIds = Array.from(selected).map(cb => parseInt(cb.dataset.postId));
-    
+    const { postIds, domIds } = selectedCardImageTargets();
+
     if (postIds.length === 0) {
         alert('No posts selected');
         return;
     }
     
-    if (!confirm(`Remove images from ${postIds.length} selected post${postIds.length !== 1 ? 's' : ''}?`)) {
+    if (!confirm(`Remove images from ${domIds.length} selected post${domIds.length !== 1 ? 's' : ''}?`)) {
         return;
     }
     
@@ -5504,7 +5456,7 @@ function removeImageFromSelected() {
         
         if (data.success) {
             // Update UI - hide image previews for selected posts
-            postIds.forEach(postId => {
+            domIds.forEach(postId => {
                 const preview = document.getElementById(`image-preview-${postId}`);
                 const addBtn = document.getElementById(`add-image-btn-${postId}`);
                 const editForm = document.getElementById(`image-edit-form-${postId}`);
@@ -5690,9 +5642,8 @@ function applyBulkImage() {
 }
 
 function applyBulkImageWithUrl(imageUrl) {
-    const selected = document.querySelectorAll('.post-select-checkbox:checked');
-    const postIds = Array.from(selected).map(cb => parseInt(cb.dataset.postId));
-    
+    const { postIds, domIds } = selectedCardImageTargets();
+
     if (postIds.length === 0) {
         alert('No posts selected');
         return;
@@ -5715,7 +5666,7 @@ function applyBulkImageWithUrl(imageUrl) {
         
         if (data.success) {
             // Update UI - show image previews for selected posts
-            postIds.forEach(postId => {
+            domIds.forEach(postId => {
                 const preview = document.getElementById(`image-preview-${postId}`);
                 const addBtn = document.getElementById(`add-image-btn-${postId}`);
                 const editForm = document.getElementById(`image-edit-form-${postId}`);
@@ -5752,9 +5703,10 @@ function applyBulkImageWithUrl(imageUrl) {
 }
 
 async function findStockImagesForSelected() {
-    const selected = document.querySelectorAll('.post-select-checkbox:checked');
-    const postIds = Array.from(selected).map(cb => parseInt(cb.dataset.postId));
-    
+    // Keyed by card: one search per card, applied to all of its platforms.
+    const cards = selectedCards().filter(card => card.postItem);
+    const postIds = cards.map(card => card.postItem.dataset.postId);
+
     if (postIds.length === 0) {
         alert('No posts selected');
         return;
@@ -5800,11 +5752,11 @@ async function findStockImagesForSelected() {
             if (data.success && data.images && data.images.length > 0) {
                 const imageUrl = data.images[0].url;
                 
-                // Apply the image to the post
+                // Apply the image to every platform this post goes to
                 const applyResponse = await fetch(`/compose/post/${postId}/stock-image`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ image_url: imageUrl })
+                    body: JSON.stringify({ image_url: imageUrl, post_ids: cardIdsParam(postId) })
                 });
                 const applyData = await applyResponse.json();
                 
@@ -5856,8 +5808,10 @@ async function findStockImagesForSelected() {
 }
 
 // Total saved posts per platform (from the server, across ALL posts — not just
-// the page currently loaded). Used for the Queue-All modal counts.
+// the page currently loaded). Used for the Queue-All modal counts. These count
+// platform rows, which is what queueing acts on; POSTS_TOTAL counts cards.
 const PLATFORM_TOTALS = {{ platform_totals | tojson }};
+const POSTS_TOTAL = {{ group_total | default(0) }};
 
 function showQueueAllModal() {
     // "Queue All" is server-side and queues every unscheduled post, so show the
@@ -6080,9 +6034,11 @@ function initLoadedPosts(container) {
     }
 }
 
-// Add, update or remove a card's "Load more" control for the set now displayed.
-function syncLoadMore(card, platform, shown, total) {
-    let wrap = card.querySelector('.load-more-container');
+// Add, update or remove the list's "Load more" control for the set now shown.
+function syncLoadMore(shown, total) {
+    const body = document.querySelector('#saved-posts-container .social-copy-body');
+    if (!body) return;
+    let wrap = body.querySelector('.load-more-container');
     if (shown >= total) {
         if (wrap) wrap.remove();
         return;
@@ -6090,9 +6046,8 @@ function syncLoadMore(card, platform, shown, total) {
     if (!wrap) {
         wrap = document.createElement('div');
         wrap.className = 'text-center mt-3 pt-3 border-top load-more-container';
-        wrap.innerHTML = `<button class="btn btn-sm btn-outline-secondary load-more-btn"
-                data-platform="${platform}" onclick="loadMorePosts('${platform}', this)"></button>`;
-        const postsContainer = card.querySelector('.posts-container');
+        wrap.innerHTML = '<button class="btn btn-sm btn-outline-secondary load-more-btn" onclick="loadMorePosts(this)"></button>';
+        const postsContainer = body.querySelector('.posts-container');
         postsContainer.insertAdjacentElement('afterend', wrap);
     }
     const btn = wrap.querySelector('.load-more-btn');
@@ -6104,25 +6059,15 @@ function syncLoadMore(card, platform, shown, total) {
 // Re-render the saved-posts list for the current filter bar.
 //
 // This used to hide non-matching .post-item nodes in place, which quietly capped
-// filtering at the ~20 posts per platform the page had loaded: a matching post
-// further down the list could never appear, however the filters were set. The
-// server now decides what matches, so filters reach every saved post.
+// filtering at the posts the page had loaded: a matching post further down the
+// list could never appear, however the filters were set. The server now decides
+// what matches, so filters reach every saved post.
 async function applyPostFilters() {
     // Filters change which posts are loaded, so drop any across-pages selection
     // to avoid a stale "all N selected" banner.
     clearSelectAllScope();
 
     const filters = currentPostFilters();
-    const platformFilter = filters.platform;
-    const cards = Array.from(document.querySelectorAll('#saved-posts-container .social-copy-card'));
-
-    // Always keep the card (and its "Write a New X Post" affordance) visible so
-    // any platform can be authored from scratch, even when all of its posts are
-    // filtered out. Only hide it when a *different* platform is selected.
-    cards.forEach(card => {
-        card.style.display = (platformFilter && platformFilter !== card.dataset.platform) ? 'none' : '';
-    });
-
     const resultsSpan = document.getElementById('filter-results-count');
     const signature = JSON.stringify(filters);
     if (signature === renderedFilterSignature) {
@@ -6132,21 +6077,17 @@ async function applyPostFilters() {
         return;
     }
 
+    const container = document.getElementById('posts-container');
+    if (!container) return;
+
     const seq = ++filterRequestSeq;
     if (resultsSpan) resultsSpan.textContent = 'Filtering…';
 
-    // Only fetch the platforms still on screen.
-    const shown = cards.filter(card => card.style.display !== 'none');
-    let pages;
+    let data;
     try {
-        pages = await Promise.all(shown.map(card =>
-            fetch('/compose/posts/more' + postFilterQuery(filters, {
-                platform: card.dataset.platform, offset: '0',
-            })).then(res => res.json().then(data => {
-                if (!res.ok || data.error) throw new Error(data.error || 'Failed to filter posts');
-                return { card: card, platform: card.dataset.platform, data: data };
-            }))
-        ));
+        const res = await fetch('/compose/posts/more' + postFilterQuery(filters, { offset: '0' }));
+        data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Failed to filter posts');
     } catch (e) {
         if (seq !== filterRequestSeq) return;
         if (resultsSpan) resultsSpan.textContent = '';
@@ -6155,31 +6096,22 @@ async function applyPostFilters() {
     }
     if (seq !== filterRequestSeq) return;  // a newer filter render already landed
 
-    let matching = 0;
-    pages.forEach(({ card, platform, data }) => {
-        const container = document.getElementById(`posts-container-${platform}`);
-        if (container) {
-            container.innerHTML = data.html;
-            initLoadedPosts(container);
-        }
-        matching += data.total;
-
-        const countBadge = card.querySelector('.social-copy-header .badge');
-        if (countBadge) {
-            const platformTotal = PLATFORM_TOTALS[platform] || data.total;
-            countBadge.textContent = anyFilterActive(filters)
-                ? `${data.total} of ${platformTotal} posts`
-                : `${data.total} post${data.total !== 1 ? 's' : ''}`;
-        }
-        syncLoadMore(card, platform, container ? container.querySelectorAll('.post-item').length : 0, data.total);
-    });
+    container.innerHTML = data.html;
+    initLoadedPosts(container);
+    syncLoadMore(container.querySelectorAll('.post-item').length, data.total);
 
     renderedFilterSignature = signature;
 
+    const countBadge = document.getElementById('posts-count');
+    if (countBadge) {
+        countBadge.textContent = anyFilterActive(filters)
+            ? `${data.total} of ${POSTS_TOTAL} posts`
+            : `${data.total} saved post${data.total !== 1 ? 's' : ''}`;
+    }
+
     if (resultsSpan) {
-        const everything = Object.values(PLATFORM_TOTALS).reduce((a, b) => a + b, 0);
         resultsSpan.textContent = anyFilterActive(filters)
-            ? `Showing ${matching} of ${everything}`
+            ? `Showing ${data.total} of ${POSTS_TOTAL}`
             : '';
     }
 
@@ -6353,8 +6285,11 @@ async function doSearch(preserveState = false) {
         const id = String(post.id);
         return {
             id: id,
+            postIds: (post.post_ids || [post.id]).join(','),
             content: content,
             platform: post.platform || 'unknown',
+            // Every platform this one card goes to — the edit covers all of them.
+            platforms: post.platforms || [post.platform || 'unknown'],
             index: post.index != null ? String(post.index) : '?',
             matchCount: post.match_count,
             highlightedContent: highlightMatches(content, findText, caseSensitive, wholeWord, id),
@@ -6363,7 +6298,8 @@ async function doSearch(preserveState = false) {
     });
     // The inline editor and preview helpers read from here.
     searchReplacePostData = matchingPosts.map(p => ({
-        id: p.id, content: p.content, platform: p.platform, index: p.index
+        id: p.id, postIds: p.postIds, content: p.content,
+        platform: p.platform, platforms: p.platforms, index: p.index
     }));
     searchResultInfo = {
         matchedPosts: data.matched_posts,
@@ -6410,10 +6346,11 @@ async function doSearch(preserveState = false) {
 
     let html = '';
     matchingPosts.forEach(post => {
-        const platformIcon = post.platform === 'linkedin' ? '💼' : 
-                            post.platform === 'threads' ? '🧵' : '📱';
-        const platformColor = post.platform === 'linkedin' ? '#0077B5' : 
-                             post.platform === 'threads' ? '#000000' : '#6c757d';
+        const platformColor = PLATFORM_CHIP_COLORS[post.platform] || '#6c757d';
+        // One badge per platform the card covers, so it's clear what a replace touches.
+        const platformBadges = post.platforms.map(p =>
+            `<span class="badge" style="background-color: ${PLATFORM_CHIP_COLORS[p] || '#6c757d'};">` +
+            `${PLATFORM_CHIP_ICONS[p] || '📱'} ${PLATFORM_LABELS[p] || p}</span>`).join(' ');
         
         const editRows = Math.min(14, Math.max(4, post.content.split('\n').length + 1));
 
@@ -6423,7 +6360,7 @@ async function doSearch(preserveState = false) {
                     <div class="d-flex align-items-center gap-2">
                         <input type="checkbox" class="form-check-input search-post-checkbox"
                                data-post-id="${post.id}" checked onchange="updateSearchSelectedCount()">
-                        <span class="badge" style="background-color: ${platformColor};">${platformIcon} ${post.platform.charAt(0).toUpperCase() + post.platform.slice(1)}</span>
+                        ${platformBadges}
                         <span class="badge bg-secondary">Post ${post.index}</span>
                         <span class="badge bg-warning text-dark">${post.matchCount} match${post.matchCount !== 1 ? 'es' : ''}</span>
                     </div>
@@ -6696,6 +6633,8 @@ function saveSearchResultEdit(postId) {
 
     const formData = new FormData();
     formData.append('content', content);
+    // The result stands for a whole card, so the edit covers all of its rows.
+    formData.append('post_ids', post ? post.postIds : cardIdsParam(postId));
 
     fetch(`/compose/post/${postId}/edit`, {
         method: 'POST',
@@ -6735,13 +6674,25 @@ function saveSearchResultEdit(postId) {
 }
 
 // Keep the post as rendered on the page behind the modal in sync with the edit
+// Find the card showing a given saved post — it may be the card's primary row
+// or one of its twins, and only the primary row keys the card's element ids.
+function cardForPostId(postId) {
+    const direct = document.querySelector(`.post-item[data-post-id="${postId}"]`);
+    if (direct) return direct;
+    return Array.from(document.querySelectorAll('.post-item')).find(item =>
+        (item.dataset.postIds || '').split(',').includes(String(postId))) || null;
+}
+
 function syncPostContentOnPage(postId, content) {
-    const textEl = document.getElementById(`saved-post-${postId}`);
+    const card = cardForPostId(postId);
+    if (!card) return;
+    const cardId = card.dataset.postId;
+    const textEl = document.getElementById(`saved-post-${cardId}`);
     if (textEl) {
         textEl.textContent = content;
         textEl.dataset.originalContent = content;
     }
-    const editTextarea = document.getElementById(`edit-textarea-${postId}`);
+    const editTextarea = document.getElementById(`edit-textarea-${cardId}`);
     if (editTextarea) editTextarea.value = content;
 }
 
@@ -6864,33 +6815,64 @@ const platformCharLimits = {
     instagram: 2200,
 };
 
-function showAddPostForm(platform) {
-    document.getElementById('add-post-btn-' + platform).classList.add('d-none');
-    document.getElementById('add-post-form-' + platform).classList.remove('d-none');
-    const textarea = document.getElementById('add-post-textarea-' + platform);
+// ============ Writing a new post ============
+// One composer for every platform: tick where it should go, write it once.
+
+function newPostPlatforms() {
+    return Array.from(document.querySelectorAll('#new-post-platforms .platform-chip.is-on'))
+        .map(chip => chip.dataset.platform);
+}
+
+function toggleNewPostPlatform(btn) {
+    const chip = btn.closest('.platform-chip');
+    if (!chip) return;
+    const on = chip.classList.toggle('is-on');
+    const box = chip.querySelector('.chip-box');
+    if (box) box.textContent = on ? '\u2713' : '';
+    updateManualCharCount();
+}
+
+function showAddPostForm() {
+    document.getElementById('add-post-btn').classList.add('d-none');
+    document.getElementById('add-post-form').classList.remove('d-none');
+    const textarea = document.getElementById('add-post-textarea');
     textarea.value = '';
     textarea.focus();
-    updateManualCharCount(platform);
+    updateManualCharCount();
 }
 
-function hideAddPostForm(platform) {
-    document.getElementById('add-post-form-' + platform).classList.add('d-none');
-    document.getElementById('add-post-btn-' + platform).classList.remove('d-none');
+function hideAddPostForm() {
+    document.getElementById('add-post-form').classList.add('d-none');
+    document.getElementById('add-post-btn').classList.remove('d-none');
 }
 
-function updateManualCharCount(platform) {
-    const textarea = document.getElementById('add-post-textarea-' + platform);
-    const counter = document.getElementById('add-post-charcount-' + platform);
+function updateManualCharCount() {
+    const textarea = document.getElementById('add-post-textarea');
+    const counter = document.getElementById('add-post-charcount');
     if (!textarea || !counter) return;
     const len = textarea.value.length;
-    const limit = platformCharLimits[platform] || 5000;
-    counter.textContent = len + ' / ' + limit + ' characters';
+    const platforms = newPostPlatforms();
+    if (platforms.length === 0) {
+        counter.textContent = 'Pick at least one platform';
+        counter.classList.add('text-danger');
+        counter.classList.remove('text-muted');
+        return;
+    }
+    // The tightest limit among the ticked platforms is the one that can bite.
+    let limit = Infinity;
+    let tightest = platforms[0];
+    platforms.forEach(p => {
+        const l = platformCharLimits[p] || 5000;
+        if (l < limit) { limit = l; tightest = p; }
+    });
+    const label = PLATFORM_LABELS[tightest] || tightest;
+    counter.textContent = `${len} / ${limit} characters (${label} limit)`;
     counter.classList.toggle('text-danger', len > limit);
     counter.classList.toggle('text-muted', len <= limit);
 }
 
-function createManualPost(platform) {
-    const textarea = document.getElementById('add-post-textarea-' + platform);
+function createManualPost() {
+    const textarea = document.getElementById('add-post-textarea');
     const content = textarea.value.trim();
     if (!content) {
         alert('Please write some content for your post.');
@@ -6898,8 +6880,14 @@ function createManualPost(platform) {
         return;
     }
 
+    const platforms = newPostPlatforms();
+    if (platforms.length === 0) {
+        alert('Tick at least one platform for this post.');
+        return;
+    }
+
     const formData = new FormData();
-    formData.append('platform', platform);
+    platforms.forEach(p => formData.append('platforms', p));
     formData.append('content', content);
 
     const saveBtn = textarea.closest('.add-post-area').querySelector('.btn-success');

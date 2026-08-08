@@ -1,262 +1,243 @@
-{% macro render_post_item(post, platform, index) %}
-                    <div class="post-item {% if index > 1 %}mt-3 pt-3 border-top{% endif %}" data-post-id="{{ post.id }}" data-post-index="{{ index }}" data-source="{{ 'agent' if post.source_type == 'agent' else 'manual' }}" data-brief="{{ post.brief_id if post.brief_id else '' }}">
-                        <div class="d-flex justify-content-between align-items-center mb-2 post-header">
-                            <div class="d-flex align-items-center gap-2">
+{# One saved post: the copy once, plus a tick for every platform it goes to.
+
+   `group` is a card dict from _enrich_post_group(): `platforms` lists the rows
+   that exist (platform, row id, queue + posted state) and `post_ids` is all of
+   them, which is what the page sends back so a card-wide edit reaches every
+   row. Every element id keys off `group.id` — the card's primary row — so the
+   per-post JS (image editor, Instagram builder, inline edit) needs no notion of
+   groups at all. #}
+{# The one platform table: the chips here, the chip CSS and the JS tables in
+   compose.html, and the Find & Replace badges all read from it. #}
+{% set PLATFORM_META = {
+    'linkedin':  {'label': 'LinkedIn',  'icon': '💼', 'color': '#0077B5', 'tint': 'rgba(0, 119, 181, 0.08)'},
+    'threads':   {'label': 'Threads',   'icon': '🧵', 'color': '#000000', 'tint': 'rgba(0, 0, 0, 0.06)'},
+    'twitter':   {'label': 'X',         'icon': '𝕏', 'color': '#1DA1F2', 'tint': 'rgba(29, 161, 242, 0.08)'},
+    'facebook':  {'label': 'Facebook',  'icon': '📘', 'color': '#1877F2', 'tint': 'rgba(24, 119, 242, 0.08)'},
+    'instagram': {'label': 'Instagram', 'icon': '📷', 'color': '#E4405F', 'tint': 'rgba(228, 64, 95, 0.08)'},
+} %}
+{% set PLATFORM_ORDER = ['linkedin', 'threads', 'twitter', 'facebook', 'instagram'] %}
+
+{% macro render_post_item(group) %}
+{% set entries = {} %}
+{% for entry in group.platforms %}{% set _ = entries.update({entry.platform: entry}) %}{% endfor %}
+                    <div class="post-item" data-post-id="{{ group.id }}"
+                         data-post-ids="{{ group.post_ids | join(',') }}"
+                         data-platforms='{{ group.platform_ids | tojson }}'
+                         data-post-index="{{ group.display_index }}"
+                         data-source="{{ 'agent' if group.source_type == 'agent' else 'manual' }}"
+                         data-brief="{{ group.brief_id if group.brief_id else '' }}">
+                        <div class="d-flex justify-content-between align-items-start gap-2 mb-2 post-header">
+                            <div class="d-flex align-items-center gap-2 flex-wrap">
                                 <input type="checkbox" class="form-check-input post-select-checkbox d-none"
-                                       data-post-id="{{ post.id }}" onchange="onPostCheckboxChange()">
-                                <span class="badge bg-secondary">Post {{ index }}</span>
-                                {% if post.source_type == 'agent' %}
+                                       data-post-id="{{ group.id }}" onchange="onPostCheckboxChange()">
+                                <span class="badge bg-secondary">Post {{ group.display_index }}</span>
+                                {% if group.source_type == 'agent' %}
                                 <span class="badge" style="background-color: #7c5cff;" title="Prepared by the content agent">🤖 Agent</span>
                                 {% endif %}
-                                {% if post.source_type == 'agent' and post.brief_name %}
-                                <a href="/briefs#brief-{{ post.brief_id }}" class="badge text-decoration-none" style="background-color: #ede9ff; color: #5a4bd1;" title="From agent brief: {{ post.brief_name }}">📋 {{ post.brief_name }}</a>
+                                {% if group.source_type == 'agent' and group.brief_name %}
+                                <a href="/briefs#brief-{{ group.brief_id }}" class="badge text-decoration-none" style="background-color: #ede9ff; color: #5a4bd1;" title="From agent brief: {{ group.brief_name }}">📋 {{ group.brief_name }}</a>
                                 {% endif %}
-                                {% if post.used %}
+                                {% if group.used %}
                                 <span class="badge bg-success used-badge">✓ Used</span>
-                                {% endif %}
-                                {% if post.scheduled %}
-                                    {% for sched_platform, sched_time in post.scheduled.items() %}
-                                    <span class="badge {% if sched_platform == 'linkedin' %}text-bg-primary{% elif sched_platform == 'threads' %}text-bg-dark{% elif sched_platform == 'facebook' %}text-bg-info{% elif sched_platform == 'instagram' %}text-bg-danger{% else %}bg-info{% endif %}"
-                                          title="{{ sched_time }}">
-                                        📅 {{ sched_platform|capitalize }}
-                                    </span>
-                                    {% endfor %}
-                                {% endif %}
-                                {% if post.posted %}
-                                    {% for posted_platform, posted_data in post.posted.items() %}
-                                    {% if posted_data.url %}
-                                    <a href="{{ posted_data.url }}" target="_blank" rel="noopener" 
-                                       class="badge text-decoration-none {% if posted_platform == 'linkedin' %}bg-primary{% elif posted_platform == 'threads' %}bg-dark{% elif posted_platform == 'facebook' %}bg-info{% elif posted_platform == 'instagram' %}bg-danger{% else %}bg-success{% endif %}"
-                                       title="Posted {{ posted_data.posted_at[:16] if posted_data.posted_at else '' }} - Click to view">
-                                        🔗 {{ posted_platform|capitalize }}
-                                    </a>
-                                    {% endif %}
-                                    {% endfor %}
                                 {% endif %}
                             </div>
                             <div class="btn-group btn-group-sm post-actions">
-                                <button class="btn btn-outline-secondary" onclick="copySavedPost(this, {{ post.id }})" title="Copy">
+                                <button class="btn btn-outline-secondary" onclick="copySavedPost(this, {{ group.id }})" title="Copy">
                                     📋
                                 </button>
-                                <button class="btn btn-outline-primary" onclick="editPost({{ post.id }})" title="Edit">
+                                <button class="btn btn-outline-primary" onclick="editPost({{ group.id }})" title="Edit">
                                     ✏️
                                 </button>
-                                <button class="btn btn-outline-{{ 'success' if post.used else 'secondary' }}" onclick="toggleUsed({{ post.id }}, this)" title="Mark as used">
-                                    {% if post.used %}✓{% else %}○{% endif %}
+                                <button class="btn btn-outline-{{ 'success' if group.used else 'secondary' }}" onclick="toggleUsed({{ group.id }}, this)" title="Mark as used">
+                                    {% if group.used %}✓{% else %}○{% endif %}
                                 </button>
-                                <button class="btn btn-outline-secondary repost-btn" onclick="repostPost({{ post.id }}, '{{ platform }}', this)" title="Repost to {{ platform|capitalize }}">
-                                    🔁
-                                </button>
-                                {% if post.source_type in ['saved_source', 'url'] %}
-                                <button class="btn btn-outline-secondary refresh-image-btn" onclick="refreshPostImage({{ post.id }}, this)" title="Refresh image from original source (YouTube/article)">
+                                {% if group.source_type in ['saved_source', 'url'] %}
+                                <button class="btn btn-outline-secondary refresh-image-btn" onclick="refreshPostImage({{ group.id }}, this)" title="Refresh image from original source (YouTube/article)">
                                     🖼️
                                 </button>
                                 {% endif %}
-                                {% if platform == 'linkedin' %}
-                                <button class="btn btn-outline-info linkedin-post-btn" onclick="postToLinkedIn({{ post.id }}, this)" title="Post to LinkedIn Now" data-post-id="{{ post.id }}">
-                                    💼
+                                {# Publishing and scheduling are per platform, so they hang off a
+                                   menu of the ticked platforms rather than a button each. #}
+                                <button type="button" class="btn btn-outline-info dropdown-toggle" data-bs-toggle="dropdown" data-bs-boundary="viewport" aria-expanded="false" title="Post now">
+                                    🚀
                                 </button>
-                                {% if post.scheduled and post.scheduled.linkedin %}
-                                <button class="btn btn-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'standalone', 'linkedin', this, true)" title="Click to remove from queue (Scheduled: {{ post.scheduled.linkedin }})" data-post-id="{{ post.id }}" data-platform="linkedin" data-queued="true">
-                                    ✅
-                                </button>
-                                {% else %}
-                                <button class="btn btn-outline-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'standalone', 'linkedin', this, false)" title="Add to Queue" data-post-id="{{ post.id }}" data-platform="linkedin" data-queued="false">
-                                    ➕
-                                </button>
-                                {% endif %}
-                                <button class="btn btn-outline-warning" onclick="openScheduleModal({{ post.id }}, 'standalone', 'linkedin')" title="Schedule for Specific Time">
+                                <ul class="dropdown-menu dropdown-menu-end">
+                                    {% for entry in group.platforms %}
+                                    <li><button class="dropdown-item" type="button" onclick="postNowFromCard(this, {{ entry.id }}, '{{ entry.platform }}')">
+                                        {{ PLATFORM_META.get(entry.platform, {}).get('icon', '📱') }} Post to {{ PLATFORM_META.get(entry.platform, {}).get('label', entry.platform|capitalize) }} now
+                                    </button></li>
+                                    {% endfor %}
+                                    {% if group.platforms | length > 1 %}
+                                    <li><hr class="dropdown-divider"></li>
+                                    <li><button class="dropdown-item fw-semibold" type="button" onclick="postNowAllFromCard(this)">
+                                        🚀 Post to all {{ group.platforms | length }} platforms
+                                    </button></li>
+                                    {% endif %}
+                                </ul>
+                                <button type="button" class="btn btn-outline-warning dropdown-toggle" data-bs-toggle="dropdown" data-bs-boundary="viewport" aria-expanded="false" title="Schedule for a specific time">
                                     📅
                                 </button>
-                                {% elif platform == 'threads' %}
-                                <button class="btn btn-outline-dark threads-post-btn" onclick="postToThreads({{ post.id }}, this)" title="Post to Threads Now" data-post-id="{{ post.id }}">
-                                    🧵
-                                </button>
-                                {% if post.scheduled and post.scheduled.threads %}
-                                <button class="btn btn-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'standalone', 'threads', this, true)" title="Click to remove from queue (Scheduled: {{ post.scheduled.threads }})" data-post-id="{{ post.id }}" data-platform="threads" data-queued="true">
-                                    ✅
-                                </button>
-                                {% else %}
-                                <button class="btn btn-outline-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'standalone', 'threads', this, false)" title="Add to Queue" data-post-id="{{ post.id }}" data-platform="threads" data-queued="false">
-                                    ➕
-                                </button>
-                                {% endif %}
-                                <button class="btn btn-outline-warning" onclick="openScheduleModal({{ post.id }}, 'standalone', 'threads')" title="Schedule for Specific Time">
-                                    📅
-                                </button>
-                                {% elif platform == 'facebook' %}
-                                <button class="btn btn-outline-primary facebook-post-btn" onclick="postToFacebook({{ post.id }}, this)" title="Post to Facebook Now" data-post-id="{{ post.id }}">
-                                    📘
-                                </button>
-                                {% if post.scheduled and post.scheduled.facebook %}
-                                <button class="btn btn-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'standalone', 'facebook', this, true)" title="Click to remove from queue (Scheduled: {{ post.scheduled.facebook }})" data-post-id="{{ post.id }}" data-platform="facebook" data-queued="true">
-                                    ✅
-                                </button>
-                                {% else %}
-                                <button class="btn btn-outline-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'standalone', 'facebook', this, false)" title="Add to Queue" data-post-id="{{ post.id }}" data-platform="facebook" data-queued="false">
-                                    ➕
-                                </button>
-                                {% endif %}
-                                <button class="btn btn-outline-warning" onclick="openScheduleModal({{ post.id }}, 'standalone', 'facebook')" title="Schedule for Specific Time">
-                                    📅
-                                </button>
-                                {% elif platform == 'twitter' %}
-                                <button class="btn btn-outline-info twitter-post-btn" onclick="postToTwitter({{ post.id }}, this)" title="Post to X Now" data-post-id="{{ post.id }}">
-                                    𝕏
-                                </button>
-                                {% if post.scheduled and post.scheduled.twitter %}
-                                <button class="btn btn-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'standalone', 'twitter', this, true)" title="Click to remove from queue (Scheduled: {{ post.scheduled.twitter }})" data-post-id="{{ post.id }}" data-platform="twitter" data-queued="true">
-                                    ✅
-                                </button>
-                                {% else %}
-                                <button class="btn btn-outline-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'standalone', 'twitter', this, false)" title="Add to Queue" data-post-id="{{ post.id }}" data-platform="twitter" data-queued="false">
-                                    ➕
-                                </button>
-                                {% endif %}
-                                <button class="btn btn-outline-warning" onclick="openScheduleModal({{ post.id }}, 'standalone', 'twitter')" title="Schedule for Specific Time">
-                                    📅
-                                </button>
-                                {% elif platform == 'instagram' %}
-                                <button class="btn btn-outline-danger instagram-post-btn" onclick="postToInstagram({{ post.id }}, this)" title="Post to Instagram Now (requires an image)" data-post-id="{{ post.id }}">
-                                    📷
-                                </button>
-                                {% if post.scheduled and post.scheduled.instagram %}
-                                <button class="btn btn-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'standalone', 'instagram', this, true)" title="Click to remove from queue (Scheduled: {{ post.scheduled.instagram }})" data-post-id="{{ post.id }}" data-platform="instagram" data-queued="true">
-                                    ✅
-                                </button>
-                                {% else %}
-                                <button class="btn btn-outline-success queue-toggle-btn" onclick="toggleQueue({{ post.id }}, 'standalone', 'instagram', this, false)" title="Add to Queue" data-post-id="{{ post.id }}" data-platform="instagram" data-queued="false">
-                                    ➕
-                                </button>
-                                {% endif %}
-                                <button class="btn btn-outline-warning" onclick="openScheduleModal({{ post.id }}, 'standalone', 'instagram')" title="Schedule for Specific Time">
-                                    📅
-                                </button>
-                                {% endif %}
-                                <button class="btn btn-outline-danger" onclick="deletePost({{ post.id }}, this)" title="Delete">
+                                <ul class="dropdown-menu dropdown-menu-end">
+                                    {% for entry in group.platforms %}
+                                    <li><button class="dropdown-item" type="button" onclick="openScheduleModal({{ entry.id }}, 'standalone', '{{ entry.platform }}')">
+                                        {{ PLATFORM_META.get(entry.platform, {}).get('icon', '📱') }} Schedule for {{ PLATFORM_META.get(entry.platform, {}).get('label', entry.platform|capitalize) }}
+                                    </button></li>
+                                    {% endfor %}
+                                </ul>
+                                <button class="btn btn-outline-danger" onclick="deletePost({{ group.id }}, this)" title="Delete this post everywhere">
                                     🗑️
                                 </button>
                             </div>
                         </div>
+
+                        {# Destinations. Ticking a platform creates that platform's saved post,
+                           unticking deletes it; the ➕/✅ next to a ticked platform is its queue. #}
+                        <div class="platform-chips mb-2" role="group" aria-label="Platforms this post goes to">
+                            {% for platform in PLATFORM_ORDER %}
+                            {% set entry = entries.get(platform) %}
+                            {% set meta = PLATFORM_META[platform] %}
+                            <span class="platform-chip {% if entry %}is-on{% endif %}" data-platform="{{ platform }}"
+                                  {% if entry %}data-platform-post-id="{{ entry.id }}"{% endif %}>
+                                <button type="button" class="chip-toggle" onclick="togglePostPlatform(this, '{{ platform }}')"
+                                        title="{% if entry %}Remove this post from {{ meta.label }}{% else %}Also post this to {{ meta.label }}{% endif %}">
+                                    <span class="chip-box">{% if entry %}✓{% endif %}</span>
+                                    <span class="chip-icon">{{ meta.icon }}</span>
+                                    {# X's wordmark is its name — printing both reads as "𝕏 X". #}
+                                    {% if platform != 'twitter' %}<span class="chip-name">{{ meta.label }}</span>{% endif %}
+                                </button>
+                                {% if entry %}
+                                <button type="button" class="chip-queue {% if entry.queued %}is-queued{% endif %}"
+                                        data-queued="{{ 'true' if entry.queued else 'false' }}"
+                                        onclick="toggleChipQueue(this)"
+                                        title="{% if entry.queued %}Queued for {{ entry.queued }} — click to remove{% else %}Add to the {{ meta.label }} queue{% endif %}">{% if entry.queued %}✅{% else %}➕{% endif %}</button>
+                                {% if entry.posted and entry.posted.url %}
+                                <a class="chip-posted" href="{{ entry.posted.url }}" target="_blank" rel="noopener"
+                                   title="Posted {{ entry.posted.posted_at[:16] if entry.posted.posted_at else '' }} — click to view">🔗</a>
+                                {% endif %}
+                                {% endif %}
+                            </span>
+                            {% endfor %}
+                        </div>
+
                         <div class="post-content-wrapper">
-                            <pre class="social-copy-text" id="saved-post-{{ post.id }}" contenteditable="true" onfocus="enablePostEdit(this)" onblur="autoSavePost({{ post.id }}, this, 'standalone')">{{ post.content }}</pre>
+                            <pre class="social-copy-text" id="saved-post-{{ group.id }}" contenteditable="true" onfocus="enablePostEdit(this)" onblur="autoSavePost({{ group.id }}, this, 'standalone')">{{ group.content }}</pre>
                             <!-- Image attachment section -->
-                            <div class="post-image-section mt-2" id="image-section-{{ post.id }}">
-                                {% if platform == 'instagram' %}
+                            <div class="post-image-section mt-2" id="image-section-{{ group.id }}">
+                                {% if group.ig %}
                                 <!-- Instagram format selector (feed / carousel / reel / story) -->
                                 <div class="d-flex align-items-center gap-2 mb-2 flex-wrap ig-format-bar">
-                                    <label class="small text-muted mb-0">Format:</label>
+                                    <label class="small text-muted mb-0">📷 Instagram format:</label>
                                     <select class="form-select form-select-sm" style="width:auto;"
-                                            id="ig-type-{{ post.id }}" onchange="switchIgType({{ post.id }}, this.value)">
-                                        <option value="feed" {% if post.ig_post_type == 'feed' %}selected{% endif %}>🖼️ Feed (1 image)</option>
-                                        <option value="carousel" {% if post.ig_post_type == 'carousel' %}selected{% endif %}>🎠 Carousel (2–10)</option>
-                                        <option value="reel" {% if post.ig_post_type == 'reel' %}selected{% endif %}>🎬 Reel (video)</option>
-                                        <option value="story" {% if post.ig_post_type == 'story' %}selected{% endif %}>⚡ Story</option>
+                                            id="ig-type-{{ group.id }}" onchange="switchIgType({{ group.id }}, this.value)">
+                                        <option value="feed" {% if group.ig.ig_post_type == 'feed' %}selected{% endif %}>🖼️ Feed (1 image)</option>
+                                        <option value="carousel" {% if group.ig.ig_post_type == 'carousel' %}selected{% endif %}>🎠 Carousel (2–10)</option>
+                                        <option value="reel" {% if group.ig.ig_post_type == 'reel' %}selected{% endif %}>🎬 Reel (video)</option>
+                                        <option value="story" {% if group.ig.ig_post_type == 'story' %}selected{% endif %}>⚡ Story</option>
                                     </select>
-                                    <button class="btn btn-sm btn-outline-secondary" type="button" onclick="openIgPreview({{ post.id }})"
+                                    <button class="btn btn-sm btn-outline-secondary" type="button" onclick="openIgPreview({{ group.id }})"
                                             title="Preview how this will look on Instagram and fix the aspect ratio">
                                         👁️ Preview
                                     </button>
-                                    <span class="small text-muted" id="ig-media-hint-{{ post.id }}"></span>
+                                    <span class="small text-muted" id="ig-media-hint-{{ group.id }}"></span>
                                 </div>
                                 <!-- Multi-media builder for carousel / reel / story -->
-                                <div id="ig-media-builder-{{ post.id }}"
-                                     class="border rounded p-2 mb-2 {% if post.ig_post_type in [None, 'feed'] %}d-none{% endif %}"
-                                     data-ig-type="{{ post.ig_post_type or 'feed' }}"
-                                     data-ig-media='{{ post.media_items | tojson }}'
-                                     data-ig-tags='{{ (post.ig_user_tags or []) | tojson }}'>
-                                    <div id="ig-media-strip-{{ post.id }}" class="d-flex flex-wrap gap-2 mb-2">
+                                <div id="ig-media-builder-{{ group.id }}"
+                                     class="border rounded p-2 mb-2 {% if group.ig.ig_post_type in [None, 'feed'] %}d-none{% endif %}"
+                                     data-ig-type="{{ group.ig.ig_post_type or 'feed' }}"
+                                     data-ig-media='{{ group.ig.media_items | tojson }}'
+                                     data-ig-tags='{{ group.ig.ig_user_tags | tojson }}'>
+                                    <div id="ig-media-strip-{{ group.id }}" class="d-flex flex-wrap gap-2 mb-2">
                                         <span class="text-muted small">No media added yet.</span>
                                     </div>
                                     <div class="d-flex gap-2 flex-wrap align-items-center">
                                         <input type="url" class="form-control form-control-sm" style="max-width: 300px;"
-                                               id="ig-media-url-{{ post.id }}" placeholder="Paste public image or video URL">
-                                        <button class="btn btn-sm btn-outline-primary" type="button" onclick="igAddMediaUrl({{ post.id }})">＋ Add URL</button>
+                                               id="ig-media-url-{{ group.id }}" placeholder="Paste public image or video URL">
+                                        <button class="btn btn-sm btn-outline-primary" type="button" onclick="igAddMediaUrl({{ group.id }})">＋ Add URL</button>
                                         <label class="btn btn-sm btn-outline-secondary mb-0" title="Upload an image">
                                             📁 Image
                                             <input type="file" class="d-none" accept="image/png,image/jpeg,image/jpg,image/gif,image/webp"
-                                                   onchange="igUploadMedia({{ post.id }}, this, 'image')">
+                                                   onchange="igUploadMedia({{ group.id }}, this, 'image')">
                                         </label>
                                         <label class="btn btn-sm btn-outline-secondary mb-0" title="Upload a video (MP4/MOV)">
                                             🎬 Video
                                             <input type="file" class="d-none" accept="video/mp4,video/quicktime"
-                                                   onchange="igUploadMedia({{ post.id }}, this, 'video')">
+                                                   onchange="igUploadMedia({{ group.id }}, this, 'video')">
                                         </label>
-                                        <span class="spinner-border spinner-border-sm text-secondary d-none" id="ig-media-spinner-{{ post.id }}" role="status"></span>
+                                        <span class="spinner-border spinner-border-sm text-secondary d-none" id="ig-media-spinner-{{ group.id }}" role="status"></span>
                                     </div>
                                 </div>
                                 {% endif %}
-                                <div id="ig-feed-block-{{ post.id }}"{% if platform == 'instagram' and post.ig_post_type not in [None, 'feed'] %} class="d-none"{% endif %}>
-                                {% if post.image_url %}
-                                <div class="d-flex align-items-center gap-2 mb-2" id="image-preview-{{ post.id }}">
-                                    <img src="{{ post.image_url }}" alt="Post image" class="img-thumbnail" style="max-height: 60px; max-width: 100px; cursor: pointer;" onclick="openImageLightbox('{{ post.image_url }}')" title="Click to enlarge">
-                                    <span class="text-muted small text-truncate" style="max-width: 200px;">{{ post.image_url }}</span>
-                                    <button class="btn btn-sm btn-outline-warning" onclick="editPostImage({{ post.id }})" title="Change Image">
+                                <div id="ig-feed-block-{{ group.id }}"{% if group.ig and group.ig.ig_post_type not in [None, 'feed'] %} class="d-none"{% endif %}>
+                                {% if group.image_url %}
+                                <div class="d-flex align-items-center gap-2 mb-2" id="image-preview-{{ group.id }}">
+                                    <img src="{{ group.image_url }}" alt="Post image" class="img-thumbnail" style="max-height: 60px; max-width: 100px; cursor: pointer;" onclick="openImageLightbox('{{ group.image_url }}')" title="Click to enlarge">
+                                    <span class="text-muted small text-truncate" style="max-width: 200px;">{{ group.image_url }}</span>
+                                    <button class="btn btn-sm btn-outline-warning" onclick="editPostImage({{ group.id }})" title="Change Image">
                                         ✏️
                                     </button>
-                                    <button class="btn btn-sm btn-outline-danger" onclick="removePostImage({{ post.id }})" title="Remove Image">
+                                    <button class="btn btn-sm btn-outline-danger" onclick="removePostImage({{ group.id }})" title="Remove Image">
                                         ✕
                                     </button>
                                 </div>
                                 {% else %}
-                                <div id="image-preview-{{ post.id }}" class="d-none">
+                                <div id="image-preview-{{ group.id }}" class="d-none">
                                     <div class="d-flex align-items-center gap-2 mb-2">
                                         <img src="" alt="Post image" class="img-thumbnail" style="max-height: 60px; max-width: 100px; cursor: pointer;" onclick="openImageLightbox(this.src)" title="Click to enlarge">
                                         <span class="text-muted small text-truncate" style="max-width: 200px;"></span>
-                                        <button class="btn btn-sm btn-outline-warning" onclick="editPostImage({{ post.id }})" title="Change Image">
+                                        <button class="btn btn-sm btn-outline-warning" onclick="editPostImage({{ group.id }})" title="Change Image">
                                             ✏️
                                         </button>
-                                        <button class="btn btn-sm btn-outline-danger" onclick="removePostImage({{ post.id }})" title="Remove Image">
+                                        <button class="btn btn-sm btn-outline-danger" onclick="removePostImage({{ group.id }})" title="Remove Image">
                                             ✕
                                         </button>
                                     </div>
                                 </div>
                                 {% endif %}
-                                <div class="image-edit-form d-none" id="image-edit-form-{{ post.id }}">
+                                <div class="image-edit-form d-none" id="image-edit-form-{{ group.id }}">
                                     <!-- Image Source Tabs for Individual Post -->
                                     <ul class="nav nav-pills nav-fill mb-2" style="font-size: 0.75rem;">
                                         <li class="nav-item">
-                                            <button class="nav-link active py-1 px-2" type="button" 
-                                                onclick="switchPostImageTab({{ post.id }}, 'upload')" 
-                                                id="post-upload-tab-{{ post.id }}">
+                                            <button class="nav-link active py-1 px-2" type="button"
+                                                onclick="switchPostImageTab({{ group.id }}, 'upload')"
+                                                id="post-upload-tab-{{ group.id }}">
                                                 📁 Upload
                                             </button>
                                         </li>
                                         <li class="nav-item">
-                                            <button class="nav-link py-1 px-2" type="button" 
-                                                onclick="switchPostImageTab({{ post.id }}, 'url')" 
-                                                id="post-url-tab-{{ post.id }}">
+                                            <button class="nav-link py-1 px-2" type="button"
+                                                onclick="switchPostImageTab({{ group.id }}, 'url')"
+                                                id="post-url-tab-{{ group.id }}">
                                                 🔗 URL
                                             </button>
                                         </li>
                                         <li class="nav-item">
-                                            <button class="nav-link py-1 px-2" type="button" 
-                                                onclick="switchPostImageTab({{ post.id }}, 'library')" 
-                                                id="post-library-tab-{{ post.id }}">
+                                            <button class="nav-link py-1 px-2" type="button"
+                                                onclick="switchPostImageTab({{ group.id }}, 'library')"
+                                                id="post-library-tab-{{ group.id }}">
                                                 📚 Library
                                             </button>
                                         </li>
                                         <li class="nav-item">
-                                            <button class="nav-link py-1 px-2" type="button" 
-                                                onclick="switchPostImageTab({{ post.id }}, 'stock')" 
-                                                id="post-stock-tab-{{ post.id }}">
+                                            <button class="nav-link py-1 px-2" type="button"
+                                                onclick="switchPostImageTab({{ group.id }}, 'stock')"
+                                                id="post-stock-tab-{{ group.id }}">
                                                 🔍 Stock
                                             </button>
                                         </li>
                                     </ul>
-                                    
+
                                     <!-- Upload File Pane -->
-                                    <div id="post-upload-pane-{{ post.id }}">
+                                    <div id="post-upload-pane-{{ group.id }}">
                                         <div class="input-group input-group-sm">
-                                            <input type="file" class="form-control form-control-sm" 
-                                                id="image-file-input-{{ post.id }}"
+                                            <input type="file" class="form-control form-control-sm"
+                                                id="image-file-input-{{ group.id }}"
                                                 accept="image/png,image/jpeg,image/jpg,image/gif,image/webp"
-                                                onchange="handlePostImageFileSelect({{ post.id }}, this)">
-                                            <button class="btn btn-outline-secondary" type="button" onclick="cancelImageEdit({{ post.id }})">
+                                                onchange="handlePostImageFileSelect({{ group.id }}, this)">
+                                            <button class="btn btn-outline-secondary" type="button" onclick="cancelImageEdit({{ group.id }})">
                                                 ✕
                                             </button>
                                         </div>
-                                        <div id="post-upload-progress-{{ post.id }}" class="mt-1 d-none">
+                                        <div id="post-upload-progress-{{ group.id }}" class="mt-1 d-none">
                                             <div class="progress" style="height: 16px;">
                                                 <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%; font-size: 0.7rem;">
                                                     Uploading...
@@ -264,73 +245,73 @@
                                             </div>
                                         </div>
                                     </div>
-                                    
+
                                     <!-- URL Pane -->
-                                    <div id="post-url-pane-{{ post.id }}" class="d-none">
+                                    <div id="post-url-pane-{{ group.id }}" class="d-none">
                                         <div class="input-group input-group-sm">
-                                            <input type="url" class="form-control" id="image-url-input-{{ post.id }}" 
-                                                   placeholder="https://example.com/image.jpg" value="{{ post.image_url or '' }}">
-                                            <button class="btn btn-outline-secondary" type="button" onclick="previewPostImage({{ post.id }})" title="Preview">
+                                            <input type="url" class="form-control" id="image-url-input-{{ group.id }}"
+                                                   placeholder="https://example.com/image.jpg" value="{{ group.image_url or '' }}">
+                                            <button class="btn btn-outline-secondary" type="button" onclick="previewPostImage({{ group.id }})" title="Preview">
                                                 👁️
                                             </button>
-                                            <button class="btn btn-success" type="button" onclick="savePostImage({{ post.id }})">
+                                            <button class="btn btn-success" type="button" onclick="savePostImage({{ group.id }})">
                                                 💾
                                             </button>
-                                            <button class="btn btn-outline-secondary" type="button" onclick="cancelImageEdit({{ post.id }})">
+                                            <button class="btn btn-outline-secondary" type="button" onclick="cancelImageEdit({{ group.id }})">
                                                 ✕
                                             </button>
                                         </div>
-                                        <div class="d-none mt-2 align-items-center gap-2 post-link-image-row" id="post-link-image-row-{{ post.id }}" style="display: flex;">
-                                            <select class="form-select form-select-sm d-none" id="post-link-urls-{{ post.id }}" style="max-width: 60%;"></select>
-                                            <button class="btn btn-sm btn-outline-info flex-grow-1" type="button" onclick="fetchLinkImage({{ post.id }}, 'standalone')" id="post-link-image-btn-{{ post.id }}" title="Pull og:image from the URL in the post">
+                                        <div class="d-none mt-2 align-items-center gap-2 post-link-image-row" id="post-link-image-row-{{ group.id }}" style="display: flex;">
+                                            <select class="form-select form-select-sm d-none" id="post-link-urls-{{ group.id }}" style="max-width: 60%;"></select>
+                                            <button class="btn btn-sm btn-outline-info flex-grow-1" type="button" onclick="fetchLinkImage({{ group.id }}, 'standalone')" id="post-link-image-btn-{{ group.id }}" title="Pull og:image from the URL in the post">
                                                 🔗 Use Image From Link
                                             </button>
-                                            <span class="spinner-border spinner-border-sm text-info d-none" id="post-link-image-spinner-{{ post.id }}" role="status"></span>
+                                            <span class="spinner-border spinner-border-sm text-info d-none" id="post-link-image-spinner-{{ group.id }}" role="status"></span>
                                         </div>
                                     </div>
-                                    
+
                                     <!-- Library Pane -->
-                                    <div id="post-library-pane-{{ post.id }}" class="d-none">
-                                        <div id="post-library-grid-{{ post.id }}" class="d-flex flex-wrap gap-1" style="max-height: 120px; overflow-y: auto;">
+                                    <div id="post-library-pane-{{ group.id }}" class="d-none">
+                                        <div id="post-library-grid-{{ group.id }}" class="d-flex flex-wrap gap-1" style="max-height: 120px; overflow-y: auto;">
                                             <div class="text-muted small">Loading...</div>
                                         </div>
                                     </div>
-                                    
+
                                     <!-- Stock Images Pane -->
-                                    <div id="post-stock-pane-{{ post.id }}" class="d-none">
+                                    <div id="post-stock-pane-{{ group.id }}" class="d-none">
                                         <div class="input-group input-group-sm mb-2">
-                                            <input type="text" class="form-control" id="post-stock-search-{{ post.id }}" 
+                                            <input type="text" class="form-control" id="post-stock-search-{{ group.id }}"
                                                    placeholder="Search keywords (auto-filled from post)"
-                                                   onkeydown="if(event.key === 'Enter') { event.preventDefault(); searchStockImages({{ post.id }}); }">
-                                            <button class="btn btn-primary" type="button" onclick="searchStockImages({{ post.id }})">
+                                                   onkeydown="if(event.key === 'Enter') { event.preventDefault(); searchStockImages({{ group.id }}); }">
+                                            <button class="btn btn-primary" type="button" onclick="searchStockImages({{ group.id }})">
                                                 🔍
                                             </button>
-                                            <button class="btn btn-outline-secondary" type="button" onclick="cancelImageEdit({{ post.id }})">
+                                            <button class="btn btn-outline-secondary" type="button" onclick="cancelImageEdit({{ group.id }})">
                                                 ✕
                                             </button>
                                         </div>
-                                        <div id="post-stock-grid-{{ post.id }}" class="d-flex flex-wrap gap-1" style="max-height: 120px; overflow-y: auto;">
+                                        <div id="post-stock-grid-{{ group.id }}" class="d-flex flex-wrap gap-1" style="max-height: 120px; overflow-y: auto;">
                                             <div class="text-muted small">Click 🔍 to search for free stock images</div>
                                         </div>
                                     </div>
-                                    
+
                                     <!-- Hidden field for final URL -->
-                                    <input type="hidden" id="post-final-image-url-{{ post.id }}" value="{{ post.image_url or '' }}">
+                                    <input type="hidden" id="post-final-image-url-{{ group.id }}" value="{{ group.image_url or '' }}">
                                 </div>
-                                {% if not post.image_url %}
-                                <button class="btn btn-sm btn-outline-secondary add-image-btn" onclick="editPostImage({{ post.id }})" id="add-image-btn-{{ post.id }}">
+                                {% if not group.image_url %}
+                                <button class="btn btn-sm btn-outline-secondary add-image-btn" onclick="editPostImage({{ group.id }})" id="add-image-btn-{{ group.id }}">
                                     🖼️ Add Image
                                 </button>
                                 {% endif %}
                                 </div><!-- /ig-feed-block -->
                             </div>
-                            <div class="edit-form d-none" id="edit-form-{{ post.id }}">
-                                <textarea class="form-control mb-2" id="edit-textarea-{{ post.id }}" rows="4">{{ post.content }}</textarea>
+                            <div class="edit-form d-none" id="edit-form-{{ group.id }}">
+                                <textarea class="form-control mb-2" id="edit-textarea-{{ group.id }}" rows="4">{{ group.content }}</textarea>
                                 <div class="d-flex gap-2">
-                                    <button class="btn btn-sm btn-success" onclick="savePostEdit({{ post.id }})">
+                                    <button class="btn btn-sm btn-success" onclick="savePostEdit({{ group.id }})">
                                         💾 Save
                                     </button>
-                                    <button class="btn btn-sm btn-outline-secondary" onclick="cancelPostEdit({{ post.id }})">
+                                    <button class="btn btn-sm btn-outline-secondary" onclick="cancelPostEdit({{ group.id }})">
                                         Cancel
                                     </button>
                                 </div>
