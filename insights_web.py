@@ -10535,9 +10535,24 @@ def _library_classify_thread(scan_id: int, opts: dict) -> None:
         if not events:
             raise ValueError("No events fall in the selected year range.")
 
-        # Retarget the progress denominator at the scoped run. Left at the
-        # scan's total, a year-limited pass would appear to stall a fifth of the
-        # way along and then report "done" without ever filling the bar.
+        in_scope = len(events)
+        if opts.get("resume", True):
+            events = content_library.pending_events(events)
+            already = in_scope - len(events)
+            if already:
+                app.logger.info("library resume: skipping %d of %d events already "
+                                "classified", already, in_scope)
+            if not events:
+                database.update_library_scan(
+                    scan_id, status="classified", phase="already complete",
+                    events_total=in_scope, events_done=in_scope,
+                    finished_at=datetime.now().isoformat(timespec="seconds"))
+                return
+
+        # Retarget the progress denominator at the work actually about to
+        # happen. Left at the scan's total, a year-limited or resumed pass would
+        # appear to stall part of the way along and then report "done" without
+        # ever filling the bar.
         database.update_library_scan(scan_id, events_total=len(events))
 
         taxonomy = _active_taxonomy()
@@ -10807,6 +10822,13 @@ def library_estimate(scan_id: int):
     year_to = request.args.get("year_to", type=int)
     events = content_library.filter_events_by_year(events, year_from, year_to)
 
+    # Match the run's own default, or a resumed pass would be quoted the cost of
+    # work it is going to skip.
+    in_scope = len(events)
+    if request.args.get("resume", "1") == "1":
+        events = content_library.pending_events(events)
+    already_done = in_scope - len(events)
+
     # Time a few real reads unless asked not to. On a cloud-backed archive the
     # download, not the model, sets the runtime, and provider speed varies too
     # much between machines and networks for a hardcoded figure to be honest.
@@ -10824,6 +10846,8 @@ def library_estimate(scan_id: int):
     estimate["vision_hours"] = round(estimate["vision_seconds"] / 3600, 1)
     estimate["mb_per_s"] = round(estimate["hydration_bps"] / 1024 ** 2, 2)
     estimate["measured"] = rate is not None
+    estimate["already_done"] = already_done
+    estimate["in_scope"] = in_scope
     estimate["fits"] = estimate["download_bytes"] < estimate["free_bytes"] - 5 * 1024 ** 3
     return jsonify(estimate)
 
@@ -10852,6 +10876,10 @@ def library_classify(scan_id: int):
         "use_speech": str(data.get("use_speech", "")) in ("1", "true", "on", "True"),
         "use_cloud_mapping": str(data.get("use_cloud_mapping", "")) in ("1", "true", "on", "True"),
         "allow_new_categories": str(data.get("allow_new_categories", "")) in ("1", "true", "on", "True"),
+        # Resume unless explicitly told to start over: re-paying for events an
+        # earlier pass already resolved is almost never what is wanted, and on
+        # a metered cloud archive it is the expensive mistake.
+        "resume": str(data.get("resume", "1")) in ("1", "true", "on", "True"),
     }
     threading.Thread(target=_library_classify_thread, args=(scan_id, opts),
                      daemon=True).start()

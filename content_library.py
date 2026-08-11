@@ -1681,6 +1681,42 @@ def classify_events(
     return dict(stats)
 
 
+# Values of ``classified_by`` that mean an event was genuinely processed, and
+# so should not be paid for twice when resuming.
+#
+# "low_confidence" and "no_match" belong here: the samples were downloaded and
+# captioned, and the honest conclusion was that nothing fit. Re-running would
+# spend the same money to reach the same answer.
+#
+# Deliberately absent are the states that represent work *not* done:
+# "budget_exhausted" (the allowance ran out), "unresolved" (the model server was
+# unreachable), and "deferred_large" (every candidate exceeded the size cap).
+# Leaving those pending is what lets a resumed run with a bigger budget or a
+# raised cap pick up exactly the events the previous run had to abandon.
+CLASSIFIED_MARKERS = frozenset({
+    "rule", "vision", "speech", "manual", "propagated", "low_confidence", "no_match",
+})
+
+
+def event_is_classified(files: Sequence[ScannedFile]) -> bool:
+    """Whether an event already carries the result of a completed pass."""
+    return any((f.classified_by or "") in CLASSIFIED_MARKERS for f in files)
+
+
+def pending_events(
+    events: dict[str, list[ScannedFile]],
+) -> dict[str, list[ScannedFile]]:
+    """Drop events a previous pass already resolved, for resuming a run.
+
+    A full pass over a large cloud-backed archive runs for hours, and an
+    interruption partway through -- a dropped connection, a reboot, a stopped
+    job -- would otherwise mean starting from zero and re-downloading
+    everything. Results are persisted per event as the run proceeds, so the
+    completed ones are simply skipped on the next attempt.
+    """
+    return {k: v for k, v in events.items() if not event_is_classified(v)}
+
+
 def filter_events_by_year(
     events: dict[str, list[ScannedFile]],
     year_from: Optional[int] = None,
