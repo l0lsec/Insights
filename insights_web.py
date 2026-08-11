@@ -10969,6 +10969,11 @@ def _library_classify_thread(scan_id: int, opts: dict) -> None:
         if not events:
             raise ValueError("No events fall in the selected year range.")
 
+        # Retarget the progress denominator at the scoped run. Left at the
+        # scan's total, a year-limited pass would appear to stall a fifth of the
+        # way along and then report "done" without ever filling the bar.
+        database.update_library_scan(scan_id, events_total=len(events))
+
         taxonomy = _active_taxonomy()
         if not taxonomy and not opts.get("allow_new_categories"):
             raise ValueError("No categories defined. Learn a taxonomy first, "
