@@ -10591,15 +10591,20 @@ def _library_classify_thread(scan_id: int, opts: dict) -> None:
             on_category=on_category,
         )
 
-        # Proposals that never reached the promotion threshold are saved
-        # inactive: visible for the owner to promote by hand, but excluded from
-        # the label space of later runs until they do.
+        # Record every discovered category with its final event count. Adopted
+        # ones were already written when they crossed the threshold, but with
+        # the count they had at that moment; rewriting here means the Categories
+        # panel shows what a name actually covers rather than the threshold.
+        # Proposals that never reached the threshold are saved inactive: visible
+        # for the owner to promote by hand, but kept out of later runs' label
+        # space until they do.
         for entry in stats.get("discovered") or []:
-            if not entry.get("promoted"):
-                database.save_library_categories(
-                    [{"name": entry["name"], "subcategories": [], "keywords": [],
-                      "example_count": entry["events"]}], source="suggested")
-                database.set_library_category_active(entry["name"], False)
+            adopted = bool(entry.get("promoted"))
+            database.save_library_categories(
+                [{"name": entry["name"], "subcategories": [], "keywords": [],
+                  "example_count": entry["events"]}],
+                source="discovered" if adopted else "suggested")
+            database.set_library_category_active(entry["name"], adopted)
 
         # Persist labels for events the ladder resolved without emitting a
         # callback (rule hits during a resumed run, deferred, budget-skipped).
