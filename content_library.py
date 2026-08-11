@@ -86,6 +86,19 @@ MIN_CONFIDENCE = 0.45
 # match is treated as unresolved rather than decided on a near-tie.
 AMBIGUITY_MARGIN = 0.15
 
+# How many separate events must land on a proposed category before it is
+# treated as established. A hand-sorted folder reflects what its owner had time
+# to file, not the true shape of the archive, so the classifier is allowed to
+# name subjects the taxonomy misses. But a model asked for a new name will
+# happily invent one per event, so a proposal has to recur before it is
+# promoted; single-event proposals are kept as inactive suggestions instead of
+# fragmenting the taxonomy into hundreds of near-synonyms.
+NEW_CATEGORY_MIN_EVENTS = 3
+
+# Ceiling on discovered categories offered back to the model, so the prompt
+# cannot grow without bound on a long run.
+MAX_DISCOVERED_CATEGORIES = 40
+
 
 # ── Taxonomy ────────────────────────────────────────────────────────────────
 
@@ -185,6 +198,47 @@ def learn_taxonomy(triaged_root: str, min_token_len: int = 3) -> list[Category]:
             keywords=sorted(set(tokens)),
         ))
     return categories
+
+
+_NAME_CLEAN = re.compile(r"[^\w &'-]+")
+
+
+def canonical_category_name(name: str) -> str:
+    """Normalise a model-proposed category name into a filesystem-safe label.
+
+    Proposals arrive with quotes, trailing punctuation, and inconsistent case.
+    Normalising here means "beach trips", "Beach Trips." and '"Beach Trips"'
+    converge on one category instead of three, and the result is directly
+    usable as a folder name.
+    """
+    cleaned = _NAME_CLEAN.sub(" ", (name or "").strip()).strip()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    if not cleaned:
+        return ""
+    # Title case, but leave existing acronyms (MMA, FPOV) alone.
+    words = [w if w.isupper() and len(w) <= 5 else w.capitalize()
+             for w in cleaned.split(" ")]
+    return " ".join(words)[:60]
+
+
+def merge_category(name: str, taxonomy: Sequence[Category]) -> Optional[str]:
+    """Return an existing category equivalent to ``name``, if there is one.
+
+    Catches the case where a proposal restates a category that already exists
+    under a slightly different wording ("Martial Arts" against "MMA" will not
+    match, but "Beach Trip" against "Beach Trips" will), so discovery extends
+    the taxonomy rather than shadowing it.
+    """
+    if not name:
+        return None
+    target = {t for t in _tokenize(name)} - _STOPWORDS
+    if not target:
+        return None
+    for cat in taxonomy:
+        existing = {t for t in _tokenize(cat.name)} - _STOPWORDS
+        if existing and existing == target:
+            return cat.name
+    return None
 
 
 def taxonomy_prompt_block(taxonomy: Sequence[Category]) -> str:
@@ -960,6 +1014,31 @@ Rules:
 - Base the answer only on the evidence given."""
 
 
+DISCOVERY_PROMPT = """You are sorting a personal media archive into categories.
+
+Categories used so far:
+{categories}
+
+Evidence about one group of {count} files taken {when}:
+Folder: {folder}
+{evidence}
+
+Reply with ONLY a JSON object, no other text:
+{{"category": "<name>", "is_new": <true or false>, "confidence": <0.0-1.0>, "reason": "<under 12 words>"}}
+
+Rules:
+- If one of the categories above genuinely fits, copy its name exactly and set
+  "is_new": false. The list is a starting point, not a constraint -- it may be
+  incomplete or wrong, so do not force content into a category it does not fit.
+- If the content clearly belongs to some other subject, name that subject and
+  set "is_new": true.
+- A new name must be short (1-3 words) and describe a recurring subject, not
+  this one moment: "Beach Trips", not "Sunset On A Tuesday". Prefer a name that
+  other similar content could also use.
+- Use "{unsorted}" only when the evidence is too weak to say anything at all.
+- Base the answer only on the evidence given."""
+
+
 def _cloud_map(prompt: str, model: str = "") -> str:
     """Run the mapping prompt against the configured cloud LLM.
 
@@ -993,7 +1072,8 @@ def classify_from_evidence(
     taxonomy: Sequence[Category],
     text_model: str = "",
     use_cloud: bool = False,
-) -> tuple[str, float, str]:
+    allow_new: bool = False,
+) -> tuple[str, float, str, bool]:
     """Map captions/transcripts onto the taxonomy with the local text model.
 
     Kept separate from captioning on purpose. Captions are expensive and depend
@@ -1007,7 +1087,7 @@ def classify_from_evidence(
 
     names = {c.name for c in taxonomy}
     when = summary.get("date_start") or "an unknown date"
-    prompt = CLASSIFY_PROMPT.format(
+    prompt = (DISCOVERY_PROMPT if allow_new else CLASSIFY_PROMPT).format(
         categories=taxonomy_prompt_block(taxonomy),
         count=summary.get("file_count", 0),
         when=when,
@@ -1031,7 +1111,9 @@ def classify_from_evidence(
 
     parsed = _extract_json(raw)
     if not parsed:
-        return (kw_category, kw_confidence, kw_reason) if kw_category else ("", 0.0, "")
+        if kw_category:
+            return kw_category, kw_confidence, kw_reason, False
+        return "", 0.0, "", False
 
     category = str(parsed.get("category", "")).strip()
     try:
@@ -1039,27 +1121,39 @@ def classify_from_evidence(
     except (TypeError, ValueError):
         confidence = 0.0
     reason = str(parsed.get("reason", "")).strip()[:120]
+    claims_new = bool(parsed.get("is_new")) and allow_new
 
     # The model declining to choose is the single most common failure mode, and
     # it is frequently wrong in an easily checkable way. Defer to literal
     # evidence when the caption plainly names a category the model passed over.
     if category == UNSORTED or not category:
         if kw_category:
-            return kw_category, kw_confidence, f"caption {kw_reason}"
-        return UNSORTED, confidence, reason
+            return kw_category, kw_confidence, f"caption {kw_reason}", False
+        return UNSORTED, confidence, reason, False
 
-    # A small model will occasionally return a near-miss or an invented label.
-    # Snap to a real category when the intent is unambiguous, otherwise fall
-    # back to keywords rather than write a category the owner never created.
-    if category not in names:
-        match = _closest_category(category, names)
-        if not match:
-            if kw_category:
-                return kw_category, kw_confidence, f"caption {kw_reason}"
-            return "", 0.0, ""
-        category, confidence = match, min(confidence, 0.6)
+    if category in names:
+        return category, max(0.0, min(1.0, confidence)), reason, False
 
-    return category, max(0.0, min(1.0, confidence)), reason
+    # An unrecognised label means one of two things, and which one depends on
+    # whether discovery is enabled. With it off, it is a near-miss or an
+    # invention to be snapped back or discarded. With it on, it may be a
+    # genuine gap in the taxonomy, so it is passed up as a proposal for the
+    # caller to weigh against how often it recurs.
+    if allow_new and claims_new:
+        proposed = canonical_category_name(category)
+        if not proposed:
+            return "", 0.0, "", False
+        merged = merge_category(proposed, taxonomy)
+        if merged:
+            return merged, max(0.0, min(1.0, confidence)), reason, False
+        return proposed, max(0.0, min(1.0, confidence)), reason, True
+
+    match = _closest_category(category, names)
+    if not match:
+        if kw_category:
+            return kw_category, kw_confidence, f"caption {kw_reason}", False
+        return "", 0.0, "", False
+    return match, min(confidence, 0.6), reason, False
 
 
 def _closest_category(guess: str, names: Iterable[str]) -> Optional[str]:
@@ -1297,6 +1391,8 @@ def classify_events(
     vision_model: str = "",
     text_model: str = "",
     use_cloud_mapping: bool = False,
+    allow_new_categories: bool = False,
+    on_category: Optional[Callable[[str, int], None]] = None,
 ) -> dict:
     """Run the full ladder over every event and label its files in place.
 
@@ -1312,6 +1408,14 @@ def classify_events(
     """
     stats = Counter()
     stats["events_total"] = len(events)
+
+    # Discovery state. ``live_taxonomy`` grows during the run so a subject named
+    # once is offered back to the model for later events -- without that, the
+    # same subject gets a slightly different name every time and never
+    # accumulates the evidence needed to be promoted.
+    live_taxonomy: list[Category] = list(taxonomy)
+    proposals: Counter = Counter()
+    promoted: set[str] = set()
 
     ai_queue: list[tuple[str, list[ScannedFile]]] = []
 
@@ -1460,11 +1564,29 @@ def classify_events(
 
             evidence = build_evidence(captions, transcript, [s.name for s in samples])
             try:
-                category, confidence, reason = classify_from_evidence(
-                    summary, evidence, taxonomy, text_model, use_cloud=use_cloud_mapping)
+                category, confidence, reason, is_new = classify_from_evidence(
+                    summary, evidence, live_taxonomy, text_model,
+                    use_cloud=use_cloud_mapping, allow_new=allow_new_categories)
             except OllamaUnavailable:
                 stats["ollama_unavailable"] = 1
                 break
+
+            if is_new and category:
+                proposals[category] += 1
+                stats["proposed"] += 1
+                # Offer the name back to the model straight away so related
+                # events converge on it instead of each coining a variant.
+                if not any(c.name == category for c in live_taxonomy):
+                    if sum(1 for c in live_taxonomy if c.name not in
+                           {t.name for t in taxonomy}) < MAX_DISCOVERED_CATEGORIES:
+                        live_taxonomy.append(Category(name=category, keywords=[
+                            t for t in _tokenize(category) if t not in _STOPWORDS]))
+                if (proposals[category] >= NEW_CATEGORY_MIN_EVENTS
+                        and category not in promoted):
+                    promoted.add(category)
+                    stats["categories_discovered"] += 1
+                    if on_category:
+                        on_category(category, proposals[category])
 
             method = "speech" if transcript and not captions else "vision"
             if not category or confidence < MIN_CONFIDENCE:
@@ -1495,4 +1617,33 @@ def classify_events(
         prefetch.shutdown(wait=False, cancel_futures=True)
 
     stats["budget"] = budget.as_dict()
+    # Report every proposal with its event count, flagged by whether it cleared
+    # the promotion threshold. Below-threshold names are still worth showing --
+    # they are the classifier's read on what the taxonomy is missing, and the
+    # owner may recognise one as real even from a single event.
+    stats["discovered"] = [
+        {"name": name, "events": count, "promoted": name in promoted}
+        for name, count in proposals.most_common()
+    ]
     return dict(stats)
+
+
+def filter_events_by_year(
+    events: dict[str, list[ScannedFile]],
+    year_from: Optional[int] = None,
+    year_to: Optional[int] = None,
+) -> dict[str, list[ScannedFile]]:
+    """Restrict events to a year range, for staged runs over a large archive.
+
+    An event is kept when any of its files fall in range; date-foldered events
+    do not straddle years in practice, and keeping a partially-matching event
+    whole avoids splitting one shoot across two runs.
+    """
+    if year_from is None and year_to is None:
+        return events
+    lo = year_from if year_from is not None else -10_000
+    hi = year_to if year_to is not None else 10_000
+    return {
+        key: files for key, files in events.items()
+        if any(f.year is not None and lo <= f.year <= hi for f in files)
+    }

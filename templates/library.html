@@ -189,6 +189,16 @@
                 Press <em>Estimate cost</em> to see exactly how much this will download before running it.
             </div>
             <div class="row g-2 align-items-end">
+                <div class="col-md-3">
+                    <label class="form-label small mb-1">Years (blank = all)</label>
+                    <div class="input-group input-group-sm">
+                        <input type="number" class="form-control" id="yearFrom" placeholder="from"
+                               min="1970" max="2100">
+                        <span class="input-group-text">→</span>
+                        <input type="number" class="form-control" id="yearTo" placeholder="to"
+                               min="1970" max="2100">
+                    </div>
+                </div>
                 <div class="col-md-2">
                     <label class="form-label small mb-1">Download cap</label>
                     <div class="input-group input-group-sm">
@@ -208,24 +218,39 @@
                     <input type="number" class="form-control form-control-sm" id="maxSamples" value="2" min="1" max="5">
                 </div>
                 <div class="col-md-3">
-                    <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" id="useCloud">
-                        <label class="form-check-label small" for="useCloud">Cloud mapping (more accurate, ~$1)</label>
-                    </div>
-                    <div class="form-check form-switch">
-                        <input class="form-check-input" type="checkbox" id="useSpeech">
-                        <label class="form-check-label small" for="useSpeech">Transcribe speech (slow)</label>
-                    </div>
-                </div>
-                <div class="col-md-3">
                     <button class="btn btn-primary btn-sm w-100" id="classifyBtn" onclick="startClassify()">
                         ▶ Run classification
                     </button>
                 </div>
             </div>
+            <div class="row g-2 mt-1">
+                <div class="col-md-4">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="allowNew" checked>
+                        <label class="form-check-label small" for="allowNew">
+                            Discover new categories
+                        </label>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="useCloud">
+                        <label class="form-check-label small" for="useCloud">Cloud mapping (more accurate, ~$1)</label>
+                    </div>
+                </div>
+                <div class="col-md-4">
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="useSpeech">
+                        <label class="form-check-label small" for="useSpeech">Transcribe speech (slow)</label>
+                    </div>
+                </div>
+            </div>
             <div class="form-text mt-2">
                 Images are captioned locally and free. Only the short text mapping step can go to
-                the cloud — your photos never leave this Mac.
+                the cloud — your photos never leave this Mac. With discovery on, your categories
+                are a starting point, not a constraint: content that fits none of them gets a new
+                name, and a name is adopted once it recurs across
+                {{ 3 }} events. Rarer suggestions are saved switched off for you to review.
             </div>
         </div>
     </div>
@@ -364,7 +389,12 @@ async function loadEstimate() {
     box.textContent = 'Estimating…';
     const cap = document.getElementById('capMb').value;
     const n = document.getElementById('maxSamples').value;
-    const r = await fetch(`/library/scan/${SCAN_ID}/estimate?max_sample_mb=${cap}&max_samples=${n}`);
+    const q = new URLSearchParams({max_sample_mb: cap, max_samples: n});
+    const yf = document.getElementById('yearFrom').value;
+    const yt = document.getElementById('yearTo').value;
+    if (yf) q.set('year_from', yf);
+    if (yt) q.set('year_to', yt);
+    const r = await fetch(`/library/scan/${SCAN_ID}/estimate?` + q.toString());
     const e = await r.json();
     if (e.error) { box.textContent = e.error; return; }
     const warn = e.fits ? '' :
@@ -397,8 +427,11 @@ async function startClassify() {
             budget_gb: document.getElementById('budgetGb').value,
             max_sample_mb: document.getElementById('capMb').value,
             max_samples: document.getElementById('maxSamples').value,
+            year_from: document.getElementById('yearFrom').value,
+            year_to: document.getElementById('yearTo').value,
             use_cloud_mapping: document.getElementById('useCloud').checked ? '1' : '',
             use_speech: document.getElementById('useSpeech').checked ? '1' : '',
+            allow_new_categories: document.getElementById('allowNew').checked ? '1' : '',
         })
     });
     poll();

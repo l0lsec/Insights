@@ -10530,9 +10530,15 @@ def _library_classify_thread(scan_id: int, opts: dict) -> None:
         for f in files:
             events.setdefault(f.event_key, []).append(f)
 
+        events = content_library.filter_events_by_year(
+            events, opts.get("year_from"), opts.get("year_to"))
+        if not events:
+            raise ValueError("No events fall in the selected year range.")
+
         taxonomy = _active_taxonomy()
-        if not taxonomy:
-            raise ValueError("No categories defined. Learn a taxonomy first.")
+        if not taxonomy and not opts.get("allow_new_categories"):
+            raise ValueError("No categories defined. Learn a taxonomy first, "
+                             "or enable category discovery.")
 
         budget = content_library.HydrationBudget(
             limit_bytes=int(opts.get("budget_gb", 10) * 1024 ** 3),
@@ -10560,6 +10566,13 @@ def _library_classify_thread(scan_id: int, opts: dict) -> None:
                     scan_id, events_done=done["n"],
                     bytes_downloaded=budget.spent_bytes)
 
+        def on_category(name: str, events_seen: int) -> None:
+            """Persist a discovered category as soon as it clears promotion."""
+            database.save_library_categories(
+                [{"name": name, "subcategories": [], "keywords": [],
+                  "example_count": events_seen}], source="discovered")
+            app.logger.info("library discovered category %r (%d events)", name, events_seen)
+
         stats = content_library.classify_events(
             events, taxonomy, budget,
             use_ai=True,
@@ -10569,7 +10582,19 @@ def _library_classify_thread(scan_id: int, opts: dict) -> None:
             on_event=on_event,
             should_stop=lambda: _library_job(scan_id).get("stop", False),
             use_cloud_mapping=bool(opts.get("use_cloud_mapping")),
+            allow_new_categories=bool(opts.get("allow_new_categories")),
+            on_category=on_category,
         )
+
+        # Proposals that never reached the promotion threshold are saved
+        # inactive: visible for the owner to promote by hand, but excluded from
+        # the label space of later runs until they do.
+        for entry in stats.get("discovered") or []:
+            if not entry.get("promoted"):
+                database.save_library_categories(
+                    [{"name": entry["name"], "subcategories": [], "keywords": [],
+                      "example_count": entry["events"]}], source="suggested")
+                database.set_library_category_active(entry["name"], False)
 
         # Persist labels for events the ladder resolved without emitting a
         # callback (rule hits during a resumed run, deferred, budget-skipped).
@@ -10768,6 +10793,10 @@ def library_estimate(scan_id: int):
     for f in files:
         events.setdefault(f.event_key, []).append(f)
 
+    year_from = request.args.get("year_from", type=int)
+    year_to = request.args.get("year_to", type=int)
+    events = content_library.filter_events_by_year(events, year_from, year_to)
+
     # Time a few real reads unless asked not to. On a cloud-backed archive the
     # download, not the model, sets the runtime, and provider speed varies too
     # much between machines and networks for a hardcoded figure to be honest.
@@ -10795,13 +10824,24 @@ def library_classify(scan_id: int):
     if _library_job_running(scan_id):
         return jsonify({"error": "A job is already running for this scan"}), 409
     data = request.get_json(silent=True) or request.form
+
+    def _year(key):
+        raw = data.get(key)
+        try:
+            return int(raw) if str(raw or "").strip() else None
+        except (TypeError, ValueError):
+            return None
+
     opts = {
         "budget_gb": float(data.get("budget_gb", 10) or 10),
         "reserve_gb": float(data.get("reserve_gb", 5) or 5),
         "max_samples": int(data.get("max_samples", 2) or 2),
         "max_sample_mb": int(data.get("max_sample_mb", 16) or 16),
+        "year_from": _year("year_from"),
+        "year_to": _year("year_to"),
         "use_speech": str(data.get("use_speech", "")) in ("1", "true", "on", "True"),
         "use_cloud_mapping": str(data.get("use_cloud_mapping", "")) in ("1", "true", "on", "True"),
+        "allow_new_categories": str(data.get("allow_new_categories", "")) in ("1", "true", "on", "True"),
     }
     threading.Thread(target=_library_classify_thread, args=(scan_id, opts),
                      daemon=True).start()
