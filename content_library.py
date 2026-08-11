@@ -1458,6 +1458,7 @@ def classify_events(
     # same subject gets a slightly different name every time and never
     # accumulates the evidence needed to be promoted.
     live_taxonomy: list[Category] = list(taxonomy)
+    original_names: set[str] = {c.name for c in taxonomy}
     proposals: Counter = Counter()
     promoted: set[str] = set()
 
@@ -1616,21 +1617,13 @@ def classify_events(
                 break
 
             if is_new and category:
-                proposals[category] += 1
                 stats["proposed"] += 1
                 # Offer the name back to the model straight away so related
                 # events converge on it instead of each coining a variant.
                 if not any(c.name == category for c in live_taxonomy):
-                    if sum(1 for c in live_taxonomy if c.name not in
-                           {t.name for t in taxonomy}) < MAX_DISCOVERED_CATEGORIES:
+                    if len(live_taxonomy) - len(taxonomy) < MAX_DISCOVERED_CATEGORIES:
                         live_taxonomy.append(Category(name=category, keywords=[
                             t for t in _tokenize(category) if t not in _STOPWORDS]))
-                if (proposals[category] >= NEW_CATEGORY_MIN_EVENTS
-                        and category not in promoted):
-                    promoted.add(category)
-                    stats["categories_discovered"] += 1
-                    if on_category:
-                        on_category(category, proposals[category])
 
             method = "speech" if transcript and not captions else "vision"
             if not category or confidence < MIN_CONFIDENCE:
@@ -1644,6 +1637,22 @@ def classify_events(
                 stats["no_match"] += 1
             else:
                 stats[f"by_{method}"] += 1
+
+            # Count every event that lands on a category the owner did not
+            # define, not just the one that first proposed it. Counting
+            # proposals alone silently breaks the promotion rule: a name is fed
+            # back into the label space as soon as it is coined, so from the
+            # second event onward the model is *selecting* it rather than
+            # proposing it, and the counter stays at one forever. Observed on a
+            # real run, "Memes" collected 18 events and was still never adopted.
+            if category and category != UNSORTED and category not in original_names:
+                proposals[category] += 1
+                if (proposals[category] >= NEW_CATEGORY_MIN_EVENTS
+                        and category not in promoted):
+                    promoted.add(category)
+                    stats["categories_discovered"] += 1
+                    if on_category:
+                        on_category(category, proposals[category])
 
             for f in files:
                 f.category = category
