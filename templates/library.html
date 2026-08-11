@@ -243,6 +243,12 @@
                         <input class="form-check-input" type="checkbox" id="useSpeech">
                         <label class="form-check-label small" for="useSpeech">Transcribe speech (slow)</label>
                     </div>
+                    <div class="form-check form-switch">
+                        <input class="form-check-input" type="checkbox" id="resume" checked>
+                        <label class="form-check-label small" for="resume">
+                            Resume (skip already-classified)
+                        </label>
+                    </div>
                 </div>
             </div>
             <div class="form-text mt-2">
@@ -389,7 +395,8 @@ async function loadEstimate() {
     box.textContent = 'Estimating…';
     const cap = document.getElementById('capMb').value;
     const n = document.getElementById('maxSamples').value;
-    const q = new URLSearchParams({max_sample_mb: cap, max_samples: n});
+    const q = new URLSearchParams({max_sample_mb: cap, max_samples: n,
+                                   resume: document.getElementById('resume').checked ? '1' : '0'});
     const yf = document.getElementById('yearFrom').value;
     const yt = document.getElementById('yearTo').value;
     if (yf) q.set('year_from', yf);
@@ -402,7 +409,7 @@ async function loadEstimate() {
          Lower the max file size, or run it in stages.</div>`;
     box.innerHTML = `
         <strong>${e.ai_events.toLocaleString()}</strong> events need AI
-        (${e.resolved_by_rule.toLocaleString()} already resolved by folder or file name).
+        (${e.resolved_by_rule.toLocaleString()} already resolved by folder or file name${e.already_done ? `, ${e.already_done.toLocaleString()} skipped as already classified` : ''}).
         Will caption <strong>${e.sample_files.toLocaleString()}</strong> sample files,
         downloading <strong>${e.download_gb} GB</strong> of ${e.free_gb} GB free.
         <div class="mt-1">
@@ -431,6 +438,7 @@ async function startClassify() {
             year_to: document.getElementById('yearTo').value,
             use_cloud_mapping: document.getElementById('useCloud').checked ? '1' : '',
             use_speech: document.getElementById('useSpeech').checked ? '1' : '',
+            resume: document.getElementById('resume').checked ? '1' : '0',
             allow_new_categories: document.getElementById('allowNew').checked ? '1' : '',
         })
     });
