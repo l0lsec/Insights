@@ -241,10 +241,34 @@ def merge_category(name: str, taxonomy: Sequence[Category]) -> Optional[str]:
     return None
 
 
-def taxonomy_prompt_block(taxonomy: Sequence[Category]) -> str:
-    """Render the label space for an LLM prompt, one category per line."""
+# Names that describe a junk drawer rather than a subject.
+_CATCH_ALL = {"misc", "miscellaneous", "other", "others", "random", "stuff",
+              "general", "unsorted", "various", "assorted"}
+
+
+def is_catch_all(name: str) -> bool:
+    """Whether a category is a junk drawer rather than a real subject."""
+    tokens = set(_tokenize(name))
+    return bool(tokens) and tokens <= _CATCH_ALL
+
+
+def taxonomy_prompt_block(taxonomy: Sequence[Category],
+                          exclude_catch_all: bool = False) -> str:
+    """Render the label space for an LLM prompt, one category per line.
+
+    ``exclude_catch_all`` drops junk-drawer categories such as "Misc". They
+    have to go during discovery, because they are strictly easier to choose
+    than naming a subject and the model takes that option every time: observed
+    on a real archive, memes, quote graphics and screenshots each recurred
+    across several events -- exactly the subjects discovery exists to surface --
+    and every one of them was filed under "Misc" with the reason "fits no
+    specific recurring subject". Removing the escape hatch costs nothing, since
+    "Unsorted" still covers genuinely unreadable content.
+    """
     lines = []
     for cat in taxonomy:
+        if exclude_catch_all and is_catch_all(cat.name):
+            continue
         if cat.subcategories:
             hint = ", ".join(cat.subcategories[:6])
             lines.append(f"- {cat.name} (includes: {hint})")
@@ -1035,6 +1059,10 @@ Rules:
 - A new name must be short (1-3 words) and describe a recurring subject, not
   this one moment: "Beach Trips", not "Sunset On A Tuesday". Prefer a name that
   other similar content could also use.
+- Never answer with a catch-all like "Misc", "Other", "Random" or "General".
+  Those are not subjects. Content of a recognisable kind -- a meme, a saved
+  quote graphic, a screenshot of a conversation, a receipt -- has a nameable
+  subject, so name it.
 - Use "{unsorted}" only when the evidence is too weak to say anything at all.
 - Base the answer only on the evidence given."""
 
@@ -1088,7 +1116,7 @@ def classify_from_evidence(
     names = {c.name for c in taxonomy}
     when = summary.get("date_start") or "an unknown date"
     prompt = (DISCOVERY_PROMPT if allow_new else CLASSIFY_PROMPT).format(
-        categories=taxonomy_prompt_block(taxonomy),
+        categories=taxonomy_prompt_block(taxonomy, exclude_catch_all=allow_new),
         count=summary.get("file_count", 0),
         when=when,
         folder=summary.get("directory", ""),
@@ -1131,8 +1159,22 @@ def classify_from_evidence(
             return kw_category, kw_confidence, f"caption {kw_reason}", False
         return UNSORTED, confidence, reason, False
 
+    def best_of(cat: str, conf: float, why: str, is_new: bool):
+        """Prefer literal evidence when the model's own answer is too weak.
+
+        Without this, a model reply that names the right thing in its reasoning
+        but reports low confidence is discarded outright: an "Ace MMA & Fitness
+        open mat" advert came back at confidence 0.00 and was filed Unsorted,
+        even though the caption says MMA and an MMA category exists. The
+        keyword match is only allowed to win when the model has effectively
+        abstained, so a confident model answer is never second-guessed.
+        """
+        if conf < MIN_CONFIDENCE and kw_category and kw_confidence >= MIN_CONFIDENCE:
+            return kw_category, kw_confidence, f"caption {kw_reason}", False
+        return cat, max(0.0, min(1.0, conf)), why, is_new
+
     if category in names:
-        return category, max(0.0, min(1.0, confidence)), reason, False
+        return best_of(category, confidence, reason, False)
 
     # An unrecognised label means one of two things, and which one depends on
     # whether discovery is enabled. With it off, it is a near-miss or an
@@ -1141,19 +1183,21 @@ def classify_from_evidence(
     # caller to weigh against how often it recurs.
     if allow_new and claims_new:
         proposed = canonical_category_name(category)
-        if not proposed:
-            return "", 0.0, "", False
+        # A model told not to use a junk drawer will still occasionally propose
+        # one as "new". Treat that as an abstention rather than creating it.
+        if not proposed or is_catch_all(proposed):
+            return best_of("", 0.0, "", False)
         merged = merge_category(proposed, taxonomy)
         if merged:
-            return merged, max(0.0, min(1.0, confidence)), reason, False
-        return proposed, max(0.0, min(1.0, confidence)), reason, True
+            return best_of(merged, confidence, reason, False)
+        return best_of(proposed, confidence, reason, True)
 
     match = _closest_category(category, names)
     if not match:
         if kw_category:
             return kw_category, kw_confidence, f"caption {kw_reason}", False
         return "", 0.0, "", False
-    return match, min(confidence, 0.6), reason, False
+    return best_of(match, min(confidence, 0.6), reason, False)
 
 
 def _closest_category(guess: str, names: Iterable[str]) -> Optional[str]:
