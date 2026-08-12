@@ -14,6 +14,8 @@ Insights is an AI-powered content platform that turns RSS feeds, podcasts, YouTu
 
 What started as a podcast transcription tool has grown into a complete content pipeline: ingest any source — RSS feeds, YouTube channels, individual videos, GitHub repos, web pages, images, or raw text — let AI do the heavy lifting, and push polished posts out on your schedule.
 
+It also works on content you already have. The **Content Library** catalogues a media archive on disk and sorts it by year and subject, including archives too large to download and stored as cloud placeholders, so a backlog measured in years becomes something you can search and reuse.
+
 ### Features
 
 #### Content Ingestion
@@ -33,6 +35,20 @@ What started as a podcast transcription tool has grown into a complete content p
 - **Social Media Copy** - Auto-generate platform-optimized posts for LinkedIn, Threads, X/Twitter, Facebook, and Instagram
 - **Provider Choice** - Run text and vision generation through OpenAI (default) or Anthropic Claude by setting `LLM_PROVIDER`
 - **Local Model Support** - Optionally route generation through a local Ollama instance (text and vision models) instead of OpenAI
+
+#### Content Library
+Catalogue a large media archive and sort it by **year** and **category** — built for backlogs measured in years and hundreds of gigabytes, including archives that live in a cloud folder and are not fully downloaded.
+
+- **Metadata-only scanning** - Walks the archive reading nothing but file metadata, so it downloads nothing and completes in seconds even at tens of thousands of files
+- **Cloud-aware** - Detects OneDrive/iCloud "Files On-Demand" placeholders and treats downloading as a budgeted resource, so a pass can never exceed your free disk space
+- **Learned categories** - Reads your category names from a folder you have already sorted by hand, so results land in your own vocabulary
+- **Category discovery** - Names subjects your folders never covered, adopting a name once it recurs across several events; one-off proposals are kept as suggestions for you to promote
+- **Event-based classification** - Groups files into shooting events and labels the event, cutting AI work by an order of magnitude and producing better labels than any single frame would
+- **Local AI** - Images are captioned by a local vision model and video by local speech-to-text, so your photos never leave your machine. Only an optional short text-mapping step can use a cloud model
+- **Cost estimation** - Predicts download size, runtime, and coverage before a run, calibrated against your archive's measured throughput
+- **Duplicate detection** - Finds repeated files and reports the space reclaimable by keeping one copy of each
+- **Reviewable copy plan** - Proposes a `Category/Year` (or `Year/Category`) tree that you approve per category. Files are **copied, never moved**, and an undo manifest is written alongside them
+- **Resumable** - A long pass picks up where it left off after an interruption instead of re-downloading work already done
 
 #### Social Media Management
 - **Command Center** - Central hub for generating posts from prompts, URLs, saved sources, or free text
@@ -74,6 +90,7 @@ What started as a podcast transcription tool has grown into a complete content p
 - Thought leaders building content queues across LinkedIn, Threads, Facebook, X/Twitter, and other platforms
 - Podcast fans who want quick summaries before committing to a full episode
 - YouTube viewers who prefer reading transcripts and summaries over watching long-form videos
+- Creators with years of unsorted photo and video backlog who need it catalogued by year and subject before it can be reused
 
 *Insights - Transforming content into actionable intelligence and engaging social media posts.*
 
@@ -119,6 +136,10 @@ Generate social media posts from any source - prompts, URLs, or text. Save URL s
 View and manage your posting queue with drag-and-drop reordering, status/platform filters, and automated time slot management.
 
 
+### Content Library
+Catalogue a media archive by year and category, browse it by either, review discovered categories and duplicates, and approve a copy plan that sorts the files.
+
+
 ---
 
 ## Project Structure
@@ -127,16 +148,25 @@ View and manage your posting queue with drag-and-drop reordering, status/platfor
 |------|-------------|
 | `insights.py` | CLI entry point and core AI generation library (transcription, summaries, articles, social copy, vision, thumbnails) |
 | `insights_web.py` | Flask web application with all routes, background workers, and UI logic |
-| `database.py` | SQLite database operations for feeds, episodes, articles, posts, schedules, sources, and more |
+| `database.py` | SQLite database operations for feeds, episodes, articles, posts, schedules, sources, library, and more |
+| `content_agent.py` | Content brief orchestrator - researches sources and prepares draft posts and articles for review |
+| `content_library.py` | Content Library engine - archive scanning, event grouping, taxonomy learning, classification, and copy planning |
+| `media_probe.py` | Filesystem and media inspection - cloud-placeholder detection, hydration budgeting, HEIC/video thumbnails and metadata |
+| `document_extractor.py` | Text extraction from uploaded PDF, Word, PowerPoint, Excel, CSV, HTML, and plain-text documents |
+| `research_engine.py` | Source research and retrieval used by the content agent |
+| `web_search.py` | External web-search providers used for research |
+| `usage_meter.py` | AI usage and cost accounting across providers |
+| `starter_prompts.py` | Built-in prompt library seed data |
 | `linkedin_client.py` | LinkedIn API client - OAuth flow, token management, and post publishing |
 | `threads_client.py` | Threads (Meta) API client - OAuth flow, token management, and post publishing |
 | `facebook_client.py` | Facebook Pages API client - OAuth flow, page token management, and post publishing |
 | `twitter_client.py` | X/Twitter API v2 client - OAuth 2.0 PKCE flow, token management, text and image posting |
+| `instagram_client.py` | Instagram Graph API client - OAuth flow, feed posts, carousels, Reels, and Stories |
 | `github_client.py` | GitHub repo URL parsing and metadata/README fetching for source ingestion |
 | `stock_images.py` | Stock image search across Unsplash, Pexels, and Pixabay with keyword extraction |
-| `templates/` | Flask HTML templates for all pages (feeds, articles, compose, schedule, etc.) |
+| `templates/` | Flask HTML templates for all pages (feeds, articles, compose, schedule, library, etc.) |
 | `static/` | Static assets (logo, favicon) |
-| `episodes.db` | Local SQLite database (created on first run) |
+| `insights.db` | Local SQLite database (created on first run) |
 
 ## Requirements
 
@@ -147,6 +177,17 @@ View and manage your posting queue with drag-and-drop reordering, status/platfor
   - [`mlx-whisper`](https://github.com/ml-explore/mlx-examples/tree/main/whisper) (recommended for Apple Silicon Macs)
   - [`faster-whisper`](https://github.com/guillaumekln/faster-whisper) (Linux, Windows, Intel Macs)
   - OpenAI Whisper API (no extra package needed - uses your API key)
+
+For the **Content Library** specifically:
+
+- FFmpeg (already required above) provides `ffprobe`/`ffmpeg` for video metadata and frame extraction
+- `sips` (built into macOS) converts HEIC images, which most modern phone archives are full of and which Pillow cannot read without the optional `pillow-heif` package
+- An [Ollama](https://ollama.com/) server with a vision model for local captioning, so images are never sent off your machine:
+  ```bash
+  ollama pull llama3.2-vision
+  ollama pull llama3.2
+  ```
+  The Library page reports which of these are present and warns you before a run if any are missing.
 
 ## Installation
 
@@ -229,6 +270,16 @@ All variables can be set in a `.env` file in the project root. See `.env.example
 | `OLLAMA_VISION_MODEL` | `llama3.2-vision` | Local vision model used when image inputs are routed through Ollama |
 | `PORT` | `5001` | Port for the Flask web server |
 | `FLASK_SECRET_KEY` | auto-generated | Secret key for Flask sessions |
+
+### Content Library
+
+The Library reuses `OLLAMA_BASE_URL`, `OLLAMA_TEXT_MODEL`, and `OLLAMA_VISION_MODEL` above for local captioning and mapping. These tune how it reads a cloud-backed archive.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LIBRARY_PREFETCH_WORKERS` | `6` | Parallel downloads warmed ahead of the classifier. Cloud providers are limited by per-request latency rather than bandwidth, so this is the most effective performance knob — measured on a real archive, 1 thread sustained 0.30 MB/s and 4 reached 3.11 MB/s |
+| `LIBRARY_PROBE_TIMEOUT` | `60` | Seconds to wait on a metadata probe of a single file. On a cloud path this includes the provider downloading the file first |
+| `LIBRARY_CONVERT_TIMEOUT` | `90` | Seconds to wait on a thumbnail or frame extraction |
 
 ### JIRA Integration
 
@@ -336,7 +387,7 @@ Navigate to `http://localhost:5001` to get started.
 3. **Process content** - Click an episode or video to transcribe and analyze it, or process text articles to extract summaries and action items
 4. **View results** - See AI-generated summaries, action items, and the full transcript on the results page
 
-Processed content is stored in a local SQLite database (`episodes.db`) for quick access.
+Processed content is stored in a local SQLite database (`insights.db`) for quick access.
 
 ### YouTube Videos
 
@@ -384,6 +435,41 @@ For each generation, select target platforms, choose how many posts to create (1
 
 **URL & GitHub Sources:**
 When generating from URLs or GitHub repos, extracted content (article body, repo metadata, README) is saved automatically. Access the **Sources** page to reuse content for future generations.
+
+### Content Library
+
+The **Library** page catalogues a media archive on disk and sorts it by year and category. It is designed for archives that are far larger than your free disk space — a cloud folder whose files are mostly placeholders — so it separates work that is free from work that costs a download, and never spends the latter without telling you first.
+
+**Setup:**
+1. Add the archive you want sorted as a folder
+2. If you have a folder you already sorted by hand, add it too and press **Learn categories** — its subfolder names become your starting taxonomy. This is optional; with discovery enabled the Library can build a taxonomy from nothing
+3. Press **Scan**. This reads only file metadata, so it downloads nothing and finishes in seconds even for tens of thousands of files
+
+The scan alone gives you a browsable catalogue: files by year, file kinds, total size, how much is stored locally versus in the cloud, and duplicate groups with the space they waste.
+
+**Classifying:**
+
+Press **Estimate cost** before running anything. It measures your archive's real download throughput and reports exactly how much will be downloaded, roughly how long it will take, and what percentage of the archive the run will cover — then refuses to start a run that would not fit on your disk.
+
+Classification runs cheapest-first:
+
+| Tier | Signal | Downloads? | Cost |
+|------|--------|-----------|------|
+| Path and filename rules | folder and file names | no | free |
+| Vision captions | a sampled frame per event | yes | free (local model) |
+| Speech transcripts | audio from video | yes | free (local model) |
+
+Options worth knowing:
+
+- **Years** — scope a run to a year range and work through a large archive in stages
+- **Discover new categories** (on by default) — lets the classifier name subjects your folders never covered. A name is adopted once it recurs across 3 events; rarer proposals are saved switched off in the Categories panel for you to promote with one click
+- **Cloud mapping** — sends only the short text step to a cloud model, which is meaningfully more accurate at matching a caption to a category. Images are never sent
+- **Max file size** — the per-file download ceiling. Events whose smallest file exceeds it are deferred rather than downloaded, and a later run with a higher ceiling will pick them up
+- **Resume** (on by default) — skips events an earlier pass already finished, so an interrupted run continues instead of starting over
+
+**Reviewing and copying:**
+
+Build a copy plan, choose `Category/Year` or `Year/Category`, set a minimum confidence, and approve per category. Nothing is copied until you approve it, files are **copied rather than moved**, and an undo manifest is written into the destination so the whole operation can be reversed. Anything the classifier could not place lands in `Unsorted` for review rather than being guessed at.
 
 ### Schedule Management
 
