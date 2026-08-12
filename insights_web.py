@@ -524,8 +524,14 @@ def _auth_and_timer():
     if endpoint in PUBLIC_ENDPOINTS or endpoint is None:
         return None
 
+    # A GET whose destination is an image must not be answered with a redirect
+    # to the login page: an <img> follows it, receives HTML with status 200,
+    # and renders as a broken image with nothing in the network log to explain
+    # why. A bare 401 is what the browser needs to fire the element's onerror.
+    wants_image = request.headers.get("Sec-Fetch-Dest") == "image"
+
     if "user_id" not in session:
-        if request.method == "GET":
+        if request.method == "GET" and not wants_image:
             # Preserve the original target so we can bounce them back post-login.
             return redirect(url_for("login", next=request.full_path))
         # For JSON / form POSTs, return 401 instead of a redirect so the
@@ -535,7 +541,7 @@ def _auth_and_timer():
     # Resolve the user once and cache it; this also clears a stale session
     # pointing at a deleted account.
     if current_user() is None:
-        if request.method == "GET":
+        if request.method == "GET" and not wants_image:
             return redirect(url_for("login", next=request.full_path))
         return jsonify({"error": "authentication required"}), 401
 
@@ -10464,6 +10470,30 @@ def _active_taxonomy() -> list:
     ]
 
 
+def _refresh_residency(files: list) -> int:
+    """Re-check which files are actually on local disk, in place.
+
+    The catalogue's ``materialized`` column is a snapshot from scan time, and
+    every later pass invalidates it by downloading samples. Trusting it makes
+    the classifier wrong in four compounding ways: the hydration budget is
+    charged for bytes already on disk, the free-sample shortcut never fires so
+    events are deferred when a local file was available, cost estimates
+    overstate the download, and cheapest-first ordering loses its ordering.
+
+    A stat over the whole catalogue costs well under a second, so this runs at
+    the start of any pass that reasons about cost. It is deliberately not done
+    inside a GET: residency changes constantly, and the stored column is only
+    meaningful as "residency when scanned".
+    """
+    refreshed = 0
+    for f in files:
+        live = media_probe.is_materialized(f.path)
+        if live != f.materialized:
+            f.materialized = live
+            refreshed += 1
+    return refreshed
+
+
 def _scanned_from_row(row) -> content_library.ScannedFile:
     """Rebuild an engine object from a catalogue row."""
     return content_library.ScannedFile(
@@ -10814,6 +10844,7 @@ def library_estimate(scan_id: int):
 
     rows, _ = database.query_library_files(scan_id, limit=1_000_000)
     files = [_scanned_from_row(r) for r in rows]
+    _refresh_residency(files)
     events: dict[str, list] = {}
     for f in files:
         events.setdefault(f.event_key, []).append(f)
@@ -10898,7 +10929,7 @@ def library_files(scan_id: int):
     """Filtered page of the catalogue, for the browse table."""
     rows, total = database.query_library_files(
         scan_id,
-        year=request.args.get("year", type=int),
+        year=request.args.get("year") or None,
         category=request.args.get("category") or None,
         kind=request.args.get("kind") or None,
         search=request.args.get("q") or None,
@@ -10907,18 +10938,37 @@ def library_files(scan_id: int):
         limit=request.args.get("limit", default=200, type=int),
         offset=request.args.get("offset", default=0, type=int),
     )
-    return jsonify({
-        "total": total,
-        "files": [{
-            "id": r["id"], "rel_path": r["rel_path"], "path": r["path"],
-            "name": r["name"],
+    # Captions are produced per event, not per file, so the browse table has to
+    # borrow its event's description. Fetched in one pass for the whole page.
+    captions = database.event_captions(
+        scan_id, [r["event_key"] for r in rows if r["event_key"]])
+
+    files = []
+    for r in rows:
+        # Residency is derived live rather than read from the stored column.
+        # That column is a snapshot from scan time and understates what is
+        # available by more than an order of magnitude once a classification
+        # pass has downloaded its samples -- which is precisely why the grid
+        # used to render a cloud glyph for almost every row. The check is a
+        # stat, costing under a millisecond for a whole page and never
+        # triggering a download.
+        cached = media_probe.cached_thumb(r["path"]) is not None
+        if cached:
+            preview = "cached"
+        elif media_probe.is_materialized(r["path"]):
+            preview = "local"       # renderable on demand, no download needed
+        else:
+            preview = "remote"      # bytes still in the cloud; no preview
+        files.append({
+            "id": r["id"], "rel_path": r["rel_path"], "name": r["name"],
             "kind": r["kind"], "size": r["size"], "year": r["year"],
             "category": r["category"] or "Unsorted", "confidence": r["confidence"],
-            "classified_by": r["classified_by"], "caption": r["caption"],
-            "materialized": bool(r["materialized"]), "dup_group": r["dup_group"],
+            "classified_by": r["classified_by"],
+            "caption": r["caption"] or captions.get(r["event_key"], ""),
+            "preview": preview, "dup_group": r["dup_group"],
             "event_key": r["event_key"],
-        } for r in rows],
-    })
+        })
+    return jsonify({"total": total, "files": files})
 
 
 @app.route('/library/scan/<int:scan_id>/events')
@@ -11087,48 +11137,145 @@ def library_undo(scan_id: int):
     return jsonify({"ok": True, **result})
 
 
-@app.route('/library/thumb')
-def library_thumb():
-    """Render a preview for one catalogued file.
+# Bounds concurrent preview rendering. Each render is a subprocess doing a full
+# source decode, and the machine is also running the local vision model and the
+# archive prefetcher, so this leaves headroom rather than saturating the CPU.
+_thumb_slots = threading.BoundedSemaphore(4)
 
-    Only files already on the local disk are rendered by default: this endpoint
-    is hit by a grid of images, and silently downloading a placeholder per
-    thumbnail would pull gigabytes in the background. ``?force=1`` opts a single
-    file in.
+
+@app.route('/library/thumb/<int:file_id>')
+def library_thumb(file_id: int):
+    """Serve the cached preview for one catalogued file.
+
+    Addressed by catalogue id rather than by filesystem path. Taking a path
+    from the client meant validating it against the registered roots on every
+    request and putting absolute paths into the page; resolving the row is
+    simpler and closes that surface entirely.
+
+    A cache miss renders only when the file is already on local disk. A file
+    whose bytes are still in the cloud is never fetched here: this endpoint is
+    hit once per row of a grid, and downloading on miss would turn a page load
+    into a multi-gigabyte transfer.
     """
-    path = request.args.get("path", "")
-    if not path or not os.path.isfile(path):
+    row = database.get_library_file(file_id)
+    if not row:
         return abort(404)
 
-    # Confine previews to registered roots so the endpoint cannot be used to
-    # read arbitrary files off the host.
-    roots = [r["path"] for r in database.list_library_roots()]
-    if not any(os.path.abspath(path).startswith(os.path.abspath(r) + os.sep) for r in roots):
-        return abort(403)
+    path = row["path"]
+    hit = media_probe.cached_thumb(path)
+    if not hit:
+        if not media_probe.is_materialized(path):
+            return abort(409)       # in the cloud; caller shows a placeholder
+        with _thumb_slots:
+            hit = media_probe.ensure_thumb(path)
+        if not hit:
+            return abort(415)       # unrenderable, or every frame was blank
 
-    if request.args.get("force") != "1" and not media_probe.is_materialized(path):
-        return abort(409)
-
-    kind = media_probe.file_kind(path)
-    tmp = tempfile.mkdtemp(prefix="insights_thumb_")
+    # The cache key already encodes path, size and mtime, so a given URL's
+    # bytes never change. That makes the response immutable and lets the
+    # browser skip revalidation entirely on subsequent views.
+    etag = os.path.basename(hit).removesuffix(".jpg")
+    if request.headers.get("If-None-Match") == etag:
+        return Response(status=304)
     try:
-        out = os.path.join(tmp, "thumb.jpg")
-        ok = False
-        if kind == "image":
-            ok = media_probe.thumbnail_image(path, out, max_px=480)
-        elif kind == "video":
-            frames = media_probe.extract_frames(path, tmp, count=1, max_px=480)
-            if frames:
-                shutil.copyfile(frames[0], out)
-                ok = True
-        if not ok:
-            return abort(415)
-        with open(out, "rb") as fh:
+        with open(hit, "rb") as fh:
             data = fh.read()
-        return Response(data, mimetype="image/jpeg",
-                        headers={"Cache-Control": "private, max-age=3600"})
+    except OSError:
+        return abort(404)
+    return Response(data, mimetype="image/jpeg", headers={
+        "ETag": etag,
+        "Cache-Control": "private, max-age=31536000, immutable",
+    })
+
+
+@app.route('/library/file/<int:file_id>/reveal', methods=['POST'])
+def library_reveal(file_id: int):
+    """Show a catalogued file in Finder.
+
+    The fastest route from "I found it in the catalogue" to "I have the file"
+    without copying anything. Reveals rather than opens, so a cloud-only file
+    shows as a placeholder in Finder instead of being downloaded.
+    """
+    row = database.get_library_file(file_id)
+    if not row:
+        return jsonify({"error": "Unknown file"}), 404
+    if not os.path.exists(row["path"]):
+        return jsonify({"error": "File is no longer at that path"}), 404
+    try:
+        subprocess.run(["open", "-R", row["path"]], check=False, timeout=10)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"ok": True, "path": row["path"]})
+
+
+def _thumb_backfill_thread(scan_id: int) -> None:
+    """Render previews for every already-local file in a scan.
+
+    Free: it only touches files whose bytes are already on disk, so it costs
+    CPU and a little disk but no downloads. This, rather than classification,
+    is what actually populates the cache -- a classification pass only ever
+    renders one or two samples per event.
+    """
+    job = _library_job(scan_id)
+    job["running"] = True
+    job["stop"] = False
+    done = made = skipped = 0
+    try:
+        rows, _ = database.query_library_files(scan_id, limit=1_000_000)
+        candidates = [r for r in rows if r["kind"] in ("image", "video")]
+        database.update_library_scan(scan_id, status="thumbnailing",
+                                     phase="rendering previews",
+                                     events_total=len(candidates), events_done=0)
+
+        def render_one(row) -> str:
+            if media_probe.cached_thumb(row["path"]):
+                return "skip"
+            if not media_probe.is_materialized(row["path"]):
+                return "skip"
+            return "made" if media_probe.ensure_thumb(row["path"]) else "fail"
+
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for result in pool.map(render_one, candidates):
+                done += 1
+                if result == "made":
+                    made += 1
+                elif result == "skip":
+                    skipped += 1
+                if done % 100 == 0:
+                    if job.get("stop"):
+                        break
+                    database.update_library_scan(scan_id, events_done=done)
+
+        stats = media_probe.thumb_cache_stats()
+        database.update_library_scan(
+            scan_id, status="scanned", phase="previews ready", events_done=done,
+            stats={"thumbnails": {"examined": done, "rendered": made,
+                                  "skipped": skipped, "cache": stats}})
+        log_activity("library_thumbs",
+                     details=f"Rendered {made} previews ({stats['files']} cached, "
+                             f"{stats['bytes'] / 2**20:.0f} MB)")
+    except Exception as exc:
+        app.logger.exception("thumbnail backfill failed")
+        database.update_library_scan(scan_id, status="failed", error_message=str(exc)[:500])
     finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        job["running"] = False
+
+
+@app.route('/library/scan/<int:scan_id>/thumbnails', methods=['POST'])
+def library_build_thumbnails(scan_id: int):
+    """Kick off preview rendering for every locally-available file."""
+    if _library_job_running(scan_id):
+        return jsonify({"error": "A job is already running for this scan"}), 409
+    threading.Thread(target=_thumb_backfill_thread, args=(scan_id,), daemon=True).start()
+    return jsonify({"ok": True})
+
+
+@app.route('/library/thumbnails/stats')
+def library_thumb_stats():
+    """Cache size, for the dashboard."""
+    stats = media_probe.thumb_cache_stats()
+    stats["mb"] = round(stats["bytes"] / 1024 ** 2, 1)
+    return jsonify(stats)
 
 
 def start_workers():

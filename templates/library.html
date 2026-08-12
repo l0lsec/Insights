@@ -272,7 +272,7 @@
                     <tbody>
                     {% for y in summary.by_year %}
                         <tr>
-                            <td><a href="#" onclick="browse({year:{{ y.year or 0 }}});return false">{{ y.year or 'Undated' }}</a></td>
+                            <td><a href="#" onclick="browse({year:'{{ y.year or 'none' }}'});return false">{{ y.year or 'Undated' }}</a></td>
                             <td class="text-end">{{ y.files }}</td>
                             <td class="text-end text-muted small">{{ '%.1f'|format(y.bytes / 1073741824) }} GB</td>
                         </tr>
@@ -366,6 +366,9 @@
         <div class="d-flex gap-2">
             <input class="form-control form-control-sm" id="searchBox" placeholder="search path or caption"
                    style="width:16rem" onkeydown="if(event.key==='Enter')browse({q:this.value})">
+            <button class="btn btn-sm btn-outline-primary" id="thumbBtn" onclick="buildThumbs()"
+                    title="Render previews for every file already on this Mac. Downloads nothing.">
+                🖼 Build previews</button>
             <button class="btn btn-sm btn-outline-secondary" onclick="browse({unsorted:'1'})">Unsorted only</button>
             <button class="btn btn-sm btn-outline-secondary" onclick="browse({})">All</button>
         </div>
@@ -374,6 +377,7 @@
         <div id="browseResults" class="p-3 text-muted small">
             Pick a year or category above, or search.
         </div>
+        <div class="px-3 pb-2 text-muted small" id="thumbStats"></div>
     </div>
 </div>
 {% endif %}
@@ -534,31 +538,103 @@ async function applyPlan() {
     poll();
 }
 
-async function browse(filters) {
-    const p = new URLSearchParams(filters);
-    const r = await fetch(`/library/scan/${SCAN_ID}/files?limit=100&` + p.toString());
+function esc(v) {
+    // Filenames and model-written captions land in innerHTML, so everything
+    // interpolated below has to be escaped or a file called
+    // `<img src=x onerror=...>` would execute.
+    return String(v ?? '').replace(/[&<>"']/g, ch => (
+        {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+const PREVIEW_HINT = {
+    remote: 'In OneDrive, not downloaded — no preview without fetching it',
+    local: 'On this Mac, preview not rendered yet',
+};
+
+function thumbCell(f) {
+    // Only cached or already-local files get an <img>. A remote file has no
+    // bytes on this machine, and requesting one per row would turn a page load
+    // into a mass download.
+    if (f.preview === 'remote') {
+        return `<span class="text-muted" title="${esc(PREVIEW_HINT.remote)}">☁</span>`;
+    }
+    return `<img src="/library/thumb/${f.id}" width="48" height="48" loading="lazy"
+                 alt="${esc(f.name)}" title="Click to view"
+                 style="object-fit:cover;border-radius:3px;cursor:pointer"
+                 onclick="lightbox(${f.id}, '${esc(f.rel_path).replace(/'/g, "\\'")}')"
+                 onerror="this.replaceWith(Object.assign(document.createElement('span'),
+                          {className:'text-muted small', textContent:'—',
+                           title:'Preview unavailable'}))">`;
+}
+
+function lightbox(id, label) {
+    const wrap = document.createElement('div');
+    wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.85);z-index:2000;' +
+                         'display:flex;align-items:center;justify-content:center;flex-direction:column;gap:1rem';
+    wrap.innerHTML = `<img src="/library/thumb/${id}" style="max-width:90vw;max-height:80vh;object-fit:contain">
+        <div class="text-light small font-monospace">${esc(label)}</div>
+        <div><button class="btn btn-sm btn-light" onclick="revealFile(${id});event.stopPropagation()">Reveal in Finder</button></div>`;
+    wrap.onclick = () => wrap.remove();
+    document.body.appendChild(wrap);
+}
+
+async function revealFile(id) {
+    const r = await fetch(`/library/file/${id}/reveal`, {method: 'POST'});
     const d = await r.json();
+    if (d.error) alert(d.error);
+}
+
+async function browse(filters) {
     const box = document.getElementById('browseResults');
+    box.innerHTML = '<span class="text-muted small">Loading…</span>';
+    box.scrollIntoView({behavior: 'smooth', block: 'nearest'});
+    const p = new URLSearchParams(filters);
+    let d;
+    try {
+        const r = await fetch(`/library/scan/${SCAN_ID}/files?limit=100&` + p.toString());
+        if (!r.ok) throw new Error(`server returned ${r.status}`);
+        d = await r.json();
+    } catch (err) {
+        box.innerHTML = `<span class="text-danger small">Could not load files: ${esc(err.message)}</span>`;
+        return;
+    }
     if (!d.files.length) { box.textContent = 'No matches.'; return; }
+    const shown = d.files.filter(f => f.preview !== 'remote').length;
     let html = `<div class="mb-2 text-muted small">${d.total.toLocaleString()} matching files
-        (showing ${d.files.length})</div>
+        (showing ${d.files.length}, ${shown} with previews)</div>
         <table class="table table-sm align-middle"><thead><tr><th></th><th>File</th><th>Year</th>
-        <th>Category</th><th>What the model saw</th></tr></thead><tbody>`;
+        <th>Category</th><th>What the model saw</th><th></th></tr></thead><tbody>`;
     for (const f of d.files) {
-        const thumb = f.materialized
-            ? `<img src="/library/thumb?path=${encodeURIComponent(f.path)}" style="height:38px" loading="lazy">`
-            : '<span class="text-muted small">☁</span>';
         html += `<tr>
-            <td style="width:3rem">${thumb}</td>
-            <td><div class="font-monospace small">${f.rel_path}</div>
+            <td style="width:3.5rem">${thumbCell(f)}</td>
+            <td><div class="font-monospace small">${esc(f.rel_path)}</div>
                 ${f.dup_group > 1 ? `<span class="badge bg-warning text-dark">×${f.dup_group} duplicate</span>` : ''}</td>
             <td>${f.year || ''}</td>
-            <td><span class="badge bg-secondary">${f.category}</span>
-                <div class="text-muted small">${f.classified_by || ''}</div></td>
-            <td class="text-muted small">${(f.caption || '').slice(0, 110)}</td>
+            <td><span class="badge bg-secondary">${esc(f.category)}</span>
+                <div class="text-muted small">${esc(f.classified_by || '')}</div></td>
+            <td class="text-muted small">${esc((f.caption || '').slice(0, 110))}</td>
+            <td class="text-end"><button class="btn btn-sm btn-outline-secondary py-0"
+                onclick="revealFile(${f.id})" title="Show in Finder">↗</button></td>
         </tr>`;
     }
     box.innerHTML = html + '</tbody></table>';
+}
+
+async function buildThumbs() {
+    const btn = document.getElementById('thumbBtn');
+    btn.disabled = true;
+    const r = await fetch(`/library/scan/${SCAN_ID}/thumbnails`, {method: 'POST'});
+    const d = await r.json();
+    if (d.error) { alert(d.error); btn.disabled = false; return; }
+    poll();
+}
+
+async function thumbStats() {
+    const r = await fetch('/library/thumbnails/stats');
+    const d = await r.json();
+    const el = document.getElementById('thumbStats');
+    if (el) el.textContent = d.files
+        ? `${d.files.toLocaleString()} previews cached (${d.mb} MB)` : 'no previews cached yet';
 }
 
 async function loadDuplicates() {
@@ -578,6 +654,6 @@ async function loadDuplicates() {
     box.scrollIntoView({behavior: 'smooth'});
 }
 
-if (SCAN_ID) poll();
+if (SCAN_ID) { poll(); thumbStats(); }
 </script>
 {% endblock %}

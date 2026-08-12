@@ -33,6 +33,7 @@ module.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -528,6 +529,126 @@ def extract_audio(path: str, dest: str, max_seconds: int = 600) -> bool:
         logger.warning("audio extraction failed for %s: %s", path, exc)
         return False
     return res.returncode == 0 and os.path.exists(dest) and os.path.getsize(dest) > 0
+
+
+# ── Thumbnail cache ─────────────────────────────────────────────────────────
+#
+# Rendering a preview costs a subprocess and a full source decode: measured
+# medians are 47 ms for PNG, 72 ms for JPEG and 332 ms for HEIC, which is the
+# most common format in a phone archive. A 200-row grid regenerating every
+# thumbnail takes ~14 seconds; served from cache the same grid takes ~0.15 s.
+# So previews are rendered once and kept.
+
+THUMB_CACHE_DIR = os.environ.get(
+    "LIBRARY_THUMB_CACHE",
+    os.path.join(os.path.expanduser("~"), ".insights", "library_thumbs"),
+)
+
+# 320px keeps the whole cache small (~677 MB even if every file in a 32k
+# archive were local) and costs no more CPU than a larger target -- the time
+# goes on decoding the source, not on scaling it.
+THUMB_MAX_PX = int(os.environ.get("LIBRARY_THUMB_PX", "320"))
+
+
+def thumb_key(path: str) -> str:
+    """Content-ish cache key for a file: resolved path, size, and mtime.
+
+    Deliberately not the catalogue row id. A rescan inserts fresh rows with new
+    ids, which would orphan every cached image and force the whole backfill to
+    be paid again. Keying on the file itself means the cache survives rescans,
+    is shared between duplicate copies of the same file, and invalidates itself
+    when the file is edited.
+    """
+    try:
+        real = os.path.realpath(path)
+        st = os.stat(real)
+        raw = f"{real}|{st.st_size}|{int(st.st_mtime)}|{THUMB_MAX_PX}"
+    except OSError:
+        raw = f"{path}|missing|{THUMB_MAX_PX}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def thumb_path(key: str) -> str:
+    """Location on disk for a cache key, sharded to keep directories small."""
+    return os.path.join(THUMB_CACHE_DIR, key[:2], f"{key}.jpg")
+
+
+def cached_thumb(path: str) -> Optional[str]:
+    """Return the cached preview for a file, or None if it is not cached."""
+    candidate = thumb_path(thumb_key(path))
+    try:
+        if os.path.getsize(candidate) > 0:
+            return candidate
+    except OSError:
+        return None
+    return None
+
+
+def render_thumb(path: str, dest: str) -> bool:
+    """Render a preview for one file into ``dest`` (warm -- reads the file).
+
+    Handles stills and video, and screens the result: a frame carrying no
+    visual information is rejected rather than written, because a cached blank
+    is permanent and indistinguishable from a real black photograph.
+    """
+    kind = file_kind(path)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+
+    if kind == "image":
+        return thumbnail_image(path, dest, max_px=THUMB_MAX_PX)
+
+    if kind == "video":
+        # Probe once and hand the duration to the extractor, which otherwise
+        # re-spawns ffprobe itself and falls back to frame zero -- often a
+        # black fade or a lens cap -- when it cannot determine the length.
+        meta = probe_video(path) or {}
+        with TempWorkspace(prefix="insights_thumb_") as workspace:
+            frames = extract_frames(path, workspace, count=1,
+                                    max_px=THUMB_MAX_PX,
+                                    duration=meta.get("duration"))
+            for frame in frames:
+                if frame_is_blank(frame):
+                    continue
+                try:
+                    shutil.copyfile(frame, dest)
+                    return True
+                except OSError:
+                    return False
+        return False
+
+    return False
+
+
+def ensure_thumb(path: str) -> Optional[str]:
+    """Return a cached preview, rendering it first if the file is local.
+
+    Never triggers a download: a file whose bytes are still in the cloud is
+    reported as having no preview rather than being fetched. Callers that want
+    to pay for a download must materialize the file themselves first.
+    """
+    hit = cached_thumb(path)
+    if hit:
+        return hit
+    if not is_materialized(path):
+        return None
+    dest = thumb_path(thumb_key(path))
+    return dest if render_thumb(path, dest) else None
+
+
+def thumb_cache_stats() -> dict:
+    """Count and total size of the cache, for the UI."""
+    files = 0
+    total = 0
+    for dirpath, _, filenames in os.walk(THUMB_CACHE_DIR):
+        for name in filenames:
+            if not name.endswith(".jpg"):
+                continue
+            try:
+                total += os.path.getsize(os.path.join(dirpath, name))
+                files += 1
+            except OSError:
+                continue
+    return {"files": files, "bytes": total, "dir": THUMB_CACHE_DIR}
 
 
 class TempWorkspace:

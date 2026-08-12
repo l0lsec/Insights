@@ -5088,7 +5088,7 @@ def library_summary(scan_id: int, db_path: str = DB_PATH) -> dict:
 
 def query_library_files(
     scan_id: int,
-    year: Optional[int] = None,
+    year: Optional[object] = None,
     category: Optional[str] = None,
     kind: Optional[str] = None,
     search: Optional[str] = None,
@@ -5102,7 +5102,12 @@ def query_library_files(
     conditions = ["scan_id = ?"]
     params: list = [scan_id]
 
-    if year:
+    # "none" selects the undated bucket. Testing truthiness here would silently
+    # drop the filter for undated files and return the whole catalogue labelled
+    # as if it were that bucket.
+    if year == "none":
+        conditions.append("year IS NULL")
+    elif year not in (None, ""):
         conditions.append("year = ?")
         params.append(int(year))
     if category:
@@ -5291,3 +5296,44 @@ def mark_plan_item_applied(item_id: int, error: str = "", db_path: str = DB_PATH
             ("failed" if error else "applied",
              datetime.now().isoformat(timespec="seconds"), error or None, item_id),
         )
+
+
+def get_library_file(file_id: int, db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
+    """Fetch one catalogued file by id."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        cur = conn.execute("SELECT * FROM library_files WHERE id = ?", (file_id,))
+        return cur.fetchone()
+
+
+def event_captions(scan_id: int, event_keys: Iterable[str],
+                   db_path: str = DB_PATH) -> Dict[str, str]:
+    """Map event keys to their first caption.
+
+    Captions are produced once per event and stored there, while the browse
+    table lists files. Without this the "what the model saw" column is blank on
+    every row even though the description exists.
+    """
+    keys = [k for k in dict.fromkeys(event_keys) if k]
+    if not keys:
+        return {}
+    out: Dict[str, str] = {}
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        # Chunked to stay under SQLite's variable limit on a large page.
+        for i in range(0, len(keys), 400):
+            chunk = keys[i:i + 400]
+            rows = conn.execute(
+                f"""SELECT event_key, captions, reason FROM library_events
+                    WHERE scan_id = ? AND event_key IN ({','.join('?' * len(chunk))})""",
+                [scan_id] + chunk,
+            ).fetchall()
+            for r in rows:
+                text = ""
+                try:
+                    caps = json.loads(r["captions"] or "[]")
+                    text = caps[0] if caps else ""
+                except (TypeError, ValueError):
+                    text = ""
+                out[r["event_key"]] = text or (r["reason"] or "")
+    return out
