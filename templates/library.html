@@ -622,11 +622,57 @@ async function browse(filters) {
 
 async function buildThumbs() {
     const btn = document.getElementById('thumbBtn');
+    const out = document.getElementById('thumbStats');
     btn.disabled = true;
-    const r = await fetch(`/library/scan/${SCAN_ID}/thumbnails`, {method: 'POST'});
-    const d = await r.json();
-    if (d.error) { alert(d.error); btn.disabled = false; return; }
-    poll();
+    const label = btn.textContent;
+    btn.textContent = '⏳ Rendering…';
+    out.textContent = 'Scanning for files that are on this Mac but have no preview yet…';
+
+    let d;
+    try {
+        const r = await fetch(`/library/scan/${SCAN_ID}/thumbnails`, {method: 'POST'});
+        d = await r.json();
+        if (!r.ok || d.error) throw new Error(d.error || `server returned ${r.status}`);
+    } catch (err) {
+        out.innerHTML = `<span class="text-danger">Could not start: ${esc(err.message)}</span>`;
+        btn.disabled = false; btn.textContent = label;
+        return;
+    }
+
+    // Watch the job to completion. Without this the button simply greys out and
+    // nothing ever reports back, which reads as the click having done nothing —
+    // especially on a re-run, where every preview is already cached and the
+    // honest result is that there was no work to do.
+    for (;;) {
+        await new Promise(r => setTimeout(r, 1500));
+        let s;
+        try {
+            s = await (await fetch(`/library/scan/${SCAN_ID}/status`)).json();
+        } catch { continue; }
+        if (s.phase) out.textContent = `${s.phase}: ${(s.events_done || 0).toLocaleString()} of ${(s.events_total || 0).toLocaleString()} files checked…`;
+        if (s.running) continue;
+
+        const t = (s.stats || {}).thumbnails;
+        if (s.status === 'failed') {
+            out.innerHTML = `<span class="text-danger">Failed: ${esc(s.error || 'unknown error')}</span>`;
+        } else if (t) {
+            const cache = t.cache || {};
+            const made = t.rendered || 0;
+            out.innerHTML = made
+                ? `<span class="text-success">Rendered ${made.toLocaleString()} new previews.</span>
+                   ${(cache.files || 0).toLocaleString()} cached in total (${((cache.bytes || 0) / 1048576).toFixed(0)} MB).`
+                : `Nothing new to render — all ${(cache.files || 0).toLocaleString()} previews for
+                   locally-available files are already cached
+                   (${((cache.bytes || 0) / 1048576).toFixed(0)} MB).
+                   <div class="mt-1">The remaining ${(t.skipped || 0).toLocaleString()} files are in OneDrive
+                   and have no bytes on this Mac, so they cannot be previewed without downloading them.</div>`;
+            if (made) browse({});
+        } else {
+            thumbStats();
+        }
+        btn.disabled = false; btn.textContent = label;
+        return;
+    }
 }
 
 async function thumbStats() {
