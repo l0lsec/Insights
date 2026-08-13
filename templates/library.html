@@ -390,6 +390,7 @@
 {% endif %}
 
 <script>
+let sawJobRunning = false;
 const SCAN_ID = {{ scan.id if scan else 'null' }};
 const fmtGb = b => (b / 1073741824).toFixed(2) + ' GB';
 
@@ -476,8 +477,13 @@ async function poll() {
     const pct = s.events_total ? (100 * (s.events_done || 0) / s.events_total) : 0;
     document.getElementById('progBar').style.width = pct.toFixed(1) + '%';
 
-    if (s.running) setTimeout(poll, 3000);
-    else if (s.status === 'classified' || s.status === 'applied') setTimeout(() => location.reload(), 1200);
+    // Reload only after watching a job we were present for finish. Keying off
+    // the status alone reloads on every page load once a scan has ever
+    // completed, because that status is then permanent — which reloads the
+    // page every second or so, forever, and makes it impossible to scroll or
+    // read anything.
+    if (s.running) { sawJobRunning = true; setTimeout(poll, 3000); }
+    else if (sawJobRunning) { sawJobRunning = false; setTimeout(() => location.reload(), 1200); }
 }
 
 async function buildPlan() {
