@@ -10777,6 +10777,50 @@ def library_learn_taxonomy():
     return redirect(url_for("library_page"))
 
 
+@app.route('/library/scan/<int:scan_id>/regroup', methods=['POST'])
+def library_regroup(scan_id: int):
+    """Separate video from stills in folders that hold both, in place.
+
+    Existing catalogues were grouped before that split existed, so their mixed
+    folders carry one label derived from a still. Rebuilding by rescanning is
+    not an option -- the scan inserts rather than upserts, so it would duplicate
+    every row -- and the fix only needs to move the motion files onto their own
+    event key and drop the label they inherited. They then read as unclassified
+    and the next pass reconsiders them on their own evidence.
+
+    Labels on the still side are left exactly as they are: those events were
+    sampled from a still and are still correctly described by it.
+    """
+    rows, _ = database.query_library_files(scan_id, limit=1_000_000)
+    by_event: dict[str, list] = {}
+    for r in rows:
+        by_event.setdefault(r["event_key"], []).append(r)
+
+    moved_files = 0
+    moved_events = 0
+    for key, group in by_event.items():
+        if key.endswith(content_library.MOTION_SUFFIX):
+            continue        # already split by an earlier run
+        kinds = {r["kind"] for r in group}
+        if "image" not in kinds or not (kinds - {"image"}):
+            continue        # single-kind folder; nothing to separate
+        motion = [r for r in group if r["kind"] != "image"]
+        if not motion:
+            continue
+        # Insert the suffix before the sequence-cluster marker so the new key
+        # matches what group_events would produce on a fresh scan.
+        base, _, cluster = key.rpartition("#")
+        new_key = f"{base}{content_library.MOTION_SUFFIX}#{cluster}" if base else key + content_library.MOTION_SUFFIX
+        moved_files += database.move_files_to_event(
+            scan_id, [r["id"] for r in motion], new_key)
+        moved_events += 1
+
+    database.recount_library_categories(scan_id)
+    log_activity("library_regroup",
+                 details=f"Split {moved_events} mixed events, {moved_files} video files reopened")
+    return jsonify({"ok": True, "events_split": moved_events, "files_moved": moved_files})
+
+
 @app.route('/library/scan/<int:scan_id>/categories/merge', methods=['POST'])
 def library_merge_categories(scan_id: int):
     """Consolidate the taxonomy, rewriting existing labels to match.

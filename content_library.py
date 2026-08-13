@@ -429,6 +429,11 @@ SEQUENCE_GAP = 60
 # whole directory as one event -- UUID-named exports carry no ordering.
 SEQUENCE_COVERAGE = 0.6
 
+# Marks the motion half of a folder that holds both stills and video. Chosen to
+# be a character that cannot occur in a path component, so a split key can never
+# collide with a real directory.
+MOTION_SUFFIX = "\x1fv"
+
 # Sequence splitting only applies to folders with at least this many files.
 # In a date-foldered archive the directory already *is* the event, and
 # splitting a 6-photo day into three "events" triples the AI cost while making
@@ -450,8 +455,31 @@ def group_events(files: Sequence[ScannedFile]) -> dict[str, list[ScannedFile]]:
     for f in files:
         by_dir[os.path.dirname(f.rel_path)].append(f)
 
-    events: dict[str, list[ScannedFile]] = {}
+    # Stills and motion in the same folder are separated before clustering.
+    # Sampling prefers stills because they are far cheaper to fetch, so in a
+    # mixed folder the label is always derived from a photo and then inherited
+    # by the video beside it. That is right when both show the same occasion and
+    # badly wrong when they do not -- a screenshot saved on the same day as a
+    # drone flight described the flight as a motivational quote. Splitting means
+    # each kind is sampled and labelled on its own evidence.
+    #
+    # The suffix is applied only to the motion side, and only when a folder
+    # actually holds both. Keys are the catalogue's identity for an event, so
+    # leaving the still side untouched keeps every existing label attached to
+    # the event that earned it; only the newly separated motion events look
+    # unclassified, which is exactly what should be reconsidered.
+    split: dict[str, list[ScannedFile]] = {}
     for dirname, group in by_dir.items():
+        stills = [f for f in group if f.kind == "image"]
+        motion = [f for f in group if f.kind != "image"]
+        if stills and motion:
+            split[dirname] = stills
+            split[dirname + MOTION_SUFFIX] = motion
+        else:
+            split[dirname] = group
+
+    events: dict[str, list[ScannedFile]] = {}
+    for dirname, group in split.items():
         with_seq = [f for f in group if f.seq is not None]
         coverage = len(with_seq) / len(group) if group else 0
 
