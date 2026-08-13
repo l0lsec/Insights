@@ -11001,7 +11001,8 @@ def _library_classify_thread(scan_id: int, opts: dict) -> None:
 
         in_scope = len(events)
         if opts.get("resume", True):
-            events = content_library.pending_events(events)
+            events = content_library.pending_events(
+                events, retry_unresolved=bool(opts.get("retry_unresolved")))
             already = in_scope - len(events)
             if already:
                 app.logger.info("library resume: skipping %d of %d events already "
@@ -11210,6 +11211,49 @@ def library_learn_taxonomy():
     return redirect(url_for("library_page"))
 
 
+@app.route('/library/scan/<int:scan_id>/categories/merge', methods=['POST'])
+def library_merge_categories(scan_id: int):
+    """Consolidate the taxonomy, rewriting existing labels to match.
+
+    Body: ``{"merges": [{"target": str, "sources": [str, ...]}, ...],
+              "retire": [str, ...]}``.
+
+    Merging is applied to the catalogue as well as the category list, because a
+    taxonomy edit that leaves old labels in place would keep returning
+    categories the classifier no longer offers. Retired categories are
+    deactivated, never deleted -- the files keep their label and stay findable,
+    they just stop being proposed for new work.
+    """
+    data = request.get_json(silent=True) or {}
+    merges = data.get("merges") or []
+    retire = data.get("retire") or []
+
+    applied, files_moved, events_moved = [], 0, 0
+    for merge in merges:
+        target = (merge.get("target") or "").strip()
+        sources = [s for s in (merge.get("sources") or []) if s]
+        if not target or not sources:
+            continue
+        result = database.merge_library_categories(scan_id, target, sources)
+        files_moved += result["files"]
+        events_moved += result["events"]
+        applied.append({"target": target, "sources": sources, **result})
+
+    for name in retire:
+        database.set_library_category_active(name, False)
+
+    database.recount_library_categories(scan_id)
+    active = database.list_library_categories(active_only=True)
+    log_activity("library_taxonomy",
+                 details=f"Merged {len(applied)} groups ({files_moved} files), "
+                         f"retired {len(retire)}; {len(active)} categories active")
+    return jsonify({
+        "ok": True, "merges": applied, "retired": len(retire),
+        "files_moved": files_moved, "events_moved": events_moved,
+        "active_categories": len(active),
+    })
+
+
 @app.route('/library/categories/toggle', methods=['POST'])
 def library_toggle_category():
     data = request.get_json(silent=True) or request.form
@@ -11291,7 +11335,8 @@ def library_estimate(scan_id: int):
     # work it is going to skip.
     in_scope = len(events)
     if request.args.get("resume", "1") == "1":
-        events = content_library.pending_events(events)
+        events = content_library.pending_events(
+            events, retry_unresolved=request.args.get("retry_unresolved") == "1")
     already_done = in_scope - len(events)
 
     # Time a few real reads unless asked not to. On a cloud-backed archive the
@@ -11345,6 +11390,10 @@ def library_classify(scan_id: int):
         # earlier pass already resolved is almost never what is wanted, and on
         # a metered cloud archive it is the expensive mistake.
         "resume": str(data.get("resume", "1")) in ("1", "true", "on", "True"),
+        # Reopen events that were examined but left unlabelled. Worth doing
+        # after the taxonomy changes, since the samples are usually already
+        # local and the earlier answer was "none of these fit".
+        "retry_unresolved": str(data.get("retry_unresolved", "")) in ("1", "true", "on", "True"),
     }
     threading.Thread(target=_library_classify_thread, args=(scan_id, opts),
                      daemon=True).start()
