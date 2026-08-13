@@ -5337,3 +5337,54 @@ def event_captions(scan_id: int, event_keys: Iterable[str],
                     text = ""
                 out[r["event_key"]] = text or (r["reason"] or "")
     return out
+
+
+def merge_library_categories(scan_id: int, target: str, sources: Iterable[str],
+                             db_path: str = DB_PATH) -> Dict[str, int]:
+    """Fold ``sources`` into ``target``, rewriting labels on files and events.
+
+    Consolidating a taxonomy has to move the existing labels with it, or the
+    catalogue keeps answering with categories that are no longer offered. The
+    source categories are deactivated rather than deleted, so the record of
+    what the classifier originally proposed survives.
+    """
+    srcs = [s for s in sources if s and s != target]
+    if not srcs:
+        return {"files": 0, "events": 0}
+    marks = ",".join("?" * len(srcs))
+    with sqlite3.connect(db_path) as conn:
+        files = conn.execute(
+            f"UPDATE library_files SET category = ? WHERE scan_id = ? AND category IN ({marks})",
+            [target, scan_id] + srcs,
+        ).rowcount
+        events = conn.execute(
+            f"UPDATE library_events SET category = ? WHERE scan_id = ? AND category IN ({marks})",
+            [target, scan_id] + srcs,
+        ).rowcount
+        conn.execute(
+            f"UPDATE library_categories SET active = 0 WHERE name IN ({marks})", srcs)
+        # The target may be a brand-new umbrella name that has no row yet.
+        conn.execute(
+            """INSERT INTO library_categories (name, subcategories, keywords,
+                   example_count, source, active, created_at)
+               VALUES (?,?,?,?,?,1,?)
+               ON CONFLICT(name) DO UPDATE SET active = 1""",
+            (target, json.dumps([]), json.dumps([]), 0, "merged",
+             datetime.now().isoformat(timespec="seconds")),
+        )
+    return {"files": files, "events": events}
+
+
+def recount_library_categories(scan_id: int, db_path: str = DB_PATH) -> int:
+    """Refresh each category's example count from the catalogue itself."""
+    with sqlite3.connect(db_path) as conn:
+        rows = conn.execute(
+            """SELECT category, COUNT(*) n FROM library_files
+               WHERE scan_id = ? AND category IS NOT NULL AND category != ''
+               GROUP BY category""",
+            (scan_id,),
+        ).fetchall()
+        for name, n in rows:
+            conn.execute("UPDATE library_categories SET example_count = ? WHERE name = ?",
+                         (n, name))
+        return len(rows)

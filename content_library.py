@@ -1705,6 +1705,7 @@ def event_is_classified(files: Sequence[ScannedFile]) -> bool:
 
 def pending_events(
     events: dict[str, list[ScannedFile]],
+    retry_unresolved: bool = False,
 ) -> dict[str, list[ScannedFile]]:
     """Drop events a previous pass already resolved, for resuming a run.
 
@@ -1713,8 +1714,27 @@ def pending_events(
     job -- would otherwise mean starting from zero and re-downloading
     everything. Results are persisted per event as the run proceeds, so the
     completed ones are simply skipped on the next attempt.
+
+    ``retry_unresolved`` additionally reopens events that were examined but
+    ended up unlabelled. Ordinary resume treats those as finished, because
+    re-running an unchanged pipeline would spend the same money to reach the
+    same answer. That reasoning stops holding the moment the taxonomy changes:
+    an event the model could not place among a hundred overlapping categories
+    may be obvious among fifty clean ones, and its samples are usually already
+    on disk, so the retry is close to free.
     """
-    return {k: v for k, v in events.items() if not event_is_classified(v)}
+    out = {}
+    for key, files in events.items():
+        if not event_is_classified(files):
+            out[key] = files
+        elif retry_unresolved and _event_is_unlabelled(files):
+            out[key] = files
+    return out
+
+
+def _event_is_unlabelled(files: Sequence[ScannedFile]) -> bool:
+    """Whether an event was examined but came out with no usable category."""
+    return all((f.category or UNSORTED) == UNSORTED for f in files)
 
 
 def filter_events_by_year(
