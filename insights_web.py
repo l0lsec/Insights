@@ -11257,6 +11257,40 @@ def library_reveal(file_id: int):
     return jsonify({"ok": True, "path": row["path"]})
 
 
+@app.route('/library/file/<int:file_id>/open', methods=['POST'])
+def library_open_file(file_id: int):
+    """Open a catalogued file in whatever application owns its type.
+
+    The catalogue's whole purpose is getting back to the footage, so a filename
+    has to lead to the file itself and not just to a 48px thumbnail.
+
+    Opening a cloud-only file materializes it, so the size is returned to the
+    caller before that happens and the client confirms. Nothing here reads the
+    bytes itself -- handing the path to the OS is what triggers the download,
+    and only for the one file asked for.
+    """
+    row = database.get_library_file(file_id)
+    if not row:
+        return jsonify({"error": "Unknown file"}), 404
+    path = row["path"]
+    if not os.path.exists(path):
+        return jsonify({"error": "File is no longer at that path"}), 404
+
+    local = media_probe.is_materialized(path)
+    if not local and request.args.get("confirm") != "1":
+        return jsonify({
+            "needs_confirm": True,
+            "size": row["size"],
+            "name": row["name"],
+        }), 409
+
+    try:
+        subprocess.run(["open", path], check=False, timeout=15)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return jsonify({"error": str(exc)}), 500
+    return jsonify({"ok": True, "downloaded": not local, "size": row["size"]})
+
+
 def _thumb_backfill_thread(scan_id: int) -> None:
     """Render previews for every already-local file in a scan.
 

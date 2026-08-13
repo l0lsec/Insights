@@ -593,6 +593,20 @@ function lightbox(id, label) {
     document.body.appendChild(wrap);
 }
 
+async function openFile(id) {
+    // Opening a cloud-only file downloads it, so the server refuses until the
+    // caller has been told the size and agreed to it.
+    let r = await fetch(`/library/file/${id}/open`, {method: 'POST'});
+    let d = await r.json();
+    if (r.status === 409 && d.needs_confirm) {
+        const mb = (d.size / 1048576).toFixed(0);
+        if (!confirm(`${d.name} is not on this Mac.\n\nOpening it downloads ${mb} MB from OneDrive. Continue?`)) return;
+        r = await fetch(`/library/file/${id}/open?confirm=1`, {method: 'POST'});
+        d = await r.json();
+    }
+    if (d.error) alert(d.error);
+}
+
 async function revealFile(id) {
     const r = await fetch(`/library/file/${id}/reveal`, {method: 'POST'});
     const d = await r.json();
@@ -622,7 +636,9 @@ async function browse(filters) {
     for (const f of d.files) {
         html += `<tr>
             <td style="width:3.5rem">${thumbCell(f)}</td>
-            <td><div class="font-monospace small">${esc(f.rel_path)}</div>
+            <td><a href="#" class="font-monospace small text-decoration-none"
+                   title="Open this file"
+                   onclick="openFile(${f.id});return false">${esc(f.rel_path)}</a>
                 ${f.dup_group > 1 ? `<span class="badge bg-warning text-dark">×${f.dup_group} duplicate</span>` : ''}</td>
             <td>${f.year || ''}</td>
             <td><span class="badge bg-secondary">${esc(f.category)}</span>
