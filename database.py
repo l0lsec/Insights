@@ -5388,3 +5388,28 @@ def recount_library_categories(scan_id: int, db_path: str = DB_PATH) -> int:
             conn.execute("UPDATE library_categories SET example_count = ? WHERE name = ?",
                          (n, name))
         return len(rows)
+
+
+def move_files_to_event(scan_id: int, file_ids: Iterable[int], event_key: str,
+                        db_path: str = DB_PATH) -> int:
+    """Reassign files to a different event and clear the label they inherited.
+
+    Used when a folder's video is separated from its stills. The label being
+    dropped was derived from a still and never described these files, so it is
+    removed rather than carried over -- leaving it would keep a confident wrong
+    answer in the catalogue and, worse, make the files look already-classified
+    to a resumed pass.
+    """
+    ids = [int(i) for i in file_ids]
+    if not ids:
+        return 0
+    marks = ",".join("?" * len(ids))
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            f"""UPDATE library_files
+                SET event_key = ?, category = NULL, confidence = 0,
+                    classified_by = NULL, caption = NULL, notes = NULL
+                WHERE scan_id = ? AND id IN ({marks})""",
+            [event_key, scan_id] + ids,
+        )
+        return cur.rowcount
