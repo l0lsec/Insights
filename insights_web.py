@@ -11068,6 +11068,8 @@ def _library_classify_thread(scan_id: int, opts: dict) -> None:
             should_stop=lambda: _library_job(scan_id).get("stop", False),
             use_cloud_mapping=bool(opts.get("use_cloud_mapping")),
             allow_new_categories=bool(opts.get("allow_new_categories")),
+            video_frames=int(opts.get("video_frames", 2) or 2),
+            motion_samples=int(opts.get("motion_samples", 1) or 1),
             on_category=on_category,
         )
 
@@ -11438,6 +11440,11 @@ def library_classify(scan_id: int):
         # after the taxonomy changes, since the samples are usually already
         # local and the earlier answer was "none of these fit".
         "retry_unresolved": str(data.get("retry_unresolved", "")) in ("1", "true", "on", "True"),
+        # Frames sampled per video. Costs inference, not download.
+        "video_frames": int(data.get("video_frames", 2) or 2),
+        # Clips sampled per video-only event. A second opinion where
+        # a single dud sample would otherwise sink the whole event.
+        "motion_samples": int(data.get("motion_samples", 1) or 1),
     }
     threading.Thread(target=_library_classify_thread, args=(scan_id, opts),
                      daemon=True).start()
