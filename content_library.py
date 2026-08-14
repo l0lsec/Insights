@@ -566,7 +566,8 @@ PREFETCH_WORKERS = int(os.environ.get("LIBRARY_PREFETCH_WORKERS", "6"))
 
 
 def choose_samples(files: Sequence[ScannedFile], max_samples: int = 2,
-                   max_sample_bytes: int = MAX_SAMPLE_BYTES) -> list[ScannedFile]:
+                   max_sample_bytes: int = MAX_SAMPLE_BYTES,
+                   motion_samples: int = 1) -> list[ScannedFile]:
     """Pick the files that best represent an event, cheapest-to-read first.
 
     On a cloud-backed archive the dominant cost is bytes downloaded, and the
@@ -599,17 +600,27 @@ def choose_samples(files: Sequence[ScannedFile], max_samples: int = 2,
     if distinctive:
         usable = distinctive
 
-    resident = [f for f in usable if f.materialized]
-    if len(resident) >= max_samples:
-        return _spread(resident, max_samples)
-
     images = [f for f in usable if f.kind == "image"]
     if images:
         pool, want = images, max_samples
     else:
-        # Motion-only event: one frame grab is enough to name it, and each one
-        # is expensive, so never take a second.
-        pool, want = usable, 1
+        # Motion-only event. One clip is the cheap default, because each video
+        # sample costs a whole file. But one clip also *is* the whole event's
+        # evidence, so a dud -- a blank opening frame, a Live Photo, an
+        # establishing shot of empty sky -- sends every file in the event to
+        # Unsorted no matter how clear the others are. Measured on a real
+        # archive, clips that failed as an event's lone sample classified
+        # correctly when judged individually. ``motion_samples`` lets a
+        # follow-up pass buy a second opinion where a first pass could not
+        # afford one.
+        pool, want = usable, max(1, motion_samples)
+
+    # Files already on disk are free whatever their kind, but the cap still
+    # applies: taking max_samples of them here would quietly ignore the motion
+    # limit on an event whose clips happen to be local.
+    resident = [f for f in usable if f.materialized]
+    if len(resident) >= want:
+        return _spread(resident, want)
 
     affordable = [f for f in pool if f.size <= max_sample_bytes or f.materialized]
     if not affordable:
@@ -620,10 +631,11 @@ def choose_samples(files: Sequence[ScannedFile], max_samples: int = 2,
 
 
 def sample_cost(files: Sequence[ScannedFile], max_samples: int = 2,
-                max_sample_bytes: int = MAX_SAMPLE_BYTES) -> int:
+                max_sample_bytes: int = MAX_SAMPLE_BYTES,
+                motion_samples: int = 1) -> int:
     """Bytes that classifying this event would download. 0 if already local."""
     return sum(
-        s.size for s in choose_samples(files, max_samples, max_sample_bytes)
+        s.size for s in choose_samples(files, max_samples, max_sample_bytes, motion_samples)
         if not s.materialized
     )
 
@@ -709,6 +721,7 @@ def estimate_pass(
     max_samples: int = 2,
     max_sample_bytes: int = MAX_SAMPLE_BYTES,
     hydration_bps: Optional[float] = None,
+    motion_samples: int = 1,
 ) -> dict:
     """Predict the cost of an AI pass before committing to it (cold).
 
@@ -728,7 +741,7 @@ def estimate_pass(
         if confidence >= MIN_CONFIDENCE:
             by_rule += 1
             continue
-        picked = choose_samples(files, max_samples, max_sample_bytes)
+        picked = choose_samples(files, max_samples, max_sample_bytes, motion_samples)
         if not picked:
             deferred_events += 1
             deferred_files += len(files)
@@ -953,7 +966,7 @@ CAPTION_PROMPT = (
 
 
 def caption_file(f: ScannedFile, budget: HydrationBudget, workspace: str,
-                 vision_model: str = "") -> tuple[str, dict]:
+                 vision_model: str = "", video_frames: int = 2) -> tuple[str, dict]:
     """Download one file, render it to a JPEG, and caption it (warm).
 
     Returns ``(caption, metadata)``. ``metadata`` carries whatever the container
@@ -983,9 +996,15 @@ def caption_file(f: ScannedFile, budget: HydrationBudget, workspace: str,
         # spend a model call to redescribe a photo already in the catalogue.
         if meta.get("is_live_photo"):
             return "", meta
+        # More frames is the cheapest available accuracy gain for video: the
+        # file is already downloaded by this point, so each extra frame costs a
+        # scrub and an inference and nothing on the network. One or two frames
+        # of a moving subject is thin evidence -- a drone shot can open on empty
+        # sky and land on a rooftop -- and thin evidence is what left so much
+        # footage unresolved.
         frames = media_probe.extract_frames(
             f.path, os.path.join(workspace, "frames"),
-            count=2, duration=meta.get("duration"),
+            count=max(1, video_frames), duration=meta.get("duration"),
         )
     elif f.kind == "audio":
         return "", {}
@@ -1464,6 +1483,8 @@ def classify_events(
     text_model: str = "",
     use_cloud_mapping: bool = False,
     allow_new_categories: bool = False,
+    video_frames: int = 2,
+    motion_samples: int = 1,
     on_category: Optional[Callable[[str, int], None]] = None,
 ) -> dict:
     """Run the full ladder over every event and label its files in place.
@@ -1541,7 +1562,7 @@ def classify_events(
     # Cheapest-to-inspect first: events whose samples are already on disk.
     def event_cost(pair) -> tuple:
         _, files = pair
-        samples = choose_samples(files, max_samples, max_sample_bytes)
+        samples = choose_samples(files, max_samples, max_sample_bytes, motion_samples)
         if not samples:
             return (2, 0)   # deferred: sort last, resolved without downloading
         return (
@@ -1561,7 +1582,7 @@ def classify_events(
         while prefetched < min(cursor + PREFETCH_DEPTH, len(ai_queue)):
             _, upcoming = ai_queue[prefetched]
             prefetched += 1
-            for sample in choose_samples(upcoming, max_samples, max_sample_bytes):
+            for sample in choose_samples(upcoming, max_samples, max_sample_bytes, motion_samples):
                 # Check affordability without charging; caption_file does the
                 # accounting so a file is never counted twice.
                 if not sample.materialized and budget.can_afford(sample.size):
@@ -1576,7 +1597,7 @@ def classify_events(
                 break
 
             summary = event_summary(key, files)
-            samples = choose_samples(files, max_samples, max_sample_bytes)
+            samples = choose_samples(files, max_samples, max_sample_bytes, motion_samples)
             if not samples:
                 # Every candidate exceeds the per-file download ceiling. Leave
                 # the event labelled and visible so the owner can opt into the
@@ -1595,7 +1616,8 @@ def classify_events(
             with TempWorkspace() as workspace:
                 for sample in samples:
                     try:
-                        caption, meta = caption_file(sample, budget, workspace, vision_model)
+                        caption, meta = caption_file(sample, budget, workspace,
+                                                     vision_model, video_frames)
                     except BudgetExhausted:
                         exhausted = True
                         break
