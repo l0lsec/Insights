@@ -10556,6 +10556,11 @@ def _library_classify_thread(scan_id: int, opts: dict) -> None:
                                      events_done=0)
         rows, _ = database.query_library_files(scan_id, limit=1_000_000)
         files = [_scanned_from_row(r) for r in rows]
+        # Without this the pass reasons about cost using the scan-time
+        # residency snapshot, which every prior pass has invalidated by
+        # downloading samples. The budget is then charged for bytes already on
+        # disk, so it exhausts against phantom spend and cuts the run short.
+        _refresh_residency(files)
         events: dict[str, list] = {}
         for f in files:
             events.setdefault(f.event_key, []).append(f)
