@@ -10990,6 +10990,11 @@ def _library_classify_thread(scan_id: int, opts: dict) -> None:
                                      events_done=0)
         rows, _ = database.query_library_files(scan_id, limit=1_000_000)
         files = [_scanned_from_row(r) for r in rows]
+        # Without this the pass reasons about cost using the scan-time
+        # residency snapshot, which every prior pass has invalidated by
+        # downloading samples. The budget is then charged for bytes already on
+        # disk, so it exhausts against phantom spend and cuts the run short.
+        _refresh_residency(files)
         events: dict[str, list] = {}
         for f in files:
             events.setdefault(f.event_key, []).append(f)
@@ -11298,6 +11303,28 @@ def library_merge_categories(scan_id: int):
         "files_moved": files_moved, "events_moved": events_moved,
         "active_categories": len(active),
     })
+
+
+@app.route('/library/scan/<int:scan_id>/categories/undo-merge', methods=['POST'])
+def library_undo_merge(scan_id: int):
+    """Restore the labels files carried before a taxonomy merge.
+
+    Body may carry ``{"targets": [...]}`` to unwind only some merges; with no
+    body the whole consolidation is reversed. A GET-like preview is available
+    by posting nothing and reading ``available`` first.
+    """
+    data = request.get_json(silent=True) or {}
+    targets = data.get("targets") or None
+    if data.get("preview"):
+        return jsonify({"available": database.merge_undo_available(scan_id)})
+
+    result = database.undo_library_merge(scan_id, targets)
+    database.recount_library_categories(scan_id)
+    log_activity("library_taxonomy",
+                 details=f"Undid merge: {result['files']} files restored to "
+                         f"{result['categories_restored']} categories")
+    return jsonify({"ok": True, **result,
+                    "active_categories": len(database.list_library_categories(active_only=True))})
 
 
 @app.route('/library/categories/toggle', methods=['POST'])
