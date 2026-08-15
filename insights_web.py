@@ -10866,6 +10866,28 @@ def library_merge_categories(scan_id: int):
     })
 
 
+@app.route('/library/scan/<int:scan_id>/categories/undo-merge', methods=['POST'])
+def library_undo_merge(scan_id: int):
+    """Restore the labels files carried before a taxonomy merge.
+
+    Body may carry ``{"targets": [...]}`` to unwind only some merges; with no
+    body the whole consolidation is reversed. A GET-like preview is available
+    by posting nothing and reading ``available`` first.
+    """
+    data = request.get_json(silent=True) or {}
+    targets = data.get("targets") or None
+    if data.get("preview"):
+        return jsonify({"available": database.merge_undo_available(scan_id)})
+
+    result = database.undo_library_merge(scan_id, targets)
+    database.recount_library_categories(scan_id)
+    log_activity("library_taxonomy",
+                 details=f"Undid merge: {result['files']} files restored to "
+                         f"{result['categories_restored']} categories")
+    return jsonify({"ok": True, **result,
+                    "active_categories": len(database.list_library_categories(active_only=True))})
+
+
 @app.route('/library/categories/toggle', methods=['POST'])
 def library_toggle_category():
     data = request.get_json(silent=True) or request.form

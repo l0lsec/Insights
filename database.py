@@ -664,6 +664,14 @@ def init_db(db_path: str = DB_PATH) -> None:
         ):
             conn.execute(stmt)
 
+        # Keep the label a file carried before a taxonomy merge, so a
+        # consolidation can be undone exactly rather than re-derived by paying
+        # for classification again.
+        cur = conn.execute("PRAGMA table_info(library_files)")
+        lib_cols = [row[1] for row in cur.fetchall()]
+        if lib_cols and "previous_category" not in lib_cols:
+            conn.execute("ALTER TABLE library_files ADD COLUMN previous_category TEXT")
+
         # Upgrade any existing DB with newer columns
         cur = conn.execute("PRAGMA table_info(episodes)")
         columns = [row[1] for row in cur.fetchall()]
@@ -4885,11 +4893,34 @@ def create_library_scan(root_id: int, db_path: str = DB_PATH) -> int:
 
 
 def update_library_scan(scan_id: int, db_path: str = DB_PATH, **fields) -> None:
-    """Patch a scan row. ``stats`` is JSON-encoded automatically."""
+    """Patch a scan row.
+
+    A ``stats`` dict is merged into whatever is already stored rather than
+    replacing it. Several kinds of job write to the same scan row -- a
+    classification pass, then a preview render -- and a wholesale replace meant
+    the last one to finish erased the others' results. Passing a JSON string
+    still replaces outright, for callers that want a clean slate.
+    """
     if not fields:
         return
     allowed = {"status", "phase", "files_total", "events_total", "events_done",
                "bytes_downloaded", "stats", "finished_at", "error_message"}
+
+    if isinstance(fields.get("stats"), dict):
+        existing = {}
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute("SELECT stats FROM library_scans WHERE id = ?",
+                               (scan_id,)).fetchone()
+        if row and row[0]:
+            try:
+                loaded = json.loads(row[0])
+                if isinstance(loaded, dict):
+                    existing = loaded
+            except (TypeError, ValueError):
+                existing = {}
+        existing.update(fields["stats"])
+        fields = {**fields, "stats": json.dumps(existing, default=str)}
+
     sets, params = [], []
     for key, value in fields.items():
         if key not in allowed:
@@ -5354,7 +5385,9 @@ def merge_library_categories(scan_id: int, target: str, sources: Iterable[str],
     marks = ",".join("?" * len(srcs))
     with sqlite3.connect(db_path) as conn:
         files = conn.execute(
-            f"UPDATE library_files SET category = ? WHERE scan_id = ? AND category IN ({marks})",
+            f"""UPDATE library_files
+                SET previous_category = category, category = ?
+                WHERE scan_id = ? AND category IN ({marks})""",
             [target, scan_id] + srcs,
         ).rowcount
         events = conn.execute(
@@ -5413,3 +5446,47 @@ def move_files_to_event(scan_id: int, file_ids: Iterable[int], event_key: str,
             [event_key, scan_id] + ids,
         )
         return cur.rowcount
+
+
+def undo_library_merge(scan_id: int, targets: Optional[List[str]] = None,
+                       db_path: str = DB_PATH) -> Dict[str, int]:
+    """Restore the labels files carried before a taxonomy merge.
+
+    Only files whose previous label was recorded are touched, and the record is
+    cleared as it is consumed so an undo cannot be applied twice. Categories
+    that were deactivated by the merge are switched back on, since files are
+    about to reference them again.
+    """
+    conditions = ["scan_id = ?", "previous_category IS NOT NULL", "previous_category != ''"]
+    params: list = [scan_id]
+    if targets:
+        conditions.append(f"category IN ({','.join('?' * len(targets))})")
+        params.extend(targets)
+    where = " AND ".join(conditions)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        restored_names = [r[0] for r in conn.execute(
+            f"SELECT DISTINCT previous_category FROM library_files WHERE {where}", params)]
+        files = conn.execute(
+            f"""UPDATE library_files
+                SET category = previous_category, previous_category = NULL
+                WHERE {where}""",
+            params,
+        ).rowcount
+        for name in restored_names:
+            conn.execute("UPDATE library_categories SET active = 1 WHERE name = ?", (name,))
+    return {"files": files, "categories_restored": len(restored_names),
+            "names": sorted(restored_names)}
+
+
+def merge_undo_available(scan_id: int, db_path: str = DB_PATH) -> Dict[str, int]:
+    """How much of the last merge could still be undone."""
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            """SELECT COUNT(*) n, COUNT(DISTINCT previous_category) c
+               FROM library_files
+               WHERE scan_id = ? AND previous_category IS NOT NULL AND previous_category != ''""",
+            (scan_id,),
+        ).fetchone()
+    return {"files": row[0], "categories": row[1]}
