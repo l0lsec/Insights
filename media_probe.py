@@ -619,17 +619,22 @@ def render_thumb(path: str, dest: str) -> bool:
     return False
 
 
-def ensure_thumb(path: str) -> Optional[str]:
-    """Return a cached preview, rendering it first if the file is local.
+def ensure_thumb(path: str, allow_fetch: bool = False) -> Optional[str]:
+    """Return a cached preview, rendering it first if the file can be read.
 
-    Never triggers a download: a file whose bytes are still in the cloud is
-    reported as having no preview rather than being fetched. Callers that want
-    to pay for a download must materialize the file themselves first.
+    By default this never triggers a download: a file whose bytes are still in
+    the cloud is reported as having no preview rather than being fetched, which
+    is what keeps a grid render from turning into a mass transfer.
+
+    ``allow_fetch`` opts a caller into paying for the bytes. Only a caller
+    working against an explicit budget should set it -- rendering reads the
+    whole file, and on a cloud path that is a download whether or not anything
+    else in the process is counting.
     """
     hit = cached_thumb(path)
     if hit:
         return hit
-    if not is_materialized(path):
+    if not allow_fetch and not is_materialized(path):
         return None
     dest = thumb_path(thumb_key(path))
     return dest if render_thumb(path, dest) else None

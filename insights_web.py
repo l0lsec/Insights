@@ -11379,31 +11379,68 @@ def library_open_file(file_id: int):
     return jsonify({"ok": True, "downloaded": not local, "size": row["size"]})
 
 
-def _thumb_backfill_thread(scan_id: int) -> None:
-    """Render previews for every already-local file in a scan.
+def _thumb_backfill_thread(scan_id: int, fetch_gb: float = 0.0,
+                           max_file_mb: int = 24,
+                           kinds: tuple = ("image", "video")) -> None:
+    """Render previews, optionally fetching files that are not on disk yet.
 
-    Free: it only touches files whose bytes are already on disk, so it costs
-    CPU and a little disk but no downloads. This, rather than classification,
-    is what actually populates the cache -- a classification pass only ever
-    renders one or two samples per event.
+    With ``fetch_gb`` at zero this only touches bytes already present, which is
+    free but caps coverage at whatever earlier passes happened to download.
+
+    Given an allowance it will also pull down files it has not seen. That is
+    the only way to preview a cloud-backed archive, and it is affordable for
+    stills in a way it is not for video: in a typical phone archive the entire
+    still collection is a few tens of gigabytes while the video runs to
+    hundreds. Work is ordered smallest-first so an allowance buys the largest
+    number of previews, and ``max_file_mb`` keeps a single large clip from
+    consuming it.
+
+    A rendered preview outlives the file it came from. The cache lives outside
+    the cloud folder, so the originals can be evicted afterwards and the
+    previews remain.
     """
     job = _library_job(scan_id)
     job["running"] = True
     job["stop"] = False
-    done = made = skipped = 0
+    done = made = skipped = fetched = 0
+    budget = media_probe.HydrationBudget(limit_bytes=int(fetch_gb * 1024 ** 3))
+    lock = threading.Lock()
+
     try:
         rows, _ = database.query_library_files(scan_id, limit=1_000_000)
-        candidates = [r for r in rows if r["kind"] in ("image", "video")]
+        # Restricting the kinds makes an allowance deterministic. Work is
+        # ordered smallest-first, so without this a pass aimed at stills
+        # would spend part of its budget on whatever small clips happen to
+        # sort ahead of them.
+        candidates = [r for r in rows if r["kind"] in kinds]
+        # Cheapest first: already-local files cost nothing, then smallest
+        # downloads, so a limited allowance yields the most previews.
+        candidates.sort(key=lambda r: (
+            0 if media_probe.is_materialized(r["path"]) else 1, r["size"]))
         database.update_library_scan(scan_id, status="thumbnailing",
                                      phase="rendering previews",
                                      events_total=len(candidates), events_done=0)
 
         def render_one(row) -> str:
-            if media_probe.cached_thumb(row["path"]):
+            nonlocal fetched
+            path = row["path"]
+            if media_probe.cached_thumb(path):
                 return "skip"
-            if not media_probe.is_materialized(row["path"]):
-                return "skip"
-            return "made" if media_probe.ensure_thumb(row["path"]) else "fail"
+            paying = False
+            if not media_probe.is_materialized(path):
+                if not fetch_gb or row["size"] > max_file_mb * 1024 ** 2:
+                    return "skip"
+                with lock:
+                    try:
+                        budget.charge(row["size"])
+                    except media_probe.BudgetExhausted:
+                        return "skip"
+                    fetched += 1
+                paying = True
+            # allow_fetch has to be passed explicitly: rendering reads the whole
+            # file, and ensure_thumb refuses cloud files by default precisely so
+            # that no caller downloads one by accident.
+            return "made" if media_probe.ensure_thumb(path, allow_fetch=paying) else "fail"
 
         with ThreadPoolExecutor(max_workers=4) as pool:
             for result in pool.map(render_one, candidates):
@@ -11415,16 +11452,21 @@ def _thumb_backfill_thread(scan_id: int) -> None:
                 if done % 100 == 0:
                     if job.get("stop"):
                         break
-                    database.update_library_scan(scan_id, events_done=done)
+                    database.update_library_scan(
+                        scan_id, events_done=done,
+                        bytes_downloaded=budget.spent_bytes)
 
         stats = media_probe.thumb_cache_stats()
         database.update_library_scan(
             scan_id, status="scanned", phase="previews ready", events_done=done,
+            bytes_downloaded=budget.spent_bytes,
             stats={"thumbnails": {"examined": done, "rendered": made,
-                                  "skipped": skipped, "cache": stats}})
+                                  "skipped": skipped, "fetched": fetched,
+                                  "fetched_bytes": budget.spent_bytes,
+                                  "cache": stats}})
         log_activity("library_thumbs",
-                     details=f"Rendered {made} previews ({stats['files']} cached, "
-                             f"{stats['bytes'] / 2**20:.0f} MB)")
+                     details=f"Rendered {made} previews ({fetched} fetched, "
+                             f"{stats['files']} cached, {stats['bytes'] / 2**20:.0f} MB)")
     except Exception as exc:
         app.logger.exception("thumbnail backfill failed")
         database.update_library_scan(scan_id, status="failed", error_message=str(exc)[:500])
@@ -11434,11 +11476,39 @@ def _thumb_backfill_thread(scan_id: int) -> None:
 
 @app.route('/library/scan/<int:scan_id>/thumbnails', methods=['POST'])
 def library_build_thumbnails(scan_id: int):
-    """Kick off preview rendering for every locally-available file."""
+    """Kick off preview rendering.
+
+    ``fetch_gb`` lets the pass download files it has not seen, which is the
+    only way to raise coverage past whatever earlier passes happened to pull
+    down. Zero keeps it free.
+    """
     if _library_job_running(scan_id):
         return jsonify({"error": "A job is already running for this scan"}), 409
-    threading.Thread(target=_thumb_backfill_thread, args=(scan_id,), daemon=True).start()
-    return jsonify({"ok": True})
+    data = request.get_json(silent=True) or request.form or {}
+    try:
+        fetch_gb = float(data.get("fetch_gb", 0) or 0)
+        max_file_mb = int(data.get("max_file_mb", 24) or 24)
+    except (TypeError, ValueError):
+        return jsonify({"error": "fetch_gb and max_file_mb must be numbers"}), 400
+
+    free = media_probe.free_bytes("/")
+    if fetch_gb * 1024 ** 3 > free - 5 * 1024 ** 3:
+        return jsonify({
+            "error": f"Fetching {fetch_gb:.0f} GB would leave under 5 GB free "
+                     f"({free / 2**30:.0f} GB available)",
+        }), 400
+
+    kinds = data.get("kinds") or ["image", "video"]
+    if isinstance(kinds, str):
+        kinds = [k.strip() for k in kinds.split(",") if k.strip()]
+    kinds = tuple(k for k in kinds if k in ("image", "video"))
+    if not kinds:
+        return jsonify({"error": "kinds must include image and/or video"}), 400
+
+    threading.Thread(target=_thumb_backfill_thread,
+                     args=(scan_id, fetch_gb, max_file_mb, kinds), daemon=True).start()
+    return jsonify({"ok": True, "fetch_gb": fetch_gb,
+                    "max_file_mb": max_file_mb, "kinds": list(kinds)})
 
 
 @app.route('/library/thumbnails/stats')
