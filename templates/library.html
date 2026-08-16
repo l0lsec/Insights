@@ -380,8 +380,14 @@
         <div class="d-flex gap-2">
             <input class="form-control form-control-sm" id="searchBox" placeholder="search path or caption"
                    style="width:16rem" onkeydown="if(event.key==='Enter')browse({q:this.value})">
+            <div class="input-group input-group-sm" style="width:15rem">
+                <span class="input-group-text">fetch up to</span>
+                <input type="number" class="form-control" id="thumbFetchGb" value="0" min="0" step="1"
+                       title="GB of not-yet-downloaded files to pull down for previewing. 0 = only what is already here.">
+                <span class="input-group-text">GB</span>
+            </div>
             <button class="btn btn-sm btn-outline-primary" id="thumbBtn" onclick="buildThumbs()"
-                    title="Render previews for every file already on this Mac. Downloads nothing.">
+                    title="Render previews. With a fetch allowance it downloads files it has not seen yet.">
                 🖼 Build previews</button>
             <button class="btn btn-sm btn-outline-secondary" onclick="browse({unsorted:'1'})">Unsorted only</button>
             <button class="btn btn-sm btn-outline-secondary" onclick="browse({})">All</button>
@@ -674,7 +680,9 @@ async function buildThumbs() {
 
     let d;
     try {
-        const r = await fetch(`/library/scan/${SCAN_ID}/thumbnails`, {method: 'POST'});
+        const r = await fetch(`/library/scan/${SCAN_ID}/thumbnails`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({fetch_gb: document.getElementById('thumbFetchGb').value || 0})});
         d = await r.json();
         if (!r.ok || d.error) throw new Error(d.error || `server returned ${r.status}`);
     } catch (err) {
@@ -703,7 +711,7 @@ async function buildThumbs() {
             const cache = t.cache || {};
             const made = t.rendered || 0;
             out.innerHTML = made
-                ? `<span class="text-success">Rendered ${made.toLocaleString()} new previews.</span>
+                ? `<span class="text-success">Rendered ${made.toLocaleString()} new previews${t.fetched ? `, fetching ${t.fetched.toLocaleString()} files (${((t.fetched_bytes||0)/1073741824).toFixed(1)} GB)` : ''}.</span>
                    ${(cache.files || 0).toLocaleString()} cached in total (${((cache.bytes || 0) / 1048576).toFixed(0)} MB).`
                 : `Nothing new to render — all ${(cache.files || 0).toLocaleString()} previews for
                    locally-available files are already cached
