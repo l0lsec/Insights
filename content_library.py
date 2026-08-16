@@ -1370,17 +1370,28 @@ def apply_plan(
     dest_root: str,
     manifest_path: Optional[str] = None,
     progress: Optional[Callable[[int, int], None]] = None,
+    mode: str = "copy",
 ) -> dict:
-    """Copy approved items into ``dest_root``, writing an undo manifest.
+    """Materialize approved items under ``dest_root``, writing an undo manifest.
 
-    Copies rather than moves, so a mistake in the plan costs disk space instead
-    of losing an original. Every copy is appended to a JSONL manifest as it
-    completes, which makes the operation resumable and reversible even if the
-    process dies partway.
+    Never moves, so a mistake in the plan costs disk space rather than
+    originals. Every item is appended to a JSONL manifest as it completes,
+    which makes the operation resumable and reversible even if the process dies
+    partway.
 
-    Note that copying a placeholder file downloads it first, so the plan's
-    total size is a real download cost -- the caller is expected to have shown
-    that number to the user before calling this.
+    Two modes, and on a cloud-backed archive the choice is not cosmetic:
+
+    ``copy``
+        Duplicates the bytes. Copying a placeholder downloads it first, so the
+        plan's total size is a real download and a real second copy on disk.
+        Only viable when that total fits the volume.
+    ``link``
+        Writes a symlink pointing at the original. Costs no bytes and downloads
+        nothing, because a symlink refers to the file without reading it. The
+        result is a browsable Category/Year tree over an archive far larger
+        than the disk, where opening any entry fetches just that file. The
+        tradeoff is that it is a view, not a duplicate: it breaks if the
+        originals move, and it is not a backup.
     """
     dest_root = os.path.abspath(os.path.expanduser(dest_root))
     os.makedirs(dest_root, exist_ok=True)
@@ -1395,15 +1406,32 @@ def apply_plan(
             try:
                 os.makedirs(os.path.dirname(target), exist_ok=True)
 
-                # Idempotent: a same-size file already at the target means a
-                # previous run copied it, so resuming is safe.
-                if os.path.exists(target) and os.path.getsize(target) == item.size:
+                # Idempotent: an entry already at the target means an earlier
+                # run placed it, so resuming is safe.
+                #
+                # A link is compared by what it resolves to, not by the string
+                # it stores -- those differ whenever a path reaches here in a
+                # different but equivalent form, and a mismatch would silently
+                # write a second link beside the first on every re-run.
+                if os.path.islink(target):
+                    same = False
+                    try:
+                        same = os.path.realpath(target) == os.path.realpath(item.src)
+                    except OSError:
+                        same = False
+                    if same:
+                        skipped += 1
+                        continue
+                elif os.path.exists(target) and os.path.getsize(target) == item.size:
                     skipped += 1
                     continue
-                if os.path.exists(target):
+                if os.path.exists(target) or os.path.islink(target):
                     target = _dedupe_name(target)
 
-                shutil.copy2(item.src, target)
+                if mode == "link":
+                    os.symlink(item.src, target)
+                else:
+                    shutil.copy2(item.src, target)
                 copied += 1
                 if manifest:
                     manifest.write(json.dumps({
@@ -1411,6 +1439,7 @@ def apply_plan(
                         "dest": target,
                         "size": item.size,
                         "category": item.category,
+                        "mode": mode,
                         "copied_at": datetime.now().isoformat(timespec="seconds"),
                     }) + "\n")
                     manifest.flush()
@@ -1446,18 +1475,32 @@ def undo_plan(manifest_path: str) -> dict:
     if not os.path.exists(manifest_path):
         return {"removed": 0, "missing": 0, "failed": 0}
 
+    seen: set[str] = set()
     with open(manifest_path, encoding="utf-8") as fh:
         for line in fh:
             try:
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            # A destination can appear more than once if an apply was re-run,
+            # and counting it twice would report removing more than exists.
+            if rec.get("dest") in seen:
+                continue
+            seen.add(rec.get("dest"))
             dest = rec.get("dest")
-            if not dest or not os.path.exists(dest):
+            if not dest or not (os.path.exists(dest) or os.path.islink(dest)):
                 missing += 1
                 continue
             try:
-                if os.path.getsize(dest) == rec.get("size"):
+                # A link is removed on identity, not size: os.path.getsize
+                # follows it to the original, which must never be deleted.
+                if os.path.islink(dest):
+                    if os.path.realpath(dest) == os.path.realpath(rec.get("src") or ""):
+                        os.remove(dest)
+                        removed += 1
+                    else:
+                        missing += 1
+                elif os.path.getsize(dest) == rec.get("size"):
                     os.remove(dest)
                     removed += 1
                 else:

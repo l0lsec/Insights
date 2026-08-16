@@ -353,15 +353,22 @@
                 <input class="form-control form-control-sm" id="destRoot"
                        placeholder="/Users/you/Pictures/Sorted">
             </div>
-            <div class="col-md-5">
-                <button class="btn btn-success btn-sm w-100" onclick="applyPlan()">
-                    Copy approved files
-                </button>
+            <div class="col-md-3">
+                <label class="form-label small mb-1">How</label>
+                <select class="form-select form-select-sm" id="applyMode">
+                    <option value="link">Link (no copy, no download)</option>
+                    <option value="copy">Copy (duplicates bytes)</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <button class="btn btn-success btn-sm w-100" onclick="applyPlan()">Go</button>
             </div>
         </div>
         <div class="form-text">
-            Copying a cloud-only file downloads it first, so the approved size is a real download.
-            An undo manifest is written into the destination folder.
+            <strong>Link</strong> builds the folder tree without copying or downloading anything —
+            the only option that works when the archive is larger than your disk. <strong>Copy</strong>
+            duplicates the bytes, and copying a cloud-only file downloads it first.
+            Either way an undo manifest is written into the destination folder.
         </div>
     </div>
 </div>
@@ -542,14 +549,20 @@ async function approveAll() {
 async function applyPlan() {
     const dest = document.getElementById('destRoot').value.trim();
     if (!dest) { alert('Enter a destination folder.'); return; }
-    if (!confirm(`Copy approved files into ${dest}?\n\nOriginals stay where they are.`)) return;
+    const mode = document.getElementById('applyMode').value;
+    const what = mode === 'link'
+        ? 'Build a folder tree of links in'
+        : 'Copy approved files into';
+    if (!confirm(`${what} ${dest}?\n\nOriginals stay where they are.`)) return;
     const r = await fetch(`/library/scan/${SCAN_ID}/apply`, {
         method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({dest_root: dest})
+        body: JSON.stringify({dest_root: dest, mode: document.getElementById('applyMode').value})
     });
     const d = await r.json();
     if (d.error) { alert(d.error); return; }
-    alert(`Copying ${d.items} files (${fmtGb(d.bytes)}).\nUndo manifest: ${d.manifest}`);
+    alert(`${d.mode === 'link' ? 'Linking' : 'Copying'} ${d.items} files`
+        + `${d.mode === 'link' ? ' (no bytes copied)' : ' (' + fmtGb(d.bytes) + ')'}.`
+        + `\nUndo manifest: ${d.manifest}`);
     poll();
 }
 

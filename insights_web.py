@@ -11119,7 +11119,8 @@ def _library_classify_thread(scan_id: int, opts: dict) -> None:
         job["running"] = False
 
 
-def _library_apply_thread(scan_id: int, dest_root: str, manifest: str) -> None:
+def _library_apply_thread(scan_id: int, dest_root: str, manifest: str,
+                          mode: str = "copy") -> None:
     """Copy every approved plan item into the destination tree."""
     job = _library_job(scan_id)
     job["running"] = True
@@ -11136,7 +11137,7 @@ def _library_apply_thread(scan_id: int, dest_root: str, manifest: str) -> None:
             for r in rows
         ]
         result = content_library.apply_plan(
-            items, dest_root, manifest_path=manifest,
+            items, dest_root, manifest_path=manifest, mode=mode,
             progress=lambda n, total: database.update_library_scan(
                 scan_id, events_done=n, events_total=total),
         )
@@ -11146,7 +11147,8 @@ def _library_apply_thread(scan_id: int, dest_root: str, manifest: str) -> None:
             scan_id, status="applied", phase="done", stats={"apply": result},
             finished_at=datetime.now().isoformat(timespec="seconds"))
         log_activity("library_apply",
-                     details=f"Copied {result['copied']} files to {dest_root}")
+                     details=f"{'Linked' if mode == 'link' else 'Copied'} "
+                             f"{result['copied']} files to {dest_root}")
     except Exception as exc:
         app.logger.exception("library apply failed")
         database.update_library_scan(scan_id, status="failed", error_message=str(exc)[:500])
@@ -11670,20 +11672,28 @@ def library_apply(scan_id: int):
     if not approved or not approved.get("items"):
         return jsonify({"error": "Nothing approved to copy"}), 400
 
+    mode = (data.get("mode") or "copy").strip().lower()
+    if mode not in ("copy", "link"):
+        return jsonify({"error": "mode must be 'copy' or 'link'"}), 400
+
     # A copy hydrates every placeholder it touches, so refuse up front rather
-    # than filling the volume partway through.
+    # than filling the volume partway through. Links read nothing and occupy
+    # nothing, so the same check would block an operation that cannot overrun.
     need = approved.get("bytes", 0)
     free = media_probe.free_bytes(os.path.dirname(dest) or "/")
-    if need > free - 2 * 1024 ** 3:
+    if mode == "copy" and need > free - 2 * 1024 ** 3:
         return jsonify({
-            "error": f"Need {need / 2**30:.1f} GB but only {free / 2**30:.1f} GB free",
+            "error": f"Copying needs {need / 2**30:.1f} GB but only "
+                     f"{free / 2**30:.1f} GB is free. Use mode 'link' to build the "
+                     f"same tree without duplicating bytes.",
         }), 400
 
     manifest = os.path.join(dest, ".insights-library-manifest.jsonl")
-    threading.Thread(target=_library_apply_thread, args=(scan_id, dest, manifest),
+    threading.Thread(target=_library_apply_thread, args=(scan_id, dest, manifest, mode),
                      daemon=True).start()
-    return jsonify({"ok": True, "dest": dest, "items": approved["items"],
-                    "bytes": need, "manifest": manifest})
+    return jsonify({"ok": True, "dest": dest, "mode": mode,
+                    "items": approved["items"],
+                    "bytes": 0 if mode == "link" else need, "manifest": manifest})
 
 
 @app.route('/library/scan/<int:scan_id>/undo', methods=['POST'])
