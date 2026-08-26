@@ -1,0 +1,320 @@
+{
+ "sampled": 120,
+ "pool": 6424,
+ "supported": 81,
+ "unsupported": 23,
+ "weak_evidence": 16,
+ "mapping_error_rate": 0.19166666666666668,
+ "weak_evidence_rate": 0.13333333333333333,
+ "worst_categories": [
+  {
+   "category": "Fitness Tracking",
+   "rate": 0.5,
+   "n": 4
+  },
+  {
+   "category": "Real Estate",
+   "rate": 0.333,
+   "n": 3
+  },
+  {
+   "category": "PodCasts",
+   "rate": 0.333,
+   "n": 3
+  },
+  {
+   "category": "Home Maintenance",
+   "rate": 0.333,
+   "n": 3
+  },
+  {
+   "category": "Documents",
+   "rate": 0.333,
+   "n": 3
+  },
+  {
+   "category": "MMA",
+   "rate": 0.294,
+   "n": 17
+  },
+  {
+   "category": "Memes",
+   "rate": 0.143,
+   "n": 7
+  },
+  {
+   "category": "Screenshots",
+   "rate": 0.048,
+   "n": 21
+  }
+ ],
+ "examples": [
+  {
+   "event": "2022/08/24#0",
+   "category": "Real Estate",
+   "files": 10,
+   "caption": "This is a screenshot of a login page, showing a form with fields for email and password, and a \"Sign in\" button.",
+   "why": "Login page, not real estate content"
+  },
+  {
+   "event": "2025/01/17#0",
+   "category": "MMA",
+   "files": 7,
+   "caption": "The photo is a screenshot of a social media post featuring a quote from the movie \"Scarface\" with a photo of the main character, Tony, in a luxurious setting.",
+   "why": "Caption describes Scarface movie, not MMA"
+  },
+  {
+   "event": "2020/03/07#0",
+   "category": "MMA",
+   "files": 6,
+   "caption": "The main subject of this photo is a person in a Brazilian jiu-\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad\u00ad The main subject of this photo is a person in a blue and yellow un",
+   "why": "Caption describes jiu-jitsu, not MMA"
+  },
+  {
+   "event": "2020/07/24\u001fv#0",
+   "category": "MMA",
+   "files": 3,
+   "caption": "The main subject of this photo is a person in a white shirt and red tie, who is sitting on a blue mat in a room with a blue wall and a white ceiling. The person",
+   "why": "Person in shirt/tie, gym mats, not MMA"
+  },
+  {
+   "event": "2021/02/22#6",
+   "category": "Snowboarding",
+   "files": 1,
+   "caption": "The main subject is a group of people on a ski lift, and the setting is a snowy mountain with a ski lift and several people in the background, with some people ",
+   "why": "Caption describes skiing, not snowboarding"
+  },
+  {
+   "event": "2023/03/13\u001fv#0",
+   "category": "PodCasts",
+   "files": 2,
+   "caption": "This is a screenshot of an Instagram video of a man sitting at a table with a white wall behind him, speaking directly to the camera. The video is titled \"Here'",
+   "why": "Short Instagram talking-head clip, not podcast"
+  },
+  {
+   "event": "2021/02/18#0",
+   "category": "Snowboarding",
+   "files": 5,
+   "caption": "The main subject is a snow-covered mountain landscape, with a building in the foreground and a parking lot in the background, showing a winter scene. The main s",
+   "why": "Caption describes landscape, no snowboarding activity"
+  },
+  {
+   "event": "2024/11/24#2",
+   "category": "MMA",
+   "files": 14,
+   "caption": "The main subject is two children, the setting is a restaurant or dining area, and they are sitting at a table with their heads resting on the table's edge, look",
+   "why": "Caption shows children dining, not MMA"
+  },
+  {
+   "event": "2021/10/31#0",
+   "category": "High School Wrestling",
+   "files": 10,
+   "caption": "The photo is a screenshot of an Instagram story, showing a man in a wrestling ring, with a caption congratulating someone named \"Ferraiolo\" on a good performanc",
+   "why": "Wrestling ring indicates professional wrestling, not high school"
+  },
+  {
+   "event": "2022/01/04#0",
+   "category": "Fitness Tracking",
+   "files": 10,
+   "caption": "The main subject is a quote on a black background, with no setting or action described.",
+   "why": "Quote on black background, not fitness"
+  },
+  {
+   "event": "2023/06/16\u001fv#0",
+   "category": "Documents",
+   "files": 3,
+   "caption": "A man is holding a white box in a room with a chair, a speaker, and a wall with framed documents. The main subject is a man, who is in a room, and he is holding",
+   "why": "Main subject is a man, not documents"
+  },
+  {
+   "event": "2021/10/06\u001fv#0",
+   "category": "Fitness Tracking",
+   "files": 7,
+   "caption": "The photo is a screenshot of a person's face in a dark environment, with a text overlay that reads \"LA FITNESS\" and \"Dallas, TX\". The main subject of this photo",
+   "why": "Face screenshot, not fitness tracking data"
+  },
+  {
+   "event": "2024/04/06\u001fv#3",
+   "category": "Water Park",
+   "files": 27,
+   "caption": "The photo shows a pool with a white and black border, set in a backyard with a house in the background. The main subject of this photo is a person sitting on a ",
+   "why": "Backyard pool, not a water park"
+  },
+  {
+   "event": "2022/10/26#1",
+   "category": "Car Maintenance",
+   "files": 1,
+   "caption": "The main subject is a Florida license plate, and it is being held in a car's glove compartment, with a pair of shoes and a bag of clothes visible in the backgro",
+   "why": "License plate and clothes, not maintenance"
+  },
+  {
+   "event": "2025/09/06#25",
+   "category": "FPOV",
+   "files": 1,
+   "caption": "The photo is a bird's-eye view of a large parking lot with many cars and people, likely at a festival or event, with some cars and tents visible. The main subje",
+   "why": "Bird's-eye view contradicts first-person point of view"
+  },
+  {
+   "event": "2024/08/06#2",
+   "category": "Fishing",
+   "files": 19,
+   "caption": "This is a screenshot of the \"Dropped Pin\" feature on an iPhone, showing a location on a map with a blue pin and a distance of 24 miles away.",
+   "why": "Caption shows map pin, not fishing"
+  },
+  {
+   "event": "2021/02/18#2",
+   "category": "Screenshots",
+   "files": 1,
+   "caption": "The photo is a screenshot of a window view from an airplane, showing a vast expanse of snow-covered mountains and clouds below, with the wing of the plane visib",
+   "why": "Caption describes airplane photo, not screenshot"
+  },
+  {
+   "event": "2025/12/14#29",
+   "category": "FPOV",
+   "files": 1,
+   "caption": "The main subject of this photo is a large, multi-story building with a parking lot in front of it, located in a suburban or commercial area with a highway or ro",
+   "why": "Building and parking lot, not first-person view"
+  },
+  {
+   "event": "2023/07/31#8",
+   "category": "Home Maintenance",
+   "files": 5,
+   "caption": "The main subject is a large glass door with a white frame, set in a white wall in a modern building, with a woman and a child reflected in the glass.",
+   "why": "Caption describes door and reflections, not maintenance"
+  },
+  {
+   "event": "2024/04/01#3",
+   "category": "Memes",
+   "files": 1,
+   "caption": "The main subject of this photo is a white coffee mug with a cartoon image of a naked woman and a brown, anthropomorphic gingerbread man. The setting is a comput",
+   "why": "Describes a coffee mug, not meme"
+  }
+ ],
+ "per_category": {
+  "Real Estate": {
+   "unsupported": 1,
+   "supported": 2
+  },
+  "MMA": {
+   "supported": 8,
+   "unsupported": 5,
+   "weak_evidence": 4
+  },
+  "Screenshots": {
+   "supported": 20,
+   "unsupported": 1
+  },
+  "Baseball": {
+   "weak_evidence": 1,
+   "supported": 1
+  },
+  "Family": {
+   "supported": 4,
+   "weak_evidence": 2
+  },
+  "Travel": {
+   "supported": 3,
+   "weak_evidence": 1
+  },
+  "Memes": {
+   "supported": 5,
+   "weak_evidence": 1,
+   "unsupported": 1
+  },
+  "Quotes": {
+   "supported": 9
+  },
+  "Home Setup & Interior Design": {
+   "supported": 1
+  },
+  "Food & Drink": {
+   "supported": 1
+  },
+  "Boating": {
+   "supported": 4
+  },
+  "Snowboarding": {
+   "unsupported": 2
+  },
+  "Learning Resources": {
+   "weak_evidence": 1,
+   "supported": 1
+  },
+  "Cybersecurity": {
+   "supported": 1
+  },
+  "PodCasts": {
+   "unsupported": 1,
+   "supported": 1,
+   "weak_evidence": 1
+  },
+  "Nightlife": {
+   "supported": 2
+  },
+  "Wrestling Events": {
+   "weak_evidence": 1
+  },
+  "Holidays": {
+   "supported": 1
+  },
+  "ATVs Bikes Cars": {
+   "supported": 4,
+   "weak_evidence": 1
+  },
+  "High School Wrestling": {
+   "unsupported": 1
+  },
+  "Home Maintenance": {
+   "supported": 2,
+   "unsupported": 1
+  },
+  "Fitness Tracking": {
+   "weak_evidence": 1,
+   "unsupported": 2,
+   "supported": 1
+  },
+  "Cruise": {
+   "weak_evidence": 1
+  },
+  "Nature Scenery": {
+   "supported": 3
+  },
+  "Documents": {
+   "unsupported": 1,
+   "supported": 2
+  },
+  "Insurance": {
+   "supported": 1
+  },
+  "Water Park": {
+   "unsupported": 1
+  },
+  "Car Maintenance": {
+   "unsupported": 2
+  },
+  "FPOV": {
+   "unsupported": 2
+  },
+  "Fishing": {
+   "unsupported": 1
+  },
+  "Crypto & Sports Betting": {
+   "weak_evidence": 1
+  },
+  "Sports Therapy & Recovery": {
+   "supported": 1
+  },
+  "New Years Fireworks": {
+   "unsupported": 1
+  },
+  "Pets": {
+   "supported": 1
+  },
+  "Childhood": {
+   "supported": 1
+  },
+  "Beach Trips": {
+   "supported": 1
+  }
+ }
+}

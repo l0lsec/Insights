@@ -373,6 +373,21 @@
     </div>
 </div>
 
+<!-- ── Review queue ─────────────────────────────────────────────────────── -->
+<div class="card mb-4">
+    <div class="card-header d-flex justify-content-between align-items-center">
+        <div><strong>Needs review</strong>
+            <span class="text-muted small">— labels most likely to be wrong, worst first</span></div>
+        <button class="btn btn-sm btn-outline-warning" onclick="loadReview()">🔍 Find likely mistakes</button>
+    </div>
+    <div class="card-body p-0">
+        <div id="reviewResults" class="p-3 text-muted small">
+            Press <em>Find likely mistakes</em>. Ranked by low confidence, how many files a
+            wrong label affects, and whether the caption contradicts the category.
+        </div>
+    </div>
+</div>
+
 <!-- ── Browser ──────────────────────────────────────────────────────────── -->
 <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center">
@@ -403,6 +418,7 @@
 {% endif %}
 
 <script>
+const LIBRARY_CATEGORIES = {{ categories|selectattr('active')|map(attribute='name')|list|tojson }};
 let sawJobRunning = false;
 const SCAN_ID = {{ scan.id if scan else 'null' }};
 const fmtGb = b => (b / 1073741824).toFixed(2) + ' GB';
@@ -733,6 +749,63 @@ async function thumbStats() {
     const el = document.getElementById('thumbStats');
     if (el) el.textContent = d.files
         ? `${d.files.toLocaleString()} previews cached (${d.mb} MB)` : 'no previews cached yet';
+}
+
+function categoryOptions(current) {
+    const opts = LIBRARY_CATEGORIES.map(c =>
+        `<option value="${esc(c)}"${c === current ? ' selected' : ''}>${esc(c)}</option>`).join('');
+    return `<option value="">— change to —</option>${opts}<option value="Unsorted">Unsorted</option>`;
+}
+
+async function loadReview() {
+    const box = document.getElementById('reviewResults');
+    box.innerHTML = '<span class="text-muted small">Scoring labels…</span>';
+    let d;
+    try {
+        const r = await fetch(`/library/scan/${SCAN_ID}/review`);
+        if (!r.ok) throw new Error(`server returned ${r.status}`);
+        d = await r.json();
+    } catch (err) {
+        box.innerHTML = `<span class="text-danger small">Could not load: ${esc(err.message)}</span>`;
+        return;
+    }
+    if (!d.events.length) { box.innerHTML = '<span class="text-success">Nothing flagged.</span>'; return; }
+    let html = `<div class="mb-2 text-muted small">${d.total_flagged.toLocaleString()} events flagged
+        · ${d.pinned_total.toLocaleString()} files already corrected by hand</div>
+        <table class="table table-sm align-middle"><thead><tr>
+        <th>Files</th><th>Current label</th><th>Why suspect</th>
+        <th>What the model saw</th><th style="width:13rem">Correct it</th></tr></thead><tbody>`;
+    for (const e of d.events.slice(0, 60)) {
+        html += `<tr id="rev-${esc(e.event_key)}">
+            <td class="text-muted small">${e.file_count}<div>${e.year || ''}</div></td>
+            <td><span class="badge bg-secondary">${esc(e.category)}</span>
+                <div class="text-muted small">conf ${e.confidence}</div></td>
+            <td class="small text-warning-emphasis">${esc(e.why)}</td>
+            <td class="text-muted small">${esc((e.caption || '').slice(0, 120))}</td>
+            <td><select class="form-select form-select-sm"
+                    onchange="fixLabel('${esc(e.event_key).replace(/'/g, "\\'")}', this.value, this)">
+                ${categoryOptions(e.category)}</select></td>
+        </tr>`;
+    }
+    box.innerHTML = html + '</tbody></table>';
+}
+
+async function fixLabel(eventKey, category, el) {
+    if (!category) return;
+    el.disabled = true;
+    const r = await fetch(`/library/scan/${SCAN_ID}/relabel`, {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({event_key: eventKey, category: category})
+    });
+    const d = await r.json();
+    if (d.error) { alert(d.error); el.disabled = false; return; }
+    const row = document.getElementById('rev-' + eventKey);
+    if (row) {
+        row.style.opacity = '0.5';
+        row.querySelector('td:nth-child(2)').innerHTML =
+            `<span class="badge bg-success">${esc(category)}</span>
+             <div class="text-muted small">corrected · ${d.files_updated} files</div>`;
+    }
 }
 
 async function loadDuplicates() {
