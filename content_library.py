@@ -1790,6 +1790,10 @@ CLASSIFIED_MARKERS = frozenset({
     "rule", "vision", "speech", "manual", "propagated", "low_confidence", "no_match",
 })
 
+# A hand-set label. Unlike the markers above it is never revisited, not even by
+# a run that explicitly retries the unresolved: the owner has already answered.
+PINNED_MARKER = "manual"
+
 
 def event_is_classified(files: Sequence[ScannedFile]) -> bool:
     """Whether an event already carries the result of a completed pass."""
@@ -1818,6 +1822,10 @@ def pending_events(
     """
     out = {}
     for key, files in events.items():
+        # A correction the owner made by hand is final. Reopening it would undo
+        # review work and refill the queue with labels already fixed.
+        if any((f.classified_by or "") == PINNED_MARKER for f in files):
+            continue
         if not event_is_classified(files):
             out[key] = files
         elif retry_unresolved and _event_is_unlabelled(files):

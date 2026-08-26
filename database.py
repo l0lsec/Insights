@@ -671,6 +671,11 @@ def init_db(db_path: str = DB_PATH) -> None:
         lib_cols = [row[1] for row in cur.fetchall()]
         if lib_cols and "previous_category" not in lib_cols:
             conn.execute("ALTER TABLE library_files ADD COLUMN previous_category TEXT")
+        # A label the owner set by hand. Classification is allowed to revise its
+        # own guesses on a later pass; it is never allowed to revise a human
+        # correction, or reviewing the archive would be endless.
+        if lib_cols and "pinned" not in lib_cols:
+            conn.execute("ALTER TABLE library_files ADD COLUMN pinned INTEGER DEFAULT 0")
 
         # Upgrade any existing DB with newer columns
         cur = conn.execute("PRAGMA table_info(episodes)")
@@ -5040,13 +5045,20 @@ def upsert_library_event(scan_id: int, event: dict, db_path: str = DB_PATH) -> N
 def apply_event_labels(scan_id: int, event_key: str, category: str,
                        confidence: float = 0, classified_by: str = "",
                        notes: str = "", db_path: str = DB_PATH) -> int:
-    """Propagate an event's label onto every file in it."""
+    """Propagate an event's label onto every file in it, sparing pinned ones.
+
+    A pinned file carries a correction the owner made by hand. Classification
+    revises its own guesses freely on later passes, but overwriting a human
+    correction would silently undo review work and make the queue refill with
+    labels the owner had already fixed.
+    """
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
             """
             UPDATE library_files
             SET category = ?, confidence = ?, classified_by = ?, notes = ?
             WHERE scan_id = ? AND event_key = ?
+              AND COALESCE(pinned, 0) = 0
             """,
             (category, confidence, classified_by, notes, scan_id, event_key),
         )
@@ -5490,3 +5502,86 @@ def merge_undo_available(scan_id: int, db_path: str = DB_PATH) -> Dict[str, int]
             (scan_id,),
         ).fetchone()
     return {"files": row[0], "categories": row[1]}
+
+
+def pin_category(scan_id: int, category: str, event_key: str = "",
+                 file_ids: Optional[List[int]] = None,
+                 db_path: str = DB_PATH) -> int:
+    """Set a category by hand and pin it against future reclassification."""
+    conditions = ["scan_id = ?"]
+    params: list = [category, scan_id]
+    if event_key:
+        conditions.append("event_key = ?")
+        params.append(event_key)
+    if file_ids:
+        conditions.append(f"id IN ({','.join('?' * len(file_ids))})")
+        params.extend(int(i) for i in file_ids)
+    if not event_key and not file_ids:
+        return 0
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            f"""UPDATE library_files
+                SET previous_category = COALESCE(previous_category, category),
+                    category = ?, confidence = 1.0, classified_by = 'manual',
+                    pinned = 1
+                WHERE {' AND '.join(conditions)}""",
+            params,
+        )
+        conn.execute(
+            """INSERT INTO library_categories (name, subcategories, keywords,
+                   example_count, source, active, created_at)
+               VALUES (?,?,?,?,?,1,?)
+               ON CONFLICT(name) DO UPDATE SET active = 1""",
+            (category, json.dumps([]), json.dumps([]), 0, "manual",
+             datetime.now().isoformat(timespec="seconds")),
+        )
+        return cur.rowcount
+
+
+def unpin_files(scan_id: int, event_key: str = "", db_path: str = DB_PATH) -> int:
+    """Release a pin so classification may revise the label again."""
+    with sqlite3.connect(db_path) as conn:
+        if event_key:
+            cur = conn.execute(
+                "UPDATE library_files SET pinned = 0 WHERE scan_id = ? AND event_key = ?",
+                (scan_id, event_key))
+        else:
+            cur = conn.execute(
+                "UPDATE library_files SET pinned = 0 WHERE scan_id = ?", (scan_id,))
+        return cur.rowcount
+
+
+def pinned_count(scan_id: int, db_path: str = DB_PATH) -> int:
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM library_files WHERE scan_id = ? AND COALESCE(pinned,0) = 1",
+            (scan_id,)).fetchone()[0]
+
+
+def review_candidates(scan_id: int, limit: int = 200,
+                      db_path: str = DB_PATH) -> List[sqlite3.Row]:
+    """Events whose label is most likely wrong, worst first.
+
+    Ranking is deliberately cheap and explainable rather than another model
+    call: low confidence, a large blast radius, and whether the stored caption
+    even exists. The caller refines this with a token-level check of the caption
+    against the assigned category, which is what actually catches a confident
+    label the evidence contradicts.
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            """
+            SELECT e.event_key, e.category, e.confidence, e.file_count, e.year,
+                   e.captions, e.reason, e.classified_by, e.directory,
+                   (SELECT COUNT(*) FROM library_files f
+                     WHERE f.scan_id = e.scan_id AND f.event_key = e.event_key
+                       AND COALESCE(f.pinned,0) = 1) AS pinned_files
+            FROM library_events e
+            WHERE e.scan_id = ?
+              AND e.category IS NOT NULL AND e.category NOT IN ('', 'Unsorted')
+            ORDER BY e.confidence ASC, e.file_count DESC
+            LIMIT ?
+            """,
+            (scan_id, int(limit)),
+        ).fetchall()

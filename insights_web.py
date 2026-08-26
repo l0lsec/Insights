@@ -14,6 +14,7 @@ except ImportError:
 
 import io
 import csv
+import math
 import json
 import sqlite3
 import tempfile
@@ -11551,6 +11552,61 @@ def library_events(scan_id: int):
     } for r in rows]})
 
 
+@app.route('/library/scan/<int:scan_id>/review')
+def library_review(scan_id: int):
+    """Events whose label is most likely wrong, worst first.
+
+    Two signals are combined. Low confidence and a large file count come from
+    the catalogue and cost nothing. The decisive one is comparing the caption
+    the classifier saw against the category it chose: a caption that plainly
+    names a different subject is the signature of the failure mode measured on
+    this archive, where confident labels were assigned from evidence that did
+    not support them.
+    """
+    taxonomy = _active_taxonomy()
+    rows = database.review_candidates(scan_id, limit=600)
+    out = []
+    for r in rows:
+        try:
+            caps = json.loads(r["captions"] or "[]")
+        except (TypeError, ValueError):
+            caps = []
+        caption = (caps[0] if caps else "").strip()
+        conf = r["confidence"] or 0.0
+
+        score = (1.0 - conf) * 2.0
+        why = []
+        if conf < 0.6:
+            why.append("low confidence")
+        # Blast radius: a wrong label on a large event costs proportionally more.
+        if r["file_count"] and r["file_count"] > 5:
+            score += min(1.2, 0.3 * math.log(r["file_count"]))
+            why.append(f"{r['file_count']} files affected")
+        if not caption:
+            score += 0.8
+            why.append("no caption evidence")
+        else:
+            kw_cat, kw_conf, _ = content_library.keyword_classify_text(caption, taxonomy)
+            if kw_cat and kw_cat != r["category"]:
+                score += 1.6
+                why.append(f"caption suggests {kw_cat}")
+        if r["pinned_files"]:
+            score = -1.0            # already corrected by hand; drop it
+            why = ["corrected"]
+        out.append({
+            "event_key": r["event_key"], "category": r["category"],
+            "confidence": round(conf, 2), "file_count": r["file_count"],
+            "year": r["year"], "directory": r["directory"],
+            "caption": caption[:180], "reason": r["reason"],
+            "pinned": bool(r["pinned_files"]),
+            "score": round(score, 2), "why": ", ".join(why) or "low confidence",
+        })
+    out = [o for o in out if o["score"] > 0]
+    out.sort(key=lambda o: -o["score"])
+    return jsonify({"events": out[:200], "total_flagged": len(out),
+                    "pinned_total": database.pinned_count(scan_id)})
+
+
 @app.route('/library/scan/<int:scan_id>/relabel', methods=['POST'])
 def library_relabel(scan_id: int):
     """Override an event's category by hand and propagate it to its files."""
@@ -11564,9 +11620,11 @@ def library_relabel(scan_id: int):
         "event_key": event_key, "category": category,
         "confidence": 1.0, "classified_by": "manual", "reason": "set by hand",
     })
-    updated = database.apply_event_labels(scan_id, event_key, category, 1.0, "manual",
-                                          "set by hand")
-    return jsonify({"ok": True, "files_updated": updated})
+    # Pin it: a hand correction must survive any later reclassification pass,
+    # otherwise review work is silently undone the next time one runs.
+    updated = database.pin_category(scan_id, category, event_key=event_key)
+    database.recount_library_categories(scan_id)
+    return jsonify({"ok": True, "files_updated": updated, "pinned": True})
 
 
 @app.route('/library/scan/<int:scan_id>/duplicates')
