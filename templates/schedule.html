@@ -506,10 +506,10 @@ th[onclick]:hover {
                     <a href="{{ url_for('schedule_list') }}{% if sort_order != 'asc' %}?sort={{ sort_order }}{% endif %}" class="btn btn-sm btn-outline-secondary" title="Clear Filters">✕</a>
                     {% endif %}
                 </form>
-                <span class="badge" style="background-color: #0077B5;">💼 {{ linkedin_count }}</span>
-                <span class="badge bg-dark">🧵 {{ threads_count }}</span>
-                <span class="badge" style="background-color: #1877F2;">📘 {{ facebook_count }}</span>
-                <span class="badge bg-secondary">{{ scheduled_posts|length }} total</span>
+                <span class="badge" style="background-color: #0077B5;" id="queue-linkedin-badge">💼 {{ linkedin_count }}</span>
+                <span class="badge bg-dark" id="queue-threads-badge">🧵 {{ threads_count }}</span>
+                <span class="badge" style="background-color: #1877F2;" id="queue-facebook-badge">📘 {{ facebook_count }}</span>
+                <span class="badge bg-secondary" id="queue-total-badge">{{ scheduled_posts|length }} total</span>
                 <button class="btn btn-sm btn-outline-primary d-none" id="move-top-btn" onclick="moveSelectedToTop()" title="Move selected to top of queue">
                     ⬆️ Move to Top
                 </button>
@@ -529,7 +529,6 @@ th[onclick]:hover {
         </div>
     </div>
     <div class="card-body">
-        {% if scheduled_posts %}
         <div class="table-responsive">
             <table class="table table-hover">
                 <thead>
@@ -554,6 +553,16 @@ th[onclick]:hover {
                     </tr>
                 </thead>
                 <tbody id="schedule-tbody">
+                    {% if not scheduled_posts %}
+                    <tr>
+                        <td colspan="8" class="text-center py-5 text-muted">
+                            <div style="font-size: 3rem;">📅</div>
+                            <h5 class="mt-3">No scheduled posts</h5>
+                            <p>Schedule posts from the article page to see them here.</p>
+                            <a href="{{ url_for('view_articles') }}" class="btn btn-primary">View Articles</a>
+                        </td>
+                    </tr>
+                    {% endif %}
                     {% for post in scheduled_posts %}
                     <tr data-post-id="{{ post.id }}" data-scheduled-for="{{ post.scheduled_for }}" class="{% if post.status != 'pending' %}not-draggable{% endif %}">
                         <td class="drag-handle {% if post.status == 'pending' %}drag-enabled{% else %}drag-disabled{% endif %}">
@@ -681,14 +690,6 @@ th[onclick]:hover {
                 </tbody>
             </table>
         </div>
-        {% else %}
-        <div class="text-center py-5 text-muted">
-            <div style="font-size: 3rem;">📅</div>
-            <h5 class="mt-3">No scheduled posts</h5>
-            <p>Schedule posts from the article page to see them here.</p>
-            <a href="{{ url_for('view_articles') }}" class="btn btn-primary">View Articles</a>
-        </div>
-        {% endif %}
     </div>
 </div>
 
@@ -1124,9 +1125,10 @@ function toggleSort() {
 function refreshQueue() {
     const btn = document.getElementById('refresh-queue-btn');
     const tbody = document.getElementById('schedule-tbody');
-    const linkedinBadge = document.querySelector('.badge[style*="0077B5"]');
-    const threadsBadge = document.querySelector('.badge.bg-dark');
-    const totalBadge = document.querySelector('.badge.bg-secondary');
+    const linkedinBadge = document.getElementById('queue-linkedin-badge');
+    const threadsBadge = document.getElementById('queue-threads-badge');
+    const facebookBadge = document.getElementById('queue-facebook-badge');
+    const totalBadge = document.getElementById('queue-total-badge');
     
     // Show loading state
     const originalBtnText = btn.innerHTML;
@@ -1163,6 +1165,7 @@ function refreshQueue() {
                 // Update badges
                 if (linkedinBadge) linkedinBadge.innerHTML = `💼 ${data.linkedin_count}`;
                 if (threadsBadge) threadsBadge.innerHTML = `🧵 ${data.threads_count}`;
+                if (facebookBadge) facebookBadge.innerHTML = `📘 ${data.facebook_count}`;
                 if (totalBadge) totalBadge.textContent = `${data.total_count} total`;
                 
                 // Rebuild table body
