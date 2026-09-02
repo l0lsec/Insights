@@ -689,7 +689,257 @@ def init_db(db_path: str = DB_PATH) -> None:
             conn.execute("ALTER TABLE episodes ADD COLUMN processed_at TEXT")
         if "channel" not in columns:
             conn.execute("ALTER TABLE episodes ADD COLUMN channel TEXT")
+        # ------------------------------------------------------------------
+        # Connected social accounts
+        #
+        # Every platform used to hold exactly one login: each *_tokens table was
+        # read with "LIMIT 1" and written with an upsert, so connecting a second
+        # LinkedIn overwrote the first. social_accounts is the identity those
+        # token rows now hang off, one row per (platform, external_id), which is
+        # what lets a platform carry several logins at once.
+        #
+        # Everything that publishes keys on an account id rather than a bare
+        # platform name: a saved post, a queue entry and a token all name the
+        # account they belong to. account_id is left nullable throughout so rows
+        # written before this existed still resolve: a NULL means "whichever
+        # account is that platform's default", decided at publish time.
+        # ------------------------------------------------------------------
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS social_accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                platform TEXT NOT NULL,
+                external_id TEXT,
+                label TEXT,
+                handle TEXT,
+                display_name TEXT,
+                avatar_url TEXT,
+                is_default INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'active',
+                created_at TEXT,
+                updated_at TEXT
+            )
+            """
+        )
+        for stmt in (
+            # One row per login. external_id is the platform's own id for the
+            # account, so re-running OAuth for an account already connected
+            # updates it instead of adding a duplicate.
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_social_accounts_identity "
+            "ON social_accounts(platform, external_id)",
+            "CREATE INDEX IF NOT EXISTS idx_social_accounts_platform "
+            "ON social_accounts(platform, is_default DESC, id)",
+        ):
+            conn.execute(stmt)
+
+        # Link every token table to the account it authenticates, and give the
+        # post/queue tables the target account they publish as.
+        for table, column in (
+            ("linkedin_tokens", "account_id"),
+            ("threads_tokens", "account_id"),
+            ("facebook_tokens", "account_id"),
+            ("twitter_tokens", "account_id"),
+            ("instagram_tokens", "account_id"),
+            ("standalone_posts", "account_id"),
+            ("social_posts", "account_id"),
+            ("scheduled_posts", "account_id"),
+        ):
+            cur = conn.execute(f"PRAGMA table_info({table})")
+            cols = [row[1] for row in cur.fetchall()]
+            if cols and column not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} INTEGER")
+
+        # A token table may only ever hold one row per account, or "which token
+        # is this account's" stops having an answer. The partial index leaves
+        # not-yet-migrated NULL rows alone.
+        for table in ("linkedin_tokens", "threads_tokens", "facebook_tokens",
+                      "twitter_tokens", "instagram_tokens"):
+            conn.execute(
+                f"CREATE UNIQUE INDEX IF NOT EXISTS idx_{table}_account "
+                f"ON {table}(account_id) WHERE account_id IS NOT NULL"
+            )
+
+        _migrate_tokens_to_accounts(conn)
         conn.commit()
+
+
+# Identity of a connected login, per platform: which token column holds the
+# platform's own id for the account, and which ones describe it to a human.
+# _TOKEN_IDENTITY drives both the one-time migration below and the account
+# record written on every OAuth callback, so a migrated account and a freshly
+# connected one are indistinguishable.
+_TOKEN_IDENTITY = {
+    "linkedin": {
+        "table": "linkedin_tokens",
+        "external_id": "member_id",
+        "handle": "email",
+        "display_name": "display_name",
+        "avatar_url": None,
+    },
+    "threads": {
+        "table": "threads_tokens",
+        "external_id": "user_id",
+        "handle": "username",
+        "display_name": "display_name",
+        "avatar_url": "profile_picture_url",
+    },
+    "twitter": {
+        "table": "twitter_tokens",
+        "external_id": "user_id",
+        "handle": "username",
+        "display_name": "display_name",
+        "avatar_url": None,
+    },
+    "facebook": {
+        # A Facebook login publishes as a Page, so the Page is the account.
+        "table": "facebook_tokens",
+        "external_id": "page_id",
+        "handle": "page_name",
+        "display_name": "page_name",
+        "avatar_url": None,
+    },
+    "instagram": {
+        "table": "instagram_tokens",
+        "external_id": "ig_user_id",
+        "handle": "username",
+        "display_name": "display_name",
+        "avatar_url": "profile_picture_url",
+    },
+}
+
+SOCIAL_PLATFORMS = ("linkedin", "threads", "twitter", "facebook", "instagram")
+
+
+def _migrate_tokens_to_accounts(conn: sqlite3.Connection) -> int:
+    """Promote pre-multi-account token rows into social_accounts rows.
+
+    Runs inside init_db on every start and is a no-op once every token row
+    carries an account_id. An existing install therefore keeps publishing to
+    exactly the login it was already connected to: that login simply becomes
+    the platform's default account, which is what a NULL account_id on an old
+    post or queue row resolves to.
+    """
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    migrated = 0
+    for platform, ident in _TOKEN_IDENTITY.items():
+        table = ident["table"]
+        cur = conn.execute(f"PRAGMA table_info({table})")
+        cols = [row[1] for row in cur.fetchall()]
+        if not cols or "account_id" not in cols:
+            continue
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT * FROM {table} WHERE account_id IS NULL ORDER BY id"
+        ).fetchall()
+        for row in rows:
+            keys = row.keys()
+
+            def field(name):
+                return (row[name] if name and name in keys else None) or None
+
+            external_id = field(ident["external_id"])
+            if not external_id:
+                # A half-finished connection (LinkedIn hands back no member id
+                # until it is configured by hand). Key it on the token row so it
+                # still becomes a real account, and the configure screen fills
+                # the identity in later.
+                external_id = f"pending:{table}:{row['id']}"
+            account_id = _upsert_account_row(
+                conn,
+                platform=platform,
+                external_id=str(external_id),
+                display_name=field(ident["display_name"]),
+                handle=field(ident["handle"]),
+                avatar_url=field(ident["avatar_url"]),
+                now=now,
+            )
+            conn.execute(
+                f"UPDATE {table} SET account_id = ? WHERE id = ?",
+                (account_id, row["id"]),
+            )
+            migrated += 1
+
+        # Old posts and queue entries name only a platform. Point them at that
+        # platform's default account so the row keeps publishing where it did.
+        default_id = _default_account_id(conn, platform)
+        if default_id:
+            for tbl in ("standalone_posts", "social_posts", "scheduled_posts"):
+                cur = conn.execute(f"PRAGMA table_info({tbl})")
+                if "account_id" not in [c[1] for c in cur.fetchall()]:
+                    continue
+                conn.execute(
+                    f"UPDATE {tbl} SET account_id = ? "
+                    f"WHERE account_id IS NULL AND platform = ?",
+                    (default_id, platform),
+                )
+    return migrated
+
+
+def _default_account_id(conn: sqlite3.Connection, platform: str):
+    """The account new work for ``platform`` goes to, or None if none exist."""
+    cur = conn.execute(
+        "SELECT id FROM social_accounts WHERE platform = ? AND status != 'removed' "
+        "ORDER BY is_default DESC, id LIMIT 1",
+        (platform,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _upsert_account_row(
+    conn: sqlite3.Connection,
+    platform: str,
+    external_id: str,
+    display_name=None,
+    handle=None,
+    avatar_url=None,
+    label=None,
+    now=None,
+) -> int:
+    """Insert or refresh one account, returning its id.
+
+    The first account a platform gets becomes its default; later ones do not
+    steal that, so connecting a second login never silently redirects posts
+    that were already going to the first.
+    """
+    now = now or datetime.utcnow().isoformat(timespec="seconds")
+    cur = conn.execute(
+        "SELECT id FROM social_accounts WHERE platform = ? AND external_id = ?",
+        (platform, external_id),
+    )
+    existing = cur.fetchone()
+    if existing:
+        account_id = existing[0]
+        # Only overwrite profile fields we were actually given: a callback that
+        # skipped the profile endpoint must not blank out a known name.
+        sets, params = ["updated_at = ?", "status = 'active'"], [now]
+        for column, value in (
+            ("display_name", display_name),
+            ("handle", handle),
+            ("avatar_url", avatar_url),
+            ("label", label),
+        ):
+            if value:
+                sets.insert(0, f"{column} = ?")
+                params.insert(0, value)
+        params.append(account_id)
+        conn.execute(
+            f"UPDATE social_accounts SET {', '.join(sets)} WHERE id = ?", params
+        )
+        return account_id
+
+    is_default = 0 if _default_account_id(conn, platform) else 1
+    cur = conn.execute(
+        """
+        INSERT INTO social_accounts
+            (platform, external_id, label, handle, display_name, avatar_url,
+             is_default, status, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+        """,
+        (platform, external_id, label, handle, display_name, avatar_url,
+         is_default, now, now),
+    )
+    return cur.lastrowid
 
 
 def get_feed(url: str, db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
@@ -1412,6 +1662,258 @@ def bulk_replace_post_content(
     return affected_count
 
 
+# ---------------------------------------------------------------------------
+# Platform tokens
+#
+# A token row belongs to a social_accounts row, so a platform can hold as many
+# logins as the user connects. Every accessor takes an optional ``account_id``
+# and, when it is left out, falls back to that platform's default account,
+# which is what keeps the call sites written before multi-account existed
+# behaving exactly as they did.
+#
+# The five platforms differ only in which columns they store, so the shape of
+# save/get/update/delete lives here once and each platform's public function is
+# a thin wrapper naming its own fields.
+# ---------------------------------------------------------------------------
+
+
+def _token_table(platform: str) -> str:
+    return _TOKEN_IDENTITY[platform]["table"]
+
+
+def _resolve_token_account(conn: sqlite3.Connection, platform: str, account_id=None):
+    """The account id a token operation should act on, or None."""
+    if account_id:
+        row = conn.execute(
+            "SELECT id FROM social_accounts WHERE id = ? AND platform = ?",
+            (int(account_id), platform),
+        ).fetchone()
+        return row[0] if row else None
+    return _default_account_id(conn, platform)
+
+
+def _get_token(platform: str, account_id=None, db_path: str = DB_PATH):
+    """One account's token row, or None.
+
+    Without an ``account_id`` this is the platform's default account. A token
+    row written before accounts existed and not yet migrated still answers, so
+    a half-upgraded database keeps posting.
+    """
+    table = _token_table(platform)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        resolved = _resolve_token_account(conn, platform, account_id)
+        if account_id:
+            # A named account answers only with its own credentials. An id that
+            # is unknown, was disconnected, or belongs to another platform is
+            # not connected, and handing back the default account's token
+            # instead would publish to the wrong place.
+            if not resolved:
+                return None
+            return conn.execute(
+                f"SELECT * FROM {table} WHERE account_id = ?", (resolved,)
+            ).fetchone()
+        if resolved:
+            row = conn.execute(
+                f"SELECT * FROM {table} WHERE account_id = ?", (resolved,)
+            ).fetchone()
+            if row:
+                return row
+        return conn.execute(f"SELECT * FROM {table} LIMIT 1").fetchone()
+
+
+def _save_token(
+    platform: str,
+    fields: dict,
+    identity: dict,
+    account_id=None,
+    db_path: str = DB_PATH,
+) -> int:
+    """Store a token against the account it belongs to; returns the token row id.
+
+    ``identity`` carries the platform's own id for the login plus its display
+    fields. A login already connected is refreshed in place; a login that is new
+    to this platform gets its own account, which is how a second LinkedIn stops
+    overwriting the first.
+    """
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    table = _token_table(platform)
+    external_id = str(identity.get("external_id") or "").strip()
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        if not external_id:
+            # The platform did not hand back an id yet (LinkedIn without the
+            # profile scope). Keep one placeholder account per platform so the
+            # configure screen has something to fill in, rather than minting a
+            # fresh half-account on every retry.
+            resolved = _resolve_token_account(conn, platform, account_id)
+            if resolved:
+                target = resolved
+            else:
+                target = _upsert_account_row(
+                    conn, platform=platform,
+                    external_id=f"pending:{platform}",
+                    display_name=identity.get("display_name"),
+                    handle=identity.get("handle"),
+                    avatar_url=identity.get("avatar_url"),
+                    now=now,
+                )
+        else:
+            existing = conn.execute(
+                "SELECT id FROM social_accounts WHERE platform = ? AND external_id = ?",
+                (platform, external_id),
+            ).fetchone()
+            if not existing and account_id:
+                # Re-authorising a named account whose id we only learn now
+                # (a placeholder growing up into a real login).
+                named = conn.execute(
+                    "SELECT id FROM social_accounts WHERE id = ? AND platform = ?",
+                    (int(account_id), platform),
+                ).fetchone()
+                if named:
+                    conn.execute(
+                        "UPDATE social_accounts SET external_id = ?, updated_at = ? "
+                        "WHERE id = ?",
+                        (external_id, now, named["id"]),
+                    )
+            target = _upsert_account_row(
+                conn, platform=platform, external_id=external_id,
+                display_name=identity.get("display_name"),
+                handle=identity.get("handle"),
+                avatar_url=identity.get("avatar_url"),
+                now=now,
+            )
+
+        columns = list(fields.keys())
+        row = conn.execute(
+            f"SELECT id FROM {table} WHERE account_id = ?", (target,)
+        ).fetchone()
+        if row:
+            assignments = ", ".join(f"{c} = ?" for c in columns)
+            conn.execute(
+                f"UPDATE {table} SET {assignments}, updated_at = ? WHERE id = ?",
+                [fields[c] for c in columns] + [now, row["id"]],
+            )
+            conn.commit()
+            return row["id"]
+
+        placeholders = ", ".join("?" for _ in columns)
+        cur = conn.execute(
+            f"INSERT INTO {table} ({', '.join(columns)}, account_id, "
+            f"created_at, updated_at) VALUES ({placeholders}, ?, ?, ?)",
+            [fields[c] for c in columns] + [target, now, now],
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def _update_token(
+    platform: str, fields: dict, account_id=None, db_path: str = DB_PATH
+) -> bool:
+    """Write columns on one account's token row. False if it has none.
+
+    Scoped to a single row on purpose: the pre-multi-account version of this
+    updated every row in the table, which would now rewrite one account's
+    credentials with another's after a refresh.
+    """
+    if not fields:
+        return False
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    table = _token_table(platform)
+    columns = list(fields.keys())
+    assignments = ", ".join(f"{c} = ?" for c in columns)
+    params = [fields[c] for c in columns] + [now]
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        resolved = _resolve_token_account(conn, platform, account_id)
+        if account_id and not resolved:
+            return False
+        if resolved:
+            cur = conn.execute(
+                f"UPDATE {table} SET {assignments}, updated_at = ? WHERE account_id = ?",
+                params + [resolved],
+            )
+            if cur.rowcount:
+                conn.commit()
+                return True
+            if account_id:
+                return False
+        # Not migrated yet: there is only one row and it is the only candidate.
+        cur = conn.execute(
+            f"UPDATE {table} SET {assignments}, updated_at = ? "
+            f"WHERE id = (SELECT id FROM {table} LIMIT 1)",
+            params,
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def _delete_token(platform: str, account_id=None, db_path: str = DB_PATH) -> None:
+    """Disconnect one account, or the platform's default when none is named.
+
+    Only the named account goes. The platform's other logins keep their tokens,
+    which is the difference between disconnecting an account and disconnecting
+    a platform.
+    """
+    table = _token_table(platform)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        resolved = _resolve_token_account(conn, platform, account_id)
+    if resolved:
+        delete_social_account(resolved, db_path=db_path)
+        return
+    if account_id:
+        # Naming an account that is already gone disconnects nothing. Falling
+        # through here would wipe the platform's other logins as well.
+        return
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(f"DELETE FROM {table}")
+        conn.commit()
+
+
+def _sync_account_identity(
+    platform: str,
+    account_id: int,
+    external_id: str | None = None,
+    display_name: str | None = None,
+    handle: str | None = None,
+    db_path: str = DB_PATH,
+) -> None:
+    """Push a hand-entered identity back onto the account record.
+
+    The configure screens exist because some platforms will not hand back an id
+    over OAuth. What the user types there has to reach the account row too, or
+    the accounts list keeps showing "needs configuration" for a login that works.
+    """
+    now = datetime.utcnow().isoformat(timespec="seconds")
+    sets, params = ["updated_at = ?"], [now]
+    if external_id:
+        sets.insert(0, "external_id = ?")
+        params.insert(0, str(external_id))
+    for column, value in (("display_name", display_name), ("handle", handle)):
+        if value:
+            sets.insert(0, f"{column} = ?")
+            params.insert(0, value)
+    params.append(account_id)
+    with sqlite3.connect(db_path) as conn:
+        try:
+            conn.execute(
+                f"UPDATE social_accounts SET {', '.join(sets)} WHERE id = ?", params
+            )
+            conn.commit()
+        except sqlite3.IntegrityError:
+            # That id already belongs to another connected account; leave the
+            # record alone rather than merging two logins into one row.
+            pass
+
+
+def _token_account_id(platform: str, account_id=None, db_path: str = DB_PATH):
+    """The account id a token write landed on, for identity sync."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return _resolve_token_account(conn, platform, account_id)
+
+
 # --- LinkedIn Token Functions ---
 
 
@@ -1423,153 +1925,84 @@ def save_linkedin_token(
     display_name: str | None = None,
     email: str | None = None,
     refresh_token: str | None = None,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> int:
     """Save or update LinkedIn OAuth tokens. Returns the token record id."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        # Check if we already have a token (single user mode)
-        cur = conn.execute("SELECT id FROM linkedin_tokens LIMIT 1")
-        existing = cur.fetchone()
-
-        if existing:
-            # Update existing token
-            conn.execute(
-                """
-                UPDATE linkedin_tokens SET
-                    access_token = ?,
-                    refresh_token = ?,
-                    expires_at = ?,
-                    member_id = ?,
-                    user_urn = ?,
-                    display_name = ?,
-                    email = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                    member_id,
-                    user_urn,
-                    display_name,
-                    email,
-                    now,
-                    existing[0],
-                ),
-            )
-            conn.commit()
-            return existing[0]
-        else:
-            # Insert new token
-            cur = conn.execute(
-                """
-                INSERT INTO linkedin_tokens
-                    (access_token, refresh_token, expires_at, member_id, user_urn,
-                     display_name, email, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                    member_id,
-                    user_urn,
-                    display_name,
-                    email,
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
-            return cur.lastrowid
+    return _save_token(
+        "linkedin",
+        {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "expires_at": expires_at,
+            "member_id": member_id,
+            "user_urn": user_urn,
+            "display_name": display_name,
+            "email": email,
+        },
+        identity={
+            "external_id": member_id,
+            "display_name": display_name,
+            "handle": email,
+        },
+        account_id=account_id,
+        db_path=db_path,
+    )
 
 
-def get_linkedin_token(db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
-    """Get the stored LinkedIn token (single user mode)."""
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.execute("SELECT * FROM linkedin_tokens LIMIT 1")
-        return cur.fetchone()
+def get_linkedin_token(
+    account_id: int | None = None, db_path: str = DB_PATH
+) -> Optional[sqlite3.Row]:
+    """The LinkedIn token for one account (default account when unnamed)."""
+    return _get_token("linkedin", account_id=account_id, db_path=db_path)
 
 
-def delete_linkedin_token(db_path: str = DB_PATH) -> None:
-    """Delete all LinkedIn tokens (disconnect)."""
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("DELETE FROM linkedin_tokens")
-        conn.commit()
+def delete_linkedin_token(account_id: int | None = None, db_path: str = DB_PATH) -> None:
+    """Disconnect one LinkedIn account (the default when unnamed)."""
+    _delete_token("linkedin", account_id=account_id, db_path=db_path)
 
 
 def update_linkedin_token(
     access_token: str,
     expires_at: str,
     refresh_token: str | None = None,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> None:
     """Update the access token after a refresh."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        if refresh_token:
-            conn.execute(
-                """
-                UPDATE linkedin_tokens SET
-                    access_token = ?,
-                    refresh_token = ?,
-                    expires_at = ?,
-                    updated_at = ?
-                """,
-                (access_token, refresh_token, expires_at, now),
-            )
-        else:
-            conn.execute(
-                """
-                UPDATE linkedin_tokens SET
-                    access_token = ?,
-                    expires_at = ?,
-                    updated_at = ?
-                """,
-                (access_token, expires_at, now),
-            )
-        conn.commit()
+    fields = {"access_token": access_token, "expires_at": expires_at}
+    if refresh_token:
+        fields["refresh_token"] = refresh_token
+    _update_token("linkedin", fields, account_id=account_id, db_path=db_path)
 
 
 def update_linkedin_member_urn(
     member_id: str,
     user_urn: str | None = None,
     display_name: str | None = None,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> bool:
     """Manually update the member ID and URN for LinkedIn posting.
-    
+
     This is useful when the user only has w_member_social scope
     and profile endpoints don't work.
-    
+
     Returns True if updated successfully.
     """
-    now = datetime.utcnow().isoformat(timespec="seconds")
     if user_urn is None:
         user_urn = f"urn:li:person:{member_id}"
-    
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.execute("SELECT id FROM linkedin_tokens LIMIT 1")
-        existing = cur.fetchone()
-        if not existing:
-            return False
-        
-        conn.execute(
-            """
-            UPDATE linkedin_tokens SET
-                member_id = ?,
-                user_urn = ?,
-                display_name = COALESCE(?, display_name),
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (member_id, user_urn, display_name, now, existing[0]),
+    fields = {"member_id": member_id, "user_urn": user_urn}
+    if display_name:
+        fields["display_name"] = display_name
+    target = _token_account_id("linkedin", account_id, db_path=db_path)
+    updated = _update_token("linkedin", fields, account_id=account_id, db_path=db_path)
+    if updated and target:
+        _sync_account_identity(
+            "linkedin", target, external_id=member_id,
+            display_name=display_name, db_path=db_path,
         )
-        conn.commit()
-        return True
+    return updated
 
 
 # --- Threads Token Functions ---
@@ -1582,131 +2015,82 @@ def save_threads_token(
     username: str,
     display_name: str | None = None,
     profile_picture_url: str | None = None,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> int:
     """Save or update Threads OAuth tokens. Returns the token record id."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        # Check if we already have a token (single user mode)
-        cur = conn.execute("SELECT id FROM threads_tokens LIMIT 1")
-        existing = cur.fetchone()
-
-        if existing:
-            # Update existing token
-            conn.execute(
-                """
-                UPDATE threads_tokens SET
-                    access_token = ?,
-                    expires_at = ?,
-                    user_id = ?,
-                    username = ?,
-                    display_name = ?,
-                    profile_picture_url = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    access_token,
-                    expires_at,
-                    user_id,
-                    username,
-                    display_name,
-                    profile_picture_url,
-                    now,
-                    existing[0],
-                ),
-            )
-            conn.commit()
-            return existing[0]
-        else:
-            # Insert new token
-            cur = conn.execute(
-                """
-                INSERT INTO threads_tokens
-                    (access_token, expires_at, user_id, username,
-                     display_name, profile_picture_url, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    access_token,
-                    expires_at,
-                    user_id,
-                    username,
-                    display_name,
-                    profile_picture_url,
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
-            return cur.lastrowid
+    return _save_token(
+        "threads",
+        {
+            "access_token": access_token,
+            "expires_at": expires_at,
+            "user_id": user_id,
+            "username": username,
+            "display_name": display_name,
+            "profile_picture_url": profile_picture_url,
+        },
+        identity={
+            "external_id": user_id,
+            "display_name": display_name or username,
+            "handle": username,
+            "avatar_url": profile_picture_url,
+        },
+        account_id=account_id,
+        db_path=db_path,
+    )
 
 
-def get_threads_token(db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
-    """Get the stored Threads token (single user mode)."""
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.execute("SELECT * FROM threads_tokens LIMIT 1")
-        return cur.fetchone()
+def get_threads_token(
+    account_id: int | None = None, db_path: str = DB_PATH
+) -> Optional[sqlite3.Row]:
+    """The Threads token for one account (default account when unnamed)."""
+    return _get_token("threads", account_id=account_id, db_path=db_path)
 
 
-def delete_threads_token(db_path: str = DB_PATH) -> None:
-    """Delete all Threads tokens (disconnect)."""
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("DELETE FROM threads_tokens")
-        conn.commit()
+def delete_threads_token(account_id: int | None = None, db_path: str = DB_PATH) -> None:
+    """Disconnect one Threads account (the default when unnamed)."""
+    _delete_token("threads", account_id=account_id, db_path=db_path)
 
 
 def update_threads_token(
     access_token: str,
     expires_at: str,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> None:
     """Update the access token after a refresh."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            UPDATE threads_tokens SET
-                access_token = ?,
-                expires_at = ?,
-                updated_at = ?
-            """,
-            (access_token, expires_at, now),
-        )
-        conn.commit()
+    _update_token(
+        "threads",
+        {"access_token": access_token, "expires_at": expires_at},
+        account_id=account_id,
+        db_path=db_path,
+    )
 
 
 def update_threads_user_info(
     user_id: str,
     username: str | None = None,
     display_name: str | None = None,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> bool:
     """Update Threads user info fields manually (user_id, username, display_name).
 
     Returns True if a record was updated, False if no token exists.
     """
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.execute("SELECT id FROM threads_tokens LIMIT 1")
-        existing = cur.fetchone()
-        if not existing:
-            return False
-
-        conn.execute(
-            """
-            UPDATE threads_tokens SET
-                user_id = ?,
-                username = COALESCE(?, username),
-                display_name = COALESCE(?, display_name),
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (user_id, username, display_name, now, existing[0]),
+    fields = {"user_id": user_id}
+    if username:
+        fields["username"] = username
+    if display_name:
+        fields["display_name"] = display_name
+    target = _token_account_id("threads", account_id, db_path=db_path)
+    updated = _update_token("threads", fields, account_id=account_id, db_path=db_path)
+    if updated and target:
+        _sync_account_identity(
+            "threads", target, external_id=user_id,
+            display_name=display_name, handle=username, db_path=db_path,
         )
-        conn.commit()
-        return True
+    return updated
 
 
 # --- Instagram Token Functions ---
@@ -1721,107 +2105,61 @@ def save_instagram_token(
     display_name: str | None = None,
     profile_picture_url: str | None = None,
     account_type: str | None = None,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> int:
     """Save or update Instagram OAuth tokens. Returns the token record id."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        # Check if we already have a token (single user mode)
-        cur = conn.execute("SELECT id FROM instagram_tokens LIMIT 1")
-        existing = cur.fetchone()
-
-        if existing:
-            # Update existing token
-            conn.execute(
-                """
-                UPDATE instagram_tokens SET
-                    access_token = ?,
-                    expires_at = ?,
-                    user_id = ?,
-                    ig_user_id = ?,
-                    username = ?,
-                    display_name = ?,
-                    profile_picture_url = ?,
-                    account_type = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    access_token,
-                    expires_at,
-                    user_id,
-                    ig_user_id,
-                    username,
-                    display_name,
-                    profile_picture_url,
-                    account_type,
-                    now,
-                    existing[0],
-                ),
-            )
-            conn.commit()
-            return existing[0]
-        else:
-            # Insert new token
-            cur = conn.execute(
-                """
-                INSERT INTO instagram_tokens
-                    (access_token, expires_at, user_id, ig_user_id, username,
-                     display_name, profile_picture_url, account_type,
-                     created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    access_token,
-                    expires_at,
-                    user_id,
-                    ig_user_id,
-                    username,
-                    display_name,
-                    profile_picture_url,
-                    account_type,
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
-            return cur.lastrowid
+    return _save_token(
+        "instagram",
+        {
+            "access_token": access_token,
+            "expires_at": expires_at,
+            "user_id": user_id,
+            "ig_user_id": ig_user_id,
+            "username": username,
+            "display_name": display_name,
+            "profile_picture_url": profile_picture_url,
+            "account_type": account_type,
+        },
+        identity={
+            # Publishing goes through the IG user id, so that is the account.
+            "external_id": ig_user_id or user_id,
+            "display_name": display_name or username,
+            "handle": username,
+            "avatar_url": profile_picture_url,
+        },
+        account_id=account_id,
+        db_path=db_path,
+    )
 
 
-def get_instagram_token(db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
-    """Get the stored Instagram token (single user mode)."""
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.execute("SELECT * FROM instagram_tokens LIMIT 1")
-        return cur.fetchone()
+def get_instagram_token(
+    account_id: int | None = None, db_path: str = DB_PATH
+) -> Optional[sqlite3.Row]:
+    """The Instagram token for one account (default account when unnamed)."""
+    return _get_token("instagram", account_id=account_id, db_path=db_path)
 
 
-def delete_instagram_token(db_path: str = DB_PATH) -> None:
-    """Delete all Instagram tokens (disconnect)."""
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("DELETE FROM instagram_tokens")
-        conn.commit()
+def delete_instagram_token(
+    account_id: int | None = None, db_path: str = DB_PATH
+) -> None:
+    """Disconnect one Instagram account (the default when unnamed)."""
+    _delete_token("instagram", account_id=account_id, db_path=db_path)
 
 
 def update_instagram_token(
     access_token: str,
     expires_at: str,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> None:
     """Update the access token after a refresh."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            UPDATE instagram_tokens SET
-                access_token = ?,
-                expires_at = ?,
-                updated_at = ?
-            WHERE id = (SELECT id FROM instagram_tokens LIMIT 1)
-            """,
-            (access_token, expires_at, now),
-        )
-        conn.commit()
+    _update_token(
+        "instagram",
+        {"access_token": access_token, "expires_at": expires_at},
+        account_id=account_id,
+        db_path=db_path,
+    )
 
 
 def update_instagram_user_info(
@@ -1829,33 +2167,26 @@ def update_instagram_user_info(
     username: str | None = None,
     display_name: str | None = None,
     ig_user_id: str | None = None,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> bool:
     """Update Instagram user info fields manually.
 
     Returns True if a record was updated, False if no token exists.
     """
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.execute("SELECT id FROM instagram_tokens LIMIT 1")
-        existing = cur.fetchone()
-        if not existing:
-            return False
-
-        conn.execute(
-            """
-            UPDATE instagram_tokens SET
-                user_id = ?,
-                username = COALESCE(?, username),
-                display_name = COALESCE(?, display_name),
-                ig_user_id = COALESCE(?, ig_user_id),
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (user_id, username, display_name, ig_user_id, now, existing[0]),
+    fields = {"user_id": user_id}
+    for column, value in (("username", username), ("display_name", display_name),
+                          ("ig_user_id", ig_user_id)):
+        if value:
+            fields[column] = value
+    target = _token_account_id("instagram", account_id, db_path=db_path)
+    updated = _update_token("instagram", fields, account_id=account_id, db_path=db_path)
+    if updated and target:
+        _sync_account_identity(
+            "instagram", target, external_id=ig_user_id or user_id,
+            display_name=display_name, handle=username, db_path=db_path,
         )
-        conn.commit()
-        return True
+    return updated
 
 
 # --- Facebook Token Functions ---
@@ -1870,163 +2201,102 @@ def save_facebook_token(
     page_name: str | None = None,
     page_access_token: str | None = None,
     group_ids: str | None = None,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> int:
     """Save or update Facebook OAuth tokens. Returns the token record id."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.execute("SELECT id FROM facebook_tokens LIMIT 1")
-        existing = cur.fetchone()
-
-        if existing:
-            conn.execute(
-                """
-                UPDATE facebook_tokens SET
-                    access_token = ?,
-                    expires_at = ?,
-                    user_id = ?,
-                    user_name = ?,
-                    page_id = ?,
-                    page_name = ?,
-                    page_access_token = ?,
-                    group_ids = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    access_token,
-                    expires_at,
-                    user_id,
-                    user_name,
-                    page_id,
-                    page_name,
-                    page_access_token,
-                    group_ids,
-                    now,
-                    existing[0],
-                ),
-            )
-            conn.commit()
-            return existing[0]
-        else:
-            cur = conn.execute(
-                """
-                INSERT INTO facebook_tokens
-                    (access_token, expires_at, user_id, user_name,
-                     page_id, page_name, page_access_token, group_ids,
-                     created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    access_token,
-                    expires_at,
-                    user_id,
-                    user_name,
-                    page_id,
-                    page_name,
-                    page_access_token,
-                    group_ids,
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
-            return cur.lastrowid
+    return _save_token(
+        "facebook",
+        {
+            "access_token": access_token,
+            "expires_at": expires_at,
+            "user_id": user_id,
+            "user_name": user_name,
+            "page_id": page_id,
+            "page_name": page_name,
+            "page_access_token": page_access_token,
+            "group_ids": group_ids,
+        },
+        identity={
+            # A Facebook post is published by a Page, so the Page identifies the
+            # account; before one is picked the login is a placeholder.
+            "external_id": page_id,
+            "display_name": page_name or user_name,
+            "handle": page_name,
+        },
+        account_id=account_id,
+        db_path=db_path,
+    )
 
 
-def get_facebook_token(db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
-    """Get the stored Facebook token (single user mode)."""
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.execute("SELECT * FROM facebook_tokens LIMIT 1")
-        return cur.fetchone()
+def get_facebook_token(
+    account_id: int | None = None, db_path: str = DB_PATH
+) -> Optional[sqlite3.Row]:
+    """The Facebook token for one account (default account when unnamed)."""
+    return _get_token("facebook", account_id=account_id, db_path=db_path)
 
 
-def delete_facebook_token(db_path: str = DB_PATH) -> None:
-    """Delete all Facebook tokens (disconnect)."""
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("DELETE FROM facebook_tokens")
-        conn.commit()
+def delete_facebook_token(
+    account_id: int | None = None, db_path: str = DB_PATH
+) -> None:
+    """Disconnect one Facebook account (the default when unnamed)."""
+    _delete_token("facebook", account_id=account_id, db_path=db_path)
 
 
 def update_facebook_token(
     access_token: str,
     expires_at: str,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> None:
     """Update the access token after a refresh."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            UPDATE facebook_tokens SET
-                access_token = ?,
-                expires_at = ?,
-                updated_at = ?
-            """,
-            (access_token, expires_at, now),
-        )
-        conn.commit()
+    _update_token(
+        "facebook",
+        {"access_token": access_token, "expires_at": expires_at},
+        account_id=account_id,
+        db_path=db_path,
+    )
 
 
 def update_facebook_page_selection(
     page_id: str,
     page_name: str,
     page_access_token: str,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> bool:
     """Update the selected Facebook Page for posting.
 
     Returns True if a record was updated, False if no token exists.
     """
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.execute("SELECT id FROM facebook_tokens LIMIT 1")
-        existing = cur.fetchone()
-        if not existing:
-            return False
-
-        conn.execute(
-            """
-            UPDATE facebook_tokens SET
-                page_id = ?,
-                page_name = ?,
-                page_access_token = ?,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (page_id, page_name, page_access_token, now, existing[0]),
+    target = _token_account_id("facebook", account_id, db_path=db_path)
+    updated = _update_token(
+        "facebook",
+        {"page_id": page_id, "page_name": page_name,
+         "page_access_token": page_access_token},
+        account_id=account_id,
+        db_path=db_path,
+    )
+    if updated and target:
+        _sync_account_identity(
+            "facebook", target, external_id=page_id,
+            display_name=page_name, handle=page_name, db_path=db_path,
         )
-        conn.commit()
-        return True
+    return updated
 
 
 def update_facebook_group_ids(
     group_ids: str,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> bool:
     """Update the selected Facebook Group IDs (comma-separated).
 
     Returns True if a record was updated, False if no token exists.
     """
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.execute("SELECT id FROM facebook_tokens LIMIT 1")
-        existing = cur.fetchone()
-        if not existing:
-            return False
-
-        conn.execute(
-            """
-            UPDATE facebook_tokens SET
-                group_ids = ?,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (group_ids, now, existing[0]),
-        )
-        conn.commit()
-        return True
+    return _update_token(
+        "facebook", {"group_ids": group_ids}, account_id=account_id, db_path=db_path
+    )
 
 
 # --- Twitter Token Functions ---
@@ -2039,109 +2309,55 @@ def save_twitter_token(
     user_id: str,
     username: str,
     display_name: str | None = None,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> int:
     """Save or update Twitter OAuth tokens. Returns the token record id."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        cur = conn.execute("SELECT id FROM twitter_tokens LIMIT 1")
-        existing = cur.fetchone()
-
-        if existing:
-            conn.execute(
-                """
-                UPDATE twitter_tokens SET
-                    access_token = ?,
-                    refresh_token = ?,
-                    expires_at = ?,
-                    user_id = ?,
-                    username = ?,
-                    display_name = ?,
-                    updated_at = ?
-                WHERE id = ?
-                """,
-                (
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                    user_id,
-                    username,
-                    display_name,
-                    now,
-                    existing[0],
-                ),
-            )
-            conn.commit()
-            return existing[0]
-        else:
-            cur = conn.execute(
-                """
-                INSERT INTO twitter_tokens
-                    (access_token, refresh_token, expires_at, user_id, username,
-                     display_name, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    access_token,
-                    refresh_token,
-                    expires_at,
-                    user_id,
-                    username,
-                    display_name,
-                    now,
-                    now,
-                ),
-            )
-            conn.commit()
-            return cur.lastrowid
+    return _save_token(
+        "twitter",
+        {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "expires_at": expires_at,
+            "user_id": user_id,
+            "username": username,
+            "display_name": display_name,
+        },
+        identity={
+            "external_id": user_id,
+            "display_name": display_name or username,
+            "handle": username,
+        },
+        account_id=account_id,
+        db_path=db_path,
+    )
 
 
-def get_twitter_token(db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
-    """Get the stored Twitter token (single user mode)."""
-    with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        cur = conn.execute("SELECT * FROM twitter_tokens LIMIT 1")
-        return cur.fetchone()
+def get_twitter_token(
+    account_id: int | None = None, db_path: str = DB_PATH
+) -> Optional[sqlite3.Row]:
+    """The X/Twitter token for one account (default account when unnamed)."""
+    return _get_token("twitter", account_id=account_id, db_path=db_path)
 
 
-def delete_twitter_token(db_path: str = DB_PATH) -> None:
-    """Delete all Twitter tokens (disconnect)."""
-    with sqlite3.connect(db_path) as conn:
-        conn.execute("DELETE FROM twitter_tokens")
-        conn.commit()
+def delete_twitter_token(account_id: int | None = None, db_path: str = DB_PATH) -> None:
+    """Disconnect one X/Twitter account (the default when unnamed)."""
+    _delete_token("twitter", account_id=account_id, db_path=db_path)
 
 
 def update_twitter_token(
     access_token: str,
     expires_at: str,
     refresh_token: str | None = None,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> None:
     """Update the access token (and optionally refresh token) after a refresh."""
-    now = datetime.utcnow().isoformat(timespec="seconds")
-    with sqlite3.connect(db_path) as conn:
-        if refresh_token:
-            conn.execute(
-                """
-                UPDATE twitter_tokens SET
-                    access_token = ?,
-                    refresh_token = ?,
-                    expires_at = ?,
-                    updated_at = ?
-                """,
-                (access_token, refresh_token, expires_at, now),
-            )
-        else:
-            conn.execute(
-                """
-                UPDATE twitter_tokens SET
-                    access_token = ?,
-                    expires_at = ?,
-                    updated_at = ?
-                """,
-                (access_token, expires_at, now),
-            )
-        conn.commit()
+    fields = {"access_token": access_token, "expires_at": expires_at}
+    if refresh_token:
+        fields["refresh_token"] = refresh_token
+    _update_token("twitter", fields, account_id=account_id, db_path=db_path)
+
 
 
 # --- Scheduled Posts Functions ---
@@ -2156,21 +2372,31 @@ def add_scheduled_post(
     platform: str = "linkedin",
     status: str = "pending",
     linkedin_post_urn: str | None = None,
+    account_id: int | None = None,
     db_path: str = DB_PATH,
 ) -> int:
-    """Add a post to the schedule queue. Returns the scheduled post id."""
+    """Add a post to the schedule queue. Returns the scheduled post id.
+
+    ``account_id`` names which of the platform's connected logins publishes this
+    entry. Left out, it is filled from the platform's default account at queue
+    time so the queue row records a concrete target instead of re-deciding one
+    later, which is what lets two accounts on the same platform sit in the queue
+    side by side.
+    """
     created_at = datetime.utcnow().isoformat(timespec="seconds")
     posted_at = created_at if status == "posted" else None
+    if account_id is None:
+        account_id = resolve_account_id(platform, db_path=db_path)
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
             """
             INSERT INTO scheduled_posts
                 (social_post_id, article_id, standalone_post_id, post_type, platform, scheduled_for,
-                 status, linkedin_post_urn, created_at, posted_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 status, linkedin_post_urn, created_at, posted_at, account_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (social_post_id, article_id, standalone_post_id, post_type, platform, scheduled_for, 
-             status, linkedin_post_urn, created_at, posted_at),
+             status, linkedin_post_urn, created_at, posted_at, account_id),
         )
         conn.commit()
         return cur.lastrowid
@@ -3134,6 +3360,7 @@ def add_standalone_post(
     db_path: str = DB_PATH,
     brief_id: Optional[int] = None,
     brief_run_id: Optional[int] = None,
+    account_id: Optional[int] = None,
 ) -> int:
     """Save a standalone post (not tied to an article) and return its id.
     
@@ -3146,18 +3373,24 @@ def add_standalone_post(
         repost: If True, marks this as an intentional duplicate that bypassed
             the import-time duplicate check so the same content can be posted
             again.
+        account_id: Which of the platform's connected accounts this row posts
+            as. Left out, it resolves to that platform's default account, so a
+            card ticked for "LinkedIn" still lands somewhere concrete while a
+            card ticked for a named second LinkedIn keeps its own row.
         
     Returns:
         The ID of the newly created post
     """
     created_at = datetime.utcnow().isoformat(timespec="seconds")
+    if account_id is None:
+        account_id = resolve_account_id(platform, db_path=db_path)
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
             """
-            INSERT INTO standalone_posts (source_type, source_content, platform, content, image_url, created_at, used, repost, brief_id, brief_run_id)
-            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+            INSERT INTO standalone_posts (source_type, source_content, platform, content, image_url, created_at, used, repost, brief_id, brief_run_id, account_id)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
             """,
-            (source_type, source_content, platform, content, image_url, created_at, 1 if repost else 0, brief_id, brief_run_id),
+            (source_type, source_content, platform, content, image_url, created_at, 1 if repost else 0, brief_id, brief_run_id, account_id),
         )
         conn.commit()
         return cur.lastrowid
@@ -5585,3 +5818,214 @@ def review_candidates(scan_id: int, limit: int = 200,
             """,
             (scan_id, int(limit)),
         ).fetchall()
+
+
+# ---------------------------------------------------------------------------
+# Connected accounts
+#
+# One row per login. Everything that publishes names an account, so a platform
+# can hold several logins and a single piece of copy can be aimed at any mix of
+# them across any mix of platforms.
+# ---------------------------------------------------------------------------
+
+
+def list_social_accounts(
+    platform: str | None = None,
+    include_removed: bool = False,
+    db_path: str = DB_PATH,
+) -> List[sqlite3.Row]:
+    """Connected accounts, defaults first, then oldest first within a platform."""
+    sql = "SELECT * FROM social_accounts"
+    clauses, params = [], []
+    if platform:
+        clauses.append("platform = ?")
+        params.append(platform)
+    if not include_removed:
+        clauses.append("status != 'removed'")
+    if clauses:
+        sql += " WHERE " + " AND ".join(clauses)
+    sql += " ORDER BY platform, is_default DESC, id"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(sql, params).fetchall()
+
+
+def get_social_account(account_id: int, db_path: str = DB_PATH) -> Optional[sqlite3.Row]:
+    """One account by id, or None."""
+    if not account_id:
+        return None
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            "SELECT * FROM social_accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+
+
+def find_social_account(
+    platform: str, external_id: str, db_path: str = DB_PATH
+) -> Optional[sqlite3.Row]:
+    """The account for a platform's own id, or None if it was never connected."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            "SELECT * FROM social_accounts WHERE platform = ? AND external_id = ?",
+            (platform, str(external_id)),
+        ).fetchone()
+
+
+def get_default_social_account(
+    platform: str, db_path: str = DB_PATH
+) -> Optional[sqlite3.Row]:
+    """The account a bare platform name means, or None if none are connected."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return conn.execute(
+            "SELECT * FROM social_accounts WHERE platform = ? AND status != 'removed' "
+            "ORDER BY is_default DESC, id LIMIT 1",
+            (platform,),
+        ).fetchone()
+
+
+def upsert_social_account(
+    platform: str,
+    external_id: str,
+    display_name: str | None = None,
+    handle: str | None = None,
+    avatar_url: str | None = None,
+    label: str | None = None,
+    db_path: str = DB_PATH,
+) -> int:
+    """Record a connected login, returning its account id.
+
+    Called from every OAuth callback. Re-authorising an account already
+    connected refreshes it in place; authorising a different one adds a second
+    account rather than replacing the first, which is the whole point.
+    """
+    with sqlite3.connect(db_path) as conn:
+        account_id = _upsert_account_row(
+            conn,
+            platform=platform,
+            external_id=str(external_id),
+            display_name=display_name,
+            handle=handle,
+            avatar_url=avatar_url,
+            label=label,
+        )
+        conn.commit()
+        return account_id
+
+
+def set_default_social_account(account_id: int, db_path: str = DB_PATH) -> bool:
+    """Make one account the platform default. False if the id is unknown."""
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT platform FROM social_accounts WHERE id = ?", (account_id,)
+        ).fetchone()
+        if not row:
+            return False
+        conn.execute(
+            "UPDATE social_accounts SET is_default = 0 WHERE platform = ?", (row[0],)
+        )
+        conn.execute(
+            "UPDATE social_accounts SET is_default = 1, updated_at = ? WHERE id = ?",
+            (datetime.utcnow().isoformat(timespec="seconds"), account_id),
+        )
+        conn.commit()
+        return True
+
+
+def set_social_account_label(
+    account_id: int, label: str | None, db_path: str = DB_PATH
+) -> bool:
+    """Name an account ("Work", "Brand"). Blank clears back to the profile name."""
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE social_accounts SET label = ?, updated_at = ? WHERE id = ?",
+            ((label or "").strip() or None,
+             datetime.utcnow().isoformat(timespec="seconds"), account_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def set_social_account_status(
+    account_id: int, status: str, db_path: str = DB_PATH
+) -> bool:
+    """Flag an account 'active' or 'expired' so the UI can show it needs a reconnect."""
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE social_accounts SET status = ?, updated_at = ? WHERE id = ?",
+            (status, datetime.utcnow().isoformat(timespec="seconds"), account_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def delete_social_account(account_id: int, db_path: str = DB_PATH) -> bool:
+    """Disconnect one account: drop its token and hand the default on.
+
+    Only this account's token goes; the platform's other logins keep working.
+    Posts and queue entries that named it fall back to NULL, which resolves to
+    whichever account is default when they publish, so nothing is orphaned.
+    """
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT platform, is_default FROM social_accounts WHERE id = ?",
+            (account_id,),
+        ).fetchone()
+        if not row:
+            return False
+        platform, was_default = row[0], row[1]
+        ident = _TOKEN_IDENTITY.get(platform)
+        if ident:
+            conn.execute(
+                f"DELETE FROM {ident['table']} WHERE account_id = ?", (account_id,)
+            )
+        for table in ("standalone_posts", "social_posts", "scheduled_posts"):
+            conn.execute(
+                f"UPDATE {table} SET account_id = NULL WHERE account_id = ?",
+                (account_id,),
+            )
+        conn.execute("DELETE FROM social_accounts WHERE id = ?", (account_id,))
+        if was_default:
+            heir = _default_account_id(conn, platform)
+            if heir:
+                conn.execute(
+                    "UPDATE social_accounts SET is_default = 1 WHERE id = ?", (heir,)
+                )
+        conn.commit()
+        return True
+
+
+def resolve_account_id(
+    platform: str, account_id: int | None = None, db_path: str = DB_PATH
+) -> Optional[int]:
+    """The account a publish should use, given an explicit id or none.
+
+    An id that belongs to another platform (a stale pick from the browser) is
+    refused rather than quietly redirected, because posting a card to the wrong
+    account is worse than not posting it.
+    """
+    if account_id:
+        account = get_social_account(int(account_id), db_path=db_path)
+        if not account or account["platform"] != platform:
+            return None
+        return account["id"]
+    default = get_default_social_account(platform, db_path=db_path)
+    return default["id"] if default else None
+
+
+def count_social_accounts(platform: str | None = None, db_path: str = DB_PATH) -> int:
+    """How many accounts are connected, for a platform or in total."""
+    with sqlite3.connect(db_path) as conn:
+        if platform:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM social_accounts "
+                "WHERE platform = ? AND status != 'removed'",
+                (platform,),
+            )
+        else:
+            cur = conn.execute(
+                "SELECT COUNT(*) FROM social_accounts WHERE status != 'removed'"
+            )
+        return cur.fetchone()[0]

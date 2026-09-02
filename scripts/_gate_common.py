@@ -1,5 +1,7 @@
 import os, sys, sqlite3, tempfile, shutil
-W = "/Users/sedriclouissaint/tools/Insights/.claude/worktrees/instagram-preview-aspect-ratios-9a6cd8"
+# The checkout this gate belongs to, found from the file rather than written
+# down, so the gates run wherever the repository is cloned.
+W = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, W)
 
 def isolated_app():

@@ -2,7 +2,9 @@
 {% block title %}Command Center | Insights{% endblock %}
 {% block header %}Command Center{% endblock %}
 {% block content %}
-{% from 'partials/post_item.html' import render_post_item, PLATFORM_META, PLATFORM_ORDER %}
+{# with context: the card macro reads PUBLISH_TARGETS, which the app injects
+   per request, and an import without context would not see it. #}
+{% from 'partials/post_item.html' import render_post_item, PLATFORM_META, PLATFORM_ORDER with context %}
 <style>
     /* Command Center specific styles */
     .compose-header {
@@ -869,6 +871,40 @@
                         📷 Instagram
                     </label>
                 </div>
+                {# Accounts, only where a platform has more than one. The copy is
+                   written once per platform whatever is ticked here; the ticks
+                   decide how many accounts that one piece of copy is saved for,
+                   so two accounts cost nothing extra to generate. #}
+                {% set multi = PUBLISH_TARGETS | selectattr('show_label') | list %}
+                {% if multi %}
+                <div class="mt-3" id="account-checkboxes">
+                    <label class="form-label fw-bold mb-2 d-block">Accounts</label>
+                    {% for platform in ['linkedin', 'threads', 'twitter', 'facebook', 'instagram'] %}
+                    {% set options = multi | selectattr('platform', 'equalto', platform) | list %}
+                    {% if options %}
+                    <div class="d-flex flex-wrap align-items-center gap-2 mb-2 account-target-row"
+                         data-platform="{{ platform }}">
+                        <span class="text-muted small" style="min-width: 5.5rem;">
+                            {{ {'linkedin':'LinkedIn','threads':'Threads','twitter':'X','facebook':'Facebook','instagram':'Instagram'}[platform] }}
+                        </span>
+                        {% for option in options %}
+                        <label class="btn btn-sm {{ 'btn-primary' if option.is_default else 'btn-outline-secondary' }} account-target-btn"
+                               data-platform="{{ platform }}" data-account-id="{{ option.account_id }}">
+                            <input type="checkbox" class="d-none account-target-checkbox"
+                                   value="{{ platform }}:{{ option.account_id }}"
+                                   data-platform="{{ platform }}"
+                                   {% if option.is_default %}checked{% endif %}>
+                            {{ option.label }}
+                        </label>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                    {% endfor %}
+                    <div class="form-text">
+                        Untick every account on a platform and its posts go to that platform's default account.
+                    </div>
+                </div>
+                {% endif %}
             </div>
             <div class="col-md-4">
                 <label class="form-label fw-bold" for="posts-per-platform">Posts per Platform</label>
@@ -1032,15 +1068,21 @@
     </button>
     <div class="d-none" id="add-post-form">
         <label class="form-label fw-bold small mb-1">New Post</label>
+        {# One chip per target, so a platform with two accounts offers both and
+           the same copy can be aimed at either or at both. #}
         <div class="platform-chips mb-2" id="new-post-platforms">
-            {% for platform in PLATFORM_ORDER %}
+            {% for target in PUBLISH_TARGETS %}
+            {% set platform = target.platform %}
             {% set meta = PLATFORM_META[platform] %}
-            <span class="platform-chip {% if platform != 'instagram' %}is-on{% endif %}" data-platform="{{ platform }}">
+            {% set name = target.label if target.show_label else meta.label %}
+            {% set on = platform != 'instagram' and target.is_default %}
+            <span class="platform-chip {% if on %}is-on{% endif %}"
+                  data-platform="{{ platform }}" data-account-id="{{ target.account_id or '' }}">
                 <button type="button" class="chip-toggle" onclick="toggleNewPostPlatform(this)"
-                        title="{{ meta.label }}{% if platform == 'instagram' %} — needs an image before it can publish{% endif %}">
-                    <span class="chip-box">{% if platform != 'instagram' %}✓{% endif %}</span>
+                        title="{{ name }}{% if platform == 'instagram' %}, needs an image before it can publish{% endif %}">
+                    <span class="chip-box">{% if on %}✓{% endif %}</span>
                     <span class="chip-icon">{{ meta.icon }}</span>
-                    {% if platform != 'twitter' %}<span class="chip-name">{{ meta.label }}</span>{% endif %}
+                    {% if platform != 'twitter' or target.show_label %}<span class="chip-name">{{ name }}</span>{% endif %}
                 </button>
             </span>
             {% endfor %}
@@ -1619,6 +1661,17 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
     
+    // Account buttons under the platform picker toggle like the platform boxes.
+    document.querySelectorAll('.account-target-btn').forEach(btn => {
+        btn.addEventListener('click', function (event) {
+            event.preventDefault();
+            const checkbox = this.querySelector('.account-target-checkbox');
+            checkbox.checked = !checkbox.checked;
+            this.classList.toggle('btn-primary', checkbox.checked);
+            this.classList.toggle('btn-outline-secondary', !checkbox.checked);
+        });
+    });
+
     // Tone option toggle
     document.querySelectorAll('.tone-option').forEach(option => {
         option.addEventListener('click', function() {
@@ -1628,6 +1681,18 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     });
 });
+
+// The ticked accounts, as "platform:account_id" strings, limited to platforms
+// that are themselves ticked. A platform with no account ticked sends nothing,
+// which the server reads as "this platform's default account".
+function selectedAccountTargets() {
+    const platforms = new Set(
+        Array.from(document.querySelectorAll('#platform-checkboxes input:checked'))
+             .map(cb => cb.value));
+    return Array.from(document.querySelectorAll('.account-target-checkbox:checked'))
+                .filter(cb => platforms.has(cb.dataset.platform))
+                .map(cb => cb.value);
+}
 
 function checkLinkedInStatus() {
     fetch('{{ url_for("linkedin_status") }}')
@@ -2306,6 +2371,9 @@ function generatePosts() {
     formData.append('posts_per_platform', postsPerPlatform);
     if (extraContext) formData.append('extra_context', extraContext);
     platforms.forEach(p => formData.append('platforms', p));
+    // Targets say which accounts each ticked platform writes to. Sending none
+    // leaves every platform on its default account, exactly as before.
+    selectedAccountTargets().forEach(t => formData.append('targets', t));
     
     // Include image URL if provided (from upload or URL input)
     const finalImageUrl = document.getElementById('final-image-url').value.trim();
@@ -3183,9 +3251,15 @@ function postedUrlFrom(platform, data) {
 }
 
 // Show a published platform as a 🔗 on its own chip, next to its queue control.
-function markChipPosted(postItem, platform, url) {
+function markChipPosted(postItem, platform, url, accountId) {
     if (!postItem || !url) return;
-    const chip = postItem.querySelector(`.platform-chip[data-platform="${platform}"]`);
+    // With two accounts on a platform there are two chips, so the account
+    // decides which one gets the link; without one, the platform's chip does.
+    const selector = accountId
+        ? `.platform-chip[data-platform="${platform}"][data-account-id="${accountId}"]`
+        : `.platform-chip[data-platform="${platform}"]`;
+    const chip = postItem.querySelector(selector)
+        || postItem.querySelector(`.platform-chip[data-platform="${platform}"]`);
     if (!chip || chip.querySelector('.chip-posted')) return;
     const link = document.createElement('a');
     link.href = url;
@@ -3199,20 +3273,22 @@ function markChipPosted(postItem, platform, url) {
 
 // Publish one platform of a card. Resolves to true when it went out, so
 // "post to all" can report a tally.
-async function publishCardPlatform(postItem, postId, platform) {
+async function publishCardPlatform(postItem, postId, platform, accountId) {
     const label = PLATFORM_LABELS[platform] || platform;
     if (!platformConnected(platform)) {
         alert(`Please connect ${label} first`);
         return false;
     }
     try {
-        const res = await fetch(`/compose/post/${postId}/${platform}`, { method: 'POST' });
+        const body = new FormData();
+        if (accountId) body.append('account_id', accountId);
+        const res = await fetch(`/compose/post/${postId}/${platform}`, { method: 'POST', body: body });
         const data = await res.json();
         if (!data.success) {
-            alert(`${label}: ${data.error || 'Failed to post'}`);
+            alert(`${data.account_label || label}: ${data.error || 'Failed to post'}`);
             return false;
         }
-        markChipPosted(postItem, platform, postedUrlFrom(platform, data));
+        markChipPosted(postItem, platform, postedUrlFrom(platform, data), accountId);
         return true;
     } catch (e) {
         alert(`${label}: ${e.message}`);
@@ -3234,7 +3310,7 @@ async function refreshCardUsedState(postItem) {
     setCardUsedUI(postItem, states.every(Boolean));
 }
 
-async function postNowFromCard(btn, postId, platform) {
+async function postNowFromCard(btn, postId, platform, accountId) {
     const label = PLATFORM_LABELS[platform] || platform;
     const extra = platform === 'instagram'
         ? ' An image is required and will be auto-attached if the post has none.'
@@ -3245,7 +3321,7 @@ async function postNowFromCard(btn, postId, platform) {
     const original = btn.innerHTML;
     btn.innerHTML = '⏳ Posting...';
     btn.disabled = true;
-    const posted = await publishCardPlatform(postItem, postId, platform);
+    const posted = await publishCardPlatform(postItem, postId, platform, accountId);
     btn.innerHTML = original;
     btn.disabled = false;
     if (posted) {
@@ -3254,29 +3330,72 @@ async function postNowFromCard(btn, postId, platform) {
     }
 }
 
+// Publish the same copy to every account on the card. The fan-out happens on
+// the server in one request, so a target failing does not abandon the ones
+// after it and the reply says exactly which landed.
 async function postNowAllFromCard(btn) {
     const postItem = btn.closest('.post-item');
-    const platforms = cardPlatforms(postItem);
-    const names = Object.keys(platforms);
-    if (names.length === 0) return;
-    const labels = names.map(p => PLATFORM_LABELS[p] || p).join(', ');
+    const targets = cardTargets(postItem);
+    if (!targets.length) return;
+    const labels = targets.map(t => t.account_label || PLATFORM_LABELS[t.platform] || t.platform).join(', ');
     if (!confirm(`Publish this post to ${labels} now? This cannot be undone.`)) return;
 
     const original = btn.innerHTML;
     btn.innerHTML = '⏳ Posting...';
     btn.disabled = true;
-    let posted = 0;
-    for (const platform of names) {
-        if (await publishCardPlatform(postItem, platforms[platform], platform)) posted++;
+    try {
+        const body = new FormData();
+        body.append('post_ids', cardPostIds(postItem, false).join(','));
+        const res = await fetch(`/compose/post/${postItem.dataset.postId}/publish`, {
+            method: 'POST', body: body,
+        });
+        const data = await res.json();
+        if (!res.ok && !data.results) throw new Error(data.error || 'Could not publish');
+
+        (data.results || []).forEach(r => {
+            if (r.success) markChipPosted(postItem, r.platform, postedUrlFrom(r.platform, r), r.account_id);
+        });
+        const failed = (data.results || []).filter(r => !r.success);
+        if (failed.length) {
+            alert(failed.map(r => `${r.account_label}: ${r.error}`).join('\n'));
+        }
+        showToast(data.message, data.success ? 'success' : (data.published ? 'warning' : 'error'));
+    } catch (e) {
+        showToast('Could not publish: ' + e.message, 'error');
     }
     btn.innerHTML = original;
     btn.disabled = false;
-    showToast(
-        posted === names.length
-            ? `Posted to ${posted} platform${posted !== 1 ? 's' : ''}`
-            : `Posted to ${posted} of ${names.length} platforms`,
-        posted === names.length ? 'success' : 'warning');
     refreshCardUsedState(postItem);
+}
+
+// Queue the same copy for every account on the card, each in its own next slot.
+async function queueAllFromCard(btn) {
+    const postItem = btn.closest('.post-item');
+    const targets = cardTargets(postItem);
+    if (!targets.length) return;
+
+    const original = btn.innerHTML;
+    btn.innerHTML = '⏳ Queueing...';
+    btn.disabled = true;
+    try {
+        const body = new FormData();
+        body.append('all', '1');
+        body.append('post_ids', cardPostIds(postItem, false).join(','));
+        const res = await fetch(`/compose/post/${postItem.dataset.postId}/queue`, {
+            method: 'POST', body: body,
+        });
+        const data = await res.json();
+        if (!res.ok && !data.queued) throw new Error(data.error || 'Could not queue');
+        if ((data.skipped || []).length) {
+            alert(data.skipped.map(s => `${s.target}: ${s.error}`).join('\n'));
+        }
+        showToast(data.message || 'Queued', data.success && !data.partial ? 'success' : 'warning');
+        await refreshCard(postItem);
+    } catch (e) {
+        showToast('Could not queue: ' + e.message, 'error');
+    }
+    btn.innerHTML = original;
+    btn.disabled = false;
 }
 
 // ============ Instagram media builder (carousel / reel / story) ============
@@ -4247,6 +4366,37 @@ function cardPlatforms(postItem) {
     }
 }
 
+// Every (platform, account) this card publishes to. `cardPlatforms` keeps one
+// id per platform for the older per-platform controls; anything that has to
+// reach all of a card's accounts reads this instead.
+function cardTargets(postItem) {
+    if (!postItem) return [];
+    try {
+        return JSON.parse(postItem.dataset.targets || '[]');
+    } catch (e) {
+        return [];
+    }
+}
+
+// Redraw one card from the server, so queue and posted state come from the
+// database rather than being patched up in the browser.
+async function refreshCard(postItem) {
+    if (!postItem) return;
+    try {
+        const body = new FormData();
+        body.append('post_ids', cardPostIds(postItem, false).join(','));
+        if (postItem.dataset.postIndex) body.append('display_index', postItem.dataset.postIndex);
+        const res = await fetch(`/compose/post/${postItem.dataset.postId}/card`, {
+            method: 'POST', body: body,
+        });
+        const data = await res.json();
+        if (res.ok && data.html) replaceCard(postItem, data.html);
+    } catch (e) {
+        // A card that fails to redraw is stale, not broken; the next page load
+        // fixes it, and throwing here would swallow the action that succeeded.
+    }
+}
+
 // Every row behind a card. With a platform filter active the list is showing
 // that platform only, so bulk actions stay inside it — deleting from a list
 // filtered to X must not take the Threads twin with it.
@@ -4308,9 +4458,15 @@ async function togglePostPlatform(btn, platform) {
         ? postItem.dataset.postId
         : (chip.dataset.platformPostId || postItem.dataset.postId);
 
+    // The chip knows which of the platform's accounts it stands for; without
+    // it the server would tick the default account and the wrong chip would
+    // light up.
+    const accountId = chip.dataset.accountId || '';
+
     const send = (force) => {
         const body = new FormData();
         body.append('platform', platform);
+        if (accountId) body.append('account_id', accountId);
         body.append('action', adding ? 'add' : 'remove');
         body.append('post_ids', cardPostIds(postItem, false).join(','));
         if (postItem.dataset.postIndex) body.append('display_index', postItem.dataset.postIndex);
@@ -4343,7 +4499,7 @@ async function togglePostPlatform(btn, platform) {
             return;
         }
 
-        const label = PLATFORM_LABELS[platform] || platform;
+        const label = data.account_label || PLATFORM_LABELS[platform] || platform;
         replaceCard(postItem, data.html);
         showToast(adding ? `Added to ${label}` : `Removed from ${label}`, 'success');
         if (adding && platform === 'instagram') {
@@ -6818,9 +6974,22 @@ const platformCharLimits = {
 // ============ Writing a new post ============
 // One composer for every platform: tick where it should go, write it once.
 
-function newPostPlatforms() {
+// The ticked chips as "platform:account_id" strings, which is what the server
+// reads as a target. A chip with no account is a platform whose default account
+// will be resolved when the row is written.
+function newPostTargets() {
     return Array.from(document.querySelectorAll('#new-post-platforms .platform-chip.is-on'))
-        .map(chip => chip.dataset.platform);
+        .map(chip => chip.dataset.accountId
+            ? `${chip.dataset.platform}:${chip.dataset.accountId}`
+            : chip.dataset.platform);
+}
+
+// The distinct platforms behind those chips, for the character counter: two
+// accounts on one platform share one limit.
+function newPostPlatforms() {
+    return Array.from(new Set(
+        Array.from(document.querySelectorAll('#new-post-platforms .platform-chip.is-on'))
+             .map(chip => chip.dataset.platform)));
 }
 
 function toggleNewPostPlatform(btn) {
@@ -6880,14 +7049,16 @@ function createManualPost() {
         return;
     }
 
-    const platforms = newPostPlatforms();
-    if (platforms.length === 0) {
-        alert('Tick at least one platform for this post.');
+    const targets = newPostTargets();
+    if (targets.length === 0) {
+        alert('Tick at least one account for this post.');
         return;
     }
 
     const formData = new FormData();
-    platforms.forEach(p => formData.append('platforms', p));
+    // One row per ticked target: this is what makes the saved card go to every
+    // platform and every account the chips name.
+    targets.forEach(t => formData.append('targets', t));
     formData.append('content', content);
 
     const saveBtn = textarea.closest('.add-post-area').querySelector('.btn-success');

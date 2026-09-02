@@ -12,7 +12,9 @@ the guarantee that undo never touches an original.
 from __future__ import annotations
 import json, os, random, shutil, sqlite3, sys, tempfile, time
 
-W = "/Users/sedriclouissaint/tools/Insights/.claude/worktrees/instagram-preview-aspect-ratios-9a6cd8"
+# The checkout this suite belongs to, found from the file rather than written
+# down, so it runs wherever the repository is cloned.
+W = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, W)
 
 def build(tmp):

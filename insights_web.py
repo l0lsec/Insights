@@ -119,6 +119,15 @@ from database import (
     delete_instagram_token,
     update_instagram_token,
     update_instagram_user_info,
+    # Connected accounts: one platform can hold several logins, and everything
+    # that publishes names the account it publishes as.
+    list_social_accounts,
+    get_social_account,
+    set_default_social_account,
+    set_social_account_label,
+    delete_social_account,
+    resolve_account_id,
+    count_social_accounts,
     # Scheduled posts functions
     add_scheduled_post,
     get_scheduled_post,
@@ -231,6 +240,12 @@ from database import (
     get_brief_run,
     list_brief_runs,
     get_active_brief_run,
+)
+import social_publisher
+from social_publisher import (
+    account_label,
+    account_summary,
+    platform_name,
 )
 from insights import (
     transcribe_audio,
@@ -3100,6 +3115,249 @@ def view_articles():
 # ============================================================================
 
 
+# ---------------------------------------------------------------------------
+# Connected accounts
+#
+# A platform holds as many logins as the user connects. The OAuth callbacks
+# already key on the platform's own id for the login, so authorising a second
+# LinkedIn adds an account instead of replacing the first; these routes are
+# what let the user see them, name them, pick which one is the default, and
+# disconnect one without touching the others.
+# ---------------------------------------------------------------------------
+
+# Which client answers for a platform, so one route can ask any of them whether
+# the app has credentials configured for it at all.
+PLATFORM_CLIENTS = {
+    'linkedin': get_linkedin_client,
+    'threads': get_threads_client,
+    'twitter': get_twitter_client,
+    'facebook': get_facebook_client,
+    'instagram': get_instagram_client,
+}
+
+
+def _platform_is_configured(platform):
+    """True when the app has API credentials for the platform.
+
+    A platform with no credentials cannot be connected at all, which is a
+    different thing from a platform with no accounts connected yet, and the
+    accounts screen has to tell the two apart.
+    """
+    factory = PLATFORM_CLIENTS.get(platform)
+    if not factory:
+        return False
+    try:
+        return bool(factory().is_configured())
+    except Exception:  # noqa: BLE001 - a misconfigured client is just "not configured"
+        return False
+
+
+def _accounts_by_platform():
+    """Every connected account, grouped by platform, defaults first."""
+    grouped = {platform: [] for platform in social_publisher.PLATFORMS}
+    for account in list_social_accounts():
+        grouped.setdefault(account['platform'], []).append(account_summary(account))
+    return grouped
+
+
+def _account_needs_attention(platform, summary):
+    """A short reason this account cannot publish yet, or None.
+
+    Connecting is not the same as being able to post: LinkedIn needs a member
+    URN and Facebook needs a Page chosen. Saying so on the accounts screen
+    beats finding out when a scheduled post fails.
+    """
+    if summary['status'] == 'expired':
+        return 'Token expired, reconnect to keep posting'
+    token = None
+    if platform == 'linkedin':
+        token = get_linkedin_token(summary['id'])
+        if token is not None and not token['user_urn']:
+            return 'Needs its Member ID configured before it can post'
+    elif platform == 'facebook':
+        token = get_facebook_token(summary['id'])
+        if token is not None and not token['page_id']:
+            return 'Needs a Page selected before it can post'
+    else:
+        token = _PLATFORM_TOKEN_GETTERS[platform](summary['id'])
+    if token is None:
+        return 'Sign-in is incomplete, reconnect this account'
+    return None
+
+
+_PLATFORM_TOKEN_GETTERS = {
+    'linkedin': get_linkedin_token,
+    'threads': get_threads_token,
+    'twitter': get_twitter_token,
+    'facebook': get_facebook_token,
+    'instagram': get_instagram_token,
+}
+
+
+def _accounts_payload():
+    """The whole accounts picture: what is connectable, and what is connected."""
+    grouped = _accounts_by_platform()
+    platforms = []
+    for platform in social_publisher.PLATFORMS:
+        accounts = grouped.get(platform, [])
+        for summary in accounts:
+            summary['needs_attention'] = _account_needs_attention(platform, summary)
+        platforms.append({
+            'platform': platform,
+            'name': platform_name(platform),
+            'configured': _platform_is_configured(platform),
+            'accounts': accounts,
+            'connect_url': f'/{platform}/auth?return=accounts',
+        })
+    return {
+        'platforms': platforms,
+        'total': sum(len(p['accounts']) for p in platforms),
+    }
+
+
+def _platform_accounts_json(platform):
+    """The platform's connected accounts, for a status payload.
+
+    The status endpoints answer about one account (whichever is default), which
+    is all the older screens ever needed. Carrying the full list alongside lets
+    a caller notice there is more than one without a second request.
+    """
+    return [account_summary(a) for a in list_social_accounts(platform)]
+
+
+def _remember_oauth_return():
+    """Note that this OAuth run started from the accounts screen."""
+    session['oauth_return'] = 'accounts' if request.args.get('return') == 'accounts' else None
+
+
+def _oauth_return_redirect(fallback_url):
+    """Send the user back where they started the connection from."""
+    if session.pop('oauth_return', None) == 'accounts':
+        return redirect(url_for('accounts_page') + '?connected=1')
+    return redirect(fallback_url)
+
+
+def _disconnect_platform(platform):
+    """Disconnect one named account, or every account on the platform.
+
+    The per-platform disconnect buttons predate accounts and meant "disconnect
+    this platform", so with no ``account_id`` they still do exactly that. The
+    accounts screen passes an id and takes one login away, leaving the rest
+    posting.
+    """
+    raw = (request.form.get('account_id') or '').strip()
+    if raw:
+        try:
+            account_id = int(raw)
+        except ValueError:
+            return jsonify({"error": "Unknown account"}), 400
+        account = get_social_account(account_id)
+        if not account or account['platform'] != platform:
+            return jsonify({"error": "Account not found"}), 404
+        label = account_label(account)
+        delete_social_account(account_id)
+        return jsonify({
+            "success": True,
+            "message": f"Disconnected {label}",
+            "remaining": count_social_accounts(platform),
+        })
+
+    for account in list_social_accounts(platform):
+        delete_social_account(account['id'])
+    _PLATFORM_TOKEN_DELETERS[platform]()
+    return jsonify({
+        "success": True,
+        "message": f"{platform_name(platform)} disconnected",
+        "remaining": 0,
+    })
+
+
+_PLATFORM_TOKEN_DELETERS = {
+    'linkedin': delete_linkedin_token,
+    'threads': delete_threads_token,
+    'twitter': delete_twitter_token,
+    'facebook': delete_facebook_token,
+    'instagram': delete_instagram_token,
+}
+
+
+@app.route('/accounts')
+def accounts_page():
+    """Manage every connected account across every platform."""
+    return render_template('accounts.html', **_accounts_payload())
+
+
+@app.route('/accounts/list')
+def accounts_list():
+    """The accounts payload as JSON, for the composer's target picker."""
+    return jsonify(_accounts_payload())
+
+
+@app.route('/accounts/<int:account_id>/default', methods=['POST'])
+def accounts_set_default(account_id: int):
+    """Make this the account a bare platform name means."""
+    account = get_social_account(account_id)
+    if not account:
+        return jsonify({"error": "Account not found"}), 404
+    set_default_social_account(account_id)
+    return jsonify({
+        "success": True,
+        "account_id": account_id,
+        "platform": account['platform'],
+        "message": f"{account_label(account)} is now the default {platform_name(account['platform'])} account",
+    })
+
+
+@app.route('/accounts/<int:account_id>/label', methods=['POST'])
+def accounts_set_label(account_id: int):
+    """Name an account, so two logins on one platform are told apart."""
+    account = get_social_account(account_id)
+    if not account:
+        return jsonify({"error": "Account not found"}), 404
+    label = (request.form.get('label') or '').strip()
+    if len(label) > 60:
+        return jsonify({"error": "Keep the name under 60 characters"}), 400
+    set_social_account_label(account_id, label)
+    refreshed = get_social_account(account_id)
+    return jsonify({
+        "success": True,
+        "account_id": account_id,
+        "label": account_label(refreshed),
+    })
+
+
+@app.route('/accounts/<int:account_id>/disconnect', methods=['POST'])
+def accounts_disconnect(account_id: int):
+    """Disconnect one account, leaving the platform's other logins alone.
+
+    Queue entries aimed at it are removed rather than silently redirected: a
+    scheduled post that would now publish from a different account is not the
+    post the user queued.
+    """
+    account = get_social_account(account_id)
+    if not account:
+        return jsonify({"error": "Account not found"}), 404
+
+    label = account_label(account)
+    platform = account['platform']
+    removed = 0
+    for entry in list_scheduled_posts(status='pending'):
+        entry_account = entry['account_id'] if 'account_id' in entry.keys() else None
+        if entry_account == account_id:
+            delete_scheduled_post(entry['id'])
+            removed += 1
+
+    delete_social_account(account_id)
+    return jsonify({
+        "success": True,
+        "platform": platform,
+        "unqueued": removed,
+        "message": f"Disconnected {label}",
+        "remaining": count_social_accounts(platform),
+    })
+
+
+
 @app.route('/linkedin/status')
 def linkedin_status():
     """Check LinkedIn connection status."""
@@ -3166,6 +3424,7 @@ def linkedin_status():
         "user_urn": token['user_urn'],
         "expires_at": token['expires_at'],
         "configure_url": url_for('linkedin_configure') if needs_configuration else None,
+        "accounts": _platform_accounts_json('linkedin'),
     })
 
 
@@ -3179,6 +3438,7 @@ def linkedin_auth():
     
     auth_url, state = client.get_authorization_url()
     session['linkedin_oauth_state'] = state
+    _remember_oauth_return()
     
     return redirect(auth_url)
 
@@ -3258,7 +3518,7 @@ def linkedin_callback():
             return redirect(url_for('linkedin_configure') + '?new=1')
         
         # Redirect to articles page with success message
-        return redirect(url_for('view_articles') + '?linkedin=connected')
+        return _oauth_return_redirect(url_for('view_articles') + '?linkedin=connected')
         
     except Exception as e:
         app.logger.exception("LinkedIn OAuth exchange failed")
@@ -3270,9 +3530,8 @@ def linkedin_callback():
 
 @app.route('/linkedin/disconnect', methods=['POST'])
 def linkedin_disconnect():
-    """Disconnect LinkedIn account."""
-    delete_linkedin_token()
-    return jsonify({"success": True, "message": "LinkedIn disconnected"})
+    """Disconnect one LinkedIn account, or the platform when none is named."""
+    return _disconnect_platform('linkedin')
 
 
 @app.route('/linkedin/configure', methods=['GET', 'POST'])
@@ -3283,8 +3542,11 @@ def linkedin_configure():
     which doesn't provide profile access scopes.
     """
     from database import update_linkedin_member_urn
-    
-    token = get_linkedin_token()
+
+    # With more than one LinkedIn connected, the accounts screen says which one
+    # is being configured; without it this is still the default account.
+    account_id = request.args.get('account_id', type=int)
+    token = get_linkedin_token(account_id)
     if not token:
         return redirect(url_for('view_schedule') + '?error=not_connected')
     
@@ -3304,6 +3566,7 @@ def linkedin_configure():
         success = update_linkedin_member_urn(
             member_id=member_id,
             display_name=display_name,
+            account_id=account_id,
         )
         
         if success:
@@ -3328,80 +3591,7 @@ def linkedin_configure():
 @app.route('/linkedin/post/<int:post_id>', methods=['POST'])
 def linkedin_post_social(post_id: int):
     """Post a social media post to LinkedIn immediately."""
-    post = get_social_post(post_id)
-    if not post:
-        return jsonify({"error": "Post not found"}), 404
-    
-    token = get_linkedin_token()
-    if not token:
-        return jsonify({"error": "LinkedIn not connected"}), 401
-    
-    if is_token_expired(token['expires_at']):
-        return jsonify({"error": "LinkedIn token expired. Please reconnect."}), 401
-    
-    if not token['user_urn']:
-        return jsonify({
-            "error": "LinkedIn needs configuration. Please configure your Member ID.",
-            "configure_url": url_for('linkedin_configure')
-        }), 400
-    
-    client = get_linkedin_client()
-    
-    try:
-        # Get image URL if available
-        image_url = post['image_url'] if 'image_url' in post.keys() else None
-        
-        # Use smart post to automatically detect URLs and show link previews
-        # Pass the article topic as fallback title for link previews
-        article_topic = post['article_topic'] if 'article_topic' in post.keys() else None
-        
-        # Use image post if image URL is available and no URL in content
-        if image_url and not client.extract_first_url(post['content']):
-            app.logger.info("Posting to LinkedIn with image: %s", image_url)
-            result = client.create_image_post(
-                access_token=token['access_token'],
-                author_urn=token['user_urn'],
-                text=post['content'],
-                image_url=image_url,
-            )
-        else:
-            result = client.create_smart_post(
-                access_token=token['access_token'],
-                author_urn=token['user_urn'],
-                text=post['content'],
-                article_title=article_topic,
-            )
-        
-        if result['success']:
-            # Mark the post as used
-            mark_social_post_used(post_id, True)
-            
-            # Record in scheduled_posts for history tracking
-            now = datetime.now().isoformat(timespec='seconds')
-            add_scheduled_post(
-                social_post_id=post_id,
-                article_id=post['article_id'] if 'article_id' in post.keys() else None,
-                post_type='social',
-                platform='linkedin',
-                scheduled_for=now,
-                status='posted',
-                linkedin_post_urn=result.get('post_urn'),
-            )
-            
-            return jsonify({
-                "success": True,
-                "post_urn": result['post_urn'],
-                "message": "Posted to LinkedIn successfully!",
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": result.get('error', 'Unknown error'),
-            }), 400
-            
-    except Exception as e:
-        app.logger.exception("Failed to post to LinkedIn")
-        return jsonify({"error": str(e)}), 500
+    return _publish_social_post(post_id, 'linkedin')
 
 
 # ============================================================================
@@ -3464,6 +3654,7 @@ def threads_status():
         "profile_picture_url": token['profile_picture_url'],
         "user_id": token['user_id'],
         "expires_at": token['expires_at'],
+        "accounts": _platform_accounts_json('threads'),
     })
 
 
@@ -3477,6 +3668,7 @@ def threads_auth():
     
     auth_url, state = client.get_authorization_url()
     session['threads_oauth_state'] = state
+    _remember_oauth_return()
     
     return redirect(auth_url)
 
@@ -3570,7 +3762,7 @@ def threads_callback():
         app.logger.info("Threads connected for user: @%s", username)
         
         # Redirect to schedule page with success message
-        return redirect(url_for('schedule_list') + '?threads=connected')
+        return _oauth_return_redirect(url_for('schedule_list') + '?threads=connected')
         
     except Exception as e:
         app.logger.exception("Threads OAuth exchange failed")
@@ -3582,15 +3774,15 @@ def threads_callback():
 
 @app.route('/threads/disconnect', methods=['POST'])
 def threads_disconnect():
-    """Disconnect Threads account."""
-    delete_threads_token()
-    return jsonify({"success": True, "message": "Threads disconnected"})
+    """Disconnect one Threads account, or the platform when none is named."""
+    return _disconnect_platform('threads')
 
 
 @app.route('/threads/configure', methods=['GET', 'POST'])
 def threads_configure():
     """Configure Threads user info manually or view setup instructions."""
-    token = get_threads_token()
+    account_id = request.args.get('account_id', type=int)
+    token = get_threads_token(account_id)
 
     if request.method == 'POST':
         if not token:
@@ -3611,6 +3803,7 @@ def threads_configure():
             user_id=user_id,
             username=username or None,
             display_name=display_name,
+            account_id=account_id,
         )
 
         if success:
@@ -3698,6 +3891,7 @@ def instagram_status():
         "warning": warning,
         "user_id": token['user_id'],
         "expires_at": token['expires_at'],
+        "accounts": _platform_accounts_json('instagram'),
     })
 
 
@@ -3711,6 +3905,7 @@ def instagram_auth():
 
     auth_url, state = client.get_authorization_url()
     session['instagram_oauth_state'] = state
+    _remember_oauth_return()
 
     return redirect(auth_url)
 
@@ -3810,7 +4005,7 @@ def instagram_callback():
         app.logger.info("Instagram connected for user: @%s (%s)", username, account_type or 'unknown type')
 
         # Redirect to schedule page with success message
-        return redirect(url_for('schedule_list') + '?instagram=connected')
+        return _oauth_return_redirect(url_for('schedule_list') + '?instagram=connected')
 
     except Exception as e:
         app.logger.exception("Instagram OAuth exchange failed")
@@ -3822,15 +4017,15 @@ def instagram_callback():
 
 @app.route('/instagram/disconnect', methods=['POST'])
 def instagram_disconnect():
-    """Disconnect Instagram account."""
-    delete_instagram_token()
-    return jsonify({"success": True, "message": "Instagram disconnected"})
+    """Disconnect one Instagram account, or the platform when none is named."""
+    return _disconnect_platform('instagram')
 
 
 @app.route('/instagram/configure', methods=['GET', 'POST'])
 def instagram_configure():
     """Configure Instagram user info manually or view setup instructions."""
-    token = get_instagram_token()
+    account_id = request.args.get('account_id', type=int)
+    token = get_instagram_token(account_id)
 
     if request.method == 'POST':
         if not token:
@@ -3853,6 +4048,7 @@ def instagram_configure():
             username=username or None,
             display_name=display_name,
             ig_user_id=ig_user_id or None,
+            account_id=account_id,
         )
 
         if success:
@@ -3876,85 +4072,7 @@ def instagram_configure():
 @app.route('/threads/post/<int:post_id>', methods=['POST'])
 def threads_post_social(post_id: int):
     """Post a social media post to Threads immediately."""
-    post = get_social_post(post_id)
-    if not post:
-        return jsonify({"error": "Post not found"}), 404
-    
-    # Check if this is a Threads post
-    if post['platform'] != 'threads':
-        return jsonify({"error": "This post is not for Threads"}), 400
-    
-    # Get Threads token
-    token = get_threads_token()
-    if not token:
-        return jsonify({"error": "Threads not connected. Please connect your account first."}), 401
-    
-    # Check if token is expired and try to refresh
-    if threads_is_token_expired(token['expires_at']):
-        client = get_threads_client()
-        try:
-            new_token = client.refresh_access_token(token['access_token'])
-            expires_at = threads_calculate_token_expiry(new_token.get('expires_in', 5184000))
-            update_threads_token(
-                access_token=new_token['access_token'],
-                expires_at=expires_at,
-            )
-            token = get_threads_token()
-        except Exception as e:
-            app.logger.warning("Failed to refresh Threads token: %s", e)
-            return jsonify({"error": "Threads token expired. Please reconnect."}), 401
-    
-    client = get_threads_client()
-    
-    try:
-        # Get image URL if available
-        image_url = post['image_url'] if 'image_url' in post.keys() else None
-        
-        # Use image post if image URL is available
-        if image_url:
-            app.logger.info("Posting to Threads with image: %s", image_url)
-            result = client.publish_image_post(
-                access_token=token['access_token'],
-                text=post['content'],
-                image_url=image_url,
-            )
-        else:
-            result = client.publish_text_post(
-                access_token=token['access_token'],
-                text=post['content'],
-            )
-        
-        if result['success']:
-            # Mark the post as used
-            mark_social_post_used(post_id, True)
-            
-            # Record in scheduled_posts for history tracking
-            now = datetime.now().isoformat(timespec='seconds')
-            add_scheduled_post(
-                social_post_id=post_id,
-                article_id=post['article_id'] if 'article_id' in post.keys() else None,
-                post_type='social',
-                platform='threads',
-                scheduled_for=now,
-                status='posted',
-                linkedin_post_urn=result.get('permalink'),  # Store permalink for view link
-            )
-            
-            return jsonify({
-                "success": True,
-                "post_id": result.get('post_id'),
-                "permalink": result.get('permalink'),
-                "message": "Posted to Threads successfully!",
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": result.get('error', 'Unknown error'),
-            }), 400
-            
-    except Exception as e:
-        app.logger.exception("Failed to post to Threads")
-        return jsonify({"error": str(e)}), 500
+    return _publish_social_post(post_id, 'threads')
 
 
 # ============================================================================
@@ -4007,6 +4125,7 @@ def facebook_status():
         "page_name": token['page_name'],
         "page_id": token['page_id'],
         "expires_at": token['expires_at'],
+        "accounts": _platform_accounts_json('facebook'),
     })
 
 
@@ -4020,6 +4139,7 @@ def facebook_auth():
 
     auth_url, state = client.get_authorization_url()
     session['facebook_oauth_state'] = state
+    _remember_oauth_return()
 
     return redirect(auth_url)
 
@@ -4093,7 +4213,7 @@ def facebook_callback():
         if pages and len(pages) > 1:
             return redirect(url_for('facebook_configure') + '?new=1')
 
-        return redirect(url_for('schedule_list') + '?facebook=connected')
+        return _oauth_return_redirect(url_for('schedule_list') + '?facebook=connected')
 
     except Exception as e:
         app.logger.exception("Facebook OAuth exchange failed")
@@ -4105,15 +4225,17 @@ def facebook_callback():
 
 @app.route('/facebook/disconnect', methods=['POST'])
 def facebook_disconnect():
-    """Disconnect Facebook account."""
-    delete_facebook_token()
-    return jsonify({"success": True, "message": "Facebook disconnected"})
+    """Disconnect one Facebook account, or the platform when none is named."""
+    return _disconnect_platform('facebook')
 
 
 @app.route('/facebook/configure', methods=['GET', 'POST'])
 def facebook_configure():
     """Configure which Facebook Page/Group to post to."""
-    token = get_facebook_token()
+    # Each Facebook login publishes as one Page, so picking a Page configures a
+    # single account rather than the platform.
+    account_id = request.args.get('account_id', type=int)
+    token = get_facebook_token(account_id)
 
     if request.method == 'POST':
         if not token:
@@ -4131,10 +4253,11 @@ def facebook_configure():
                     page_id=selected['id'],
                     page_name=selected['name'],
                     page_access_token=selected['access_token'],
+                    account_id=account_id,
                 )
 
         if group_ids is not None:
-            update_facebook_group_ids(group_ids)
+            update_facebook_group_ids(group_ids, account_id=account_id)
 
         app.logger.info("Facebook page/group selection updated")
         return redirect(url_for('schedule_list') + '?facebook=configured')
@@ -4158,147 +4281,13 @@ def facebook_configure():
 @app.route('/facebook/post/<int:post_id>', methods=['POST'])
 def facebook_post_social(post_id: int):
     """Post a social media post to Facebook immediately."""
-    post = get_social_post(post_id)
-    if not post:
-        return jsonify({"error": "Post not found"}), 404
-
-    if post['platform'] != 'facebook':
-        return jsonify({"error": "This post is not for Facebook"}), 400
-
-    token = get_facebook_token()
-    if not token:
-        return jsonify({"error": "Facebook not connected. Please connect your account first."}), 401
-
-    if not token['page_id'] or not token['page_access_token']:
-        return jsonify({"error": "No Facebook Page selected. Please configure in Settings."}), 400
-
-    if facebook_is_token_expired(token['expires_at']):
-        client = get_facebook_client()
-        try:
-            new_token = client.refresh_access_token(token['access_token'])
-            expires_at = facebook_calculate_token_expiry(new_token.get('expires_in', 5184000))
-            update_facebook_token(
-                access_token=new_token['access_token'],
-                expires_at=expires_at,
-            )
-            token = get_facebook_token()
-        except Exception as e:
-            app.logger.warning("Failed to refresh Facebook token: %s", e)
-            return jsonify({"error": "Facebook token expired. Please reconnect."}), 401
-
-    client = get_facebook_client()
-
-    try:
-        image_url = post['image_url'] if 'image_url' in post.keys() else None
-
-        result = client.publish_smart_post(
-            page_access_token=token['page_access_token'],
-            page_id=token['page_id'],
-            text=post['content'],
-            image_url=image_url,
-        )
-
-        if result['success']:
-            mark_social_post_used(post_id, True)
-
-            now = datetime.now().isoformat(timespec='seconds')
-            add_scheduled_post(
-                social_post_id=post_id,
-                article_id=post['article_id'] if 'article_id' in post.keys() else None,
-                post_type='social',
-                platform='facebook',
-                scheduled_for=now,
-                status='posted',
-                linkedin_post_urn=result.get('permalink'),
-            )
-
-            return jsonify({
-                "success": True,
-                "post_id": result.get('post_id'),
-                "permalink": result.get('permalink'),
-                "message": "Posted to Facebook successfully!",
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": result.get('error', 'Unknown error'),
-            }), 400
-
-    except Exception as e:
-        app.logger.exception("Failed to post to Facebook")
-        return jsonify({"error": str(e)}), 500
+    return _publish_social_post(post_id, 'facebook')
 
 
 @app.route('/compose/post/<int:post_id>/facebook', methods=['POST'])
 def compose_post_to_facebook(post_id: int):
     """Post a standalone post to Facebook immediately."""
-    post = get_standalone_post(post_id)
-    if not post:
-        return jsonify({"error": "Post not found"}), 404
-
-    token = get_facebook_token()
-    if not token:
-        return jsonify({"error": "Facebook not connected. Please connect your account first."}), 401
-
-    if not token['page_id'] or not token['page_access_token']:
-        return jsonify({"error": "No Facebook Page selected. Please configure in Settings."}), 400
-
-    if facebook_is_token_expired(token['expires_at']):
-        client = get_facebook_client()
-        try:
-            new_token = client.refresh_access_token(token['access_token'])
-            expires_at = facebook_calculate_token_expiry(new_token.get('expires_in', 5184000))
-            update_facebook_token(
-                access_token=new_token['access_token'],
-                expires_at=expires_at,
-            )
-            token = get_facebook_token()
-        except Exception as e:
-            app.logger.warning("Failed to refresh Facebook token: %s", e)
-            return jsonify({"error": "Facebook token expired. Please reconnect."}), 401
-
-    client = get_facebook_client()
-
-    try:
-        image_url = post['image_url'] if 'image_url' in post.keys() else None
-
-        result = client.publish_smart_post(
-            page_access_token=token['page_access_token'],
-            page_id=token['page_id'],
-            text=post['content'],
-            image_url=image_url,
-        )
-
-        if result['success']:
-            mark_standalone_post_used(post_id, True)
-
-            now = datetime.now().isoformat(timespec='seconds')
-            add_scheduled_post(
-                social_post_id=None,
-                article_id=None,
-                standalone_post_id=post_id,
-                post_type='standalone',
-                platform='facebook',
-                scheduled_for=now,
-                status='posted',
-                linkedin_post_urn=result.get('permalink'),
-            )
-
-            return jsonify({
-                "success": True,
-                "post_id": result.get('post_id'),
-                "permalink": result.get('permalink'),
-                "message": "Posted to Facebook successfully!",
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": result.get('error', 'Unknown error'),
-            }), 400
-
-    except Exception as e:
-        app.logger.exception("Failed to post to Facebook")
-        return jsonify({"error": str(e)}), 500
+    return _compose_publish_one(post_id, 'facebook')
 
 
 # ============================================================================
@@ -4366,6 +4355,7 @@ def twitter_status():
         "display_name": token['display_name'],
         "user_id": token['user_id'],
         "expires_at": token['expires_at'],
+        "accounts": _platform_accounts_json('twitter'),
     })
 
 
@@ -4379,6 +4369,7 @@ def twitter_auth():
 
     auth_url, state, code_verifier = client.get_authorization_url()
     session['twitter_oauth_state'] = state
+    _remember_oauth_return()
     session['twitter_code_verifier'] = code_verifier
 
     return redirect(auth_url)
@@ -4447,7 +4438,7 @@ def twitter_callback():
 
         app.logger.info("Twitter connected for user: @%s", username)
 
-        return redirect(url_for('view_articles') + '?twitter=connected')
+        return _oauth_return_redirect(url_for('view_articles') + '?twitter=connected')
 
     except Exception as e:
         app.logger.exception("Twitter OAuth exchange failed")
@@ -4459,164 +4450,20 @@ def twitter_callback():
 
 @app.route('/twitter/disconnect', methods=['POST'])
 def twitter_disconnect():
-    """Disconnect Twitter/X account."""
-    delete_twitter_token()
-    return jsonify({"success": True, "message": "Twitter disconnected"})
+    """Disconnect one X/Twitter account, or the platform when none is named."""
+    return _disconnect_platform('twitter')
 
 
 @app.route('/twitter/post/<int:post_id>', methods=['POST'])
 def twitter_post_social(post_id: int):
-    """Post a social media post to Twitter/X immediately."""
-    post = get_social_post(post_id)
-    if not post:
-        return jsonify({"error": "Post not found"}), 404
-
-    token = get_twitter_token()
-    if not token:
-        return jsonify({"error": "Twitter not connected"}), 401
-
-    if twitter_is_token_expired(token['expires_at']):
-        if token['refresh_token']:
-            client = get_twitter_client()
-            try:
-                new_token = client.refresh_access_token(token['refresh_token'])
-                update_twitter_token(
-                    access_token=new_token['access_token'],
-                    expires_at=twitter_calculate_token_expiry(new_token.get('expires_in', 7200)),
-                    refresh_token=new_token.get('refresh_token'),
-                )
-                token = get_twitter_token()
-            except Exception as e:
-                app.logger.warning("Failed to refresh Twitter token: %s", e)
-                return jsonify({"error": "Twitter token expired. Please reconnect."}), 401
-        else:
-            return jsonify({"error": "Twitter token expired. Please reconnect."}), 401
-
-    client = get_twitter_client()
-
-    try:
-        image_url = post['image_url'] if 'image_url' in post.keys() else None
-
-        if image_url:
-            app.logger.info("Posting to Twitter with image: %s", image_url)
-            result = client.create_image_post(
-                access_token=token['access_token'],
-                text=post['content'],
-                image_url=image_url,
-            )
-        else:
-            result = client.create_post(
-                access_token=token['access_token'],
-                text=post['content'],
-            )
-
-        if result['success']:
-            mark_social_post_used(post_id, True)
-
-            now = datetime.now().isoformat(timespec='seconds')
-            add_scheduled_post(
-                social_post_id=post_id,
-                article_id=post['article_id'] if 'article_id' in post.keys() else None,
-                post_type='social',
-                platform='twitter',
-                scheduled_for=now,
-                status='posted',
-                linkedin_post_urn=result.get('permalink'),
-            )
-
-            return jsonify({
-                "success": True,
-                "tweet_id": result.get('tweet_id'),
-                "permalink": result.get('permalink'),
-                "message": "Posted to X/Twitter successfully!",
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": result.get('error', 'Unknown error'),
-            }), 400
-
-    except Exception as e:
-        app.logger.exception("Failed to post to Twitter")
-        return jsonify({"error": str(e)}), 500
+    """Post a social media post to X/Twitter immediately."""
+    return _publish_social_post(post_id, 'twitter')
 
 
 @app.route('/compose/post/<int:post_id>/twitter', methods=['POST'])
 def compose_post_to_twitter(post_id: int):
-    """Post a standalone post to Twitter/X immediately."""
-    post = get_standalone_post(post_id)
-    if not post:
-        return jsonify({"error": "Post not found"}), 404
-
-    token = get_twitter_token()
-    if not token:
-        return jsonify({"error": "Twitter not connected. Please connect your account first."}), 401
-
-    if twitter_is_token_expired(token['expires_at']):
-        if token['refresh_token']:
-            client = get_twitter_client()
-            try:
-                new_token = client.refresh_access_token(token['refresh_token'])
-                update_twitter_token(
-                    access_token=new_token['access_token'],
-                    expires_at=twitter_calculate_token_expiry(new_token.get('expires_in', 7200)),
-                    refresh_token=new_token.get('refresh_token'),
-                )
-                token = get_twitter_token()
-            except Exception as e:
-                app.logger.warning("Failed to refresh Twitter token: %s", e)
-                return jsonify({"error": "Twitter token expired. Please reconnect."}), 401
-        else:
-            return jsonify({"error": "Twitter token expired. Please reconnect."}), 401
-
-    client = get_twitter_client()
-
-    try:
-        image_url = post['image_url'] if 'image_url' in post.keys() else None
-
-        if image_url:
-            app.logger.info("Posting to Twitter with image: %s", image_url)
-            result = client.create_image_post(
-                access_token=token['access_token'],
-                text=post['content'],
-                image_url=image_url,
-            )
-        else:
-            result = client.create_post(
-                access_token=token['access_token'],
-                text=post['content'],
-            )
-
-        if result['success']:
-            mark_standalone_post_used(post_id, True)
-
-            now = datetime.now().isoformat(timespec='seconds')
-            add_scheduled_post(
-                social_post_id=None,
-                article_id=None,
-                standalone_post_id=post_id,
-                post_type='standalone',
-                platform='twitter',
-                scheduled_for=now,
-                status='posted',
-                linkedin_post_urn=result.get('permalink'),
-            )
-
-            return jsonify({
-                "success": True,
-                "tweet_id": result.get('tweet_id'),
-                "permalink": result.get('permalink'),
-                "message": "Posted to X/Twitter successfully!",
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": result.get('error', 'Unknown error'),
-            }), 400
-
-    except Exception as e:
-        app.logger.exception("Failed to post to Twitter")
-        return jsonify({"error": str(e)}), 500
+    """Post a standalone post to X/Twitter immediately."""
+    return _compose_publish_one(post_id, 'twitter')
 
 
 # ============================================================================
@@ -4892,428 +4739,119 @@ def schedule_delete(scheduled_id: int):
     return jsonify({"success": True, "message": "Post deleted"})
 
 
+def _scheduled_post_content(post):
+    """The copy and image a queue entry will publish, or (None, None, error)."""
+    if post['post_type'] == 'social' and post['social_content']:
+        image = post['social_image_url'] if 'social_image_url' in post.keys() else None
+        return post['social_content'], image, None
+    if post['post_type'] == 'standalone' and post['standalone_content']:
+        image = post['standalone_image_url'] if 'standalone_image_url' in post.keys() else None
+        return post['standalone_content'], image, None
+    if post['post_type'] == 'article' and post['article_content']:
+        return f"{post['article_topic']}\n\n{post['article_content'][:2800]}", None, None
+    return None, None, 'No content found'
+
+
+def _publish_scheduled_entry(post):
+    """Publish one queue entry as the account it names, and record the outcome.
+
+    The entry carries its own account, so two accounts on the same platform sit
+    in the queue independently: each publishes with its own token and each
+    fails, retries and redistributes on its own.
+    """
+    platform = post['platform'] if 'platform' in post.keys() else 'linkedin'
+    account_id = post['account_id'] if 'account_id' in post.keys() else None
+    content, image_url, error = _scheduled_post_content(post)
+    if error:
+        return {"success": False, "platform": platform, "platform_name": platform_name(platform),
+                "account_id": account_id, "account_label": platform_name(platform),
+                "permalink": None, "error": error, "needs_reconnect": False}
+
+    result = social_publisher.publish(
+        platform,
+        account_id,
+        content=content,
+        image_url=image_url,
+        standalone_post_id=post['standalone_post_id'],
+        social_post_id=post['social_post_id'],
+        # An article's topic becomes the link-preview title on LinkedIn.
+        article_title=post['article_topic'] if 'article_topic' in post.keys() else None,
+    )
+
+    if result['success']:
+        update_scheduled_post_status(
+            post['id'], status='posted', linkedin_post_urn=result['permalink'],
+        )
+        if post['social_post_id']:
+            mark_social_post_used(post['social_post_id'], True)
+        if post['standalone_post_id']:
+            mark_standalone_post_used(post['standalone_post_id'], True)
+        # Posting ahead of the slot leaves a gap; pull the rest of this
+        # platform's queue forward so the cadence stays even.
+        try:
+            if datetime.now() < datetime.fromisoformat(post['scheduled_for']):
+                redistribute_scheduled_posts(platform)
+        except (ValueError, TypeError):
+            pass
+    return result
+
+
 @app.route('/schedule/<int:scheduled_id>/post-now', methods=['POST'])
 def schedule_post_now(scheduled_id: int):
     """Immediately post a pending scheduled post."""
     post = get_scheduled_post(scheduled_id)
-    
+
     if not post:
         return jsonify({"error": "Post not found"}), 404
-    
+
     if post['status'] != 'pending':
         return jsonify({"error": "Only pending posts can be posted immediately"}), 400
-    
-    platform = post['platform'] if 'platform' in post.keys() else 'linkedin'
-    
-    # Get content and image URL
-    image_url = None
-    if post['post_type'] == 'social' and post['social_content']:
-        content = post['social_content']
-        image_url = post['social_image_url'] if 'social_image_url' in post.keys() else None
-    elif post['post_type'] == 'standalone' and post['standalone_content']:
-        content = post['standalone_content']
-        image_url = post['standalone_image_url'] if 'standalone_image_url' in post.keys() else None
-    elif post['post_type'] == 'article' and post['article_content']:
-        content = f"{post['article_topic']}\n\n{post['article_content'][:2800]}"
-    else:
-        return jsonify({"error": "No content found"}), 400
-    
-    # Get article topic for title
-    article_topic = post['article_topic'] if 'article_topic' in post.keys() else None
-    
+
     try:
-        if platform == 'threads':
-            # Handle Threads posting
-            threads_token = get_threads_token()
-            if not threads_token:
-                return jsonify({"error": "Threads not connected"}), 400
-            
-            threads_client = get_threads_client()
-            
-            # Use image post if image URL is available
-            if image_url:
-                app.logger.info("Posting to Threads with image: %s", image_url)
-                result = threads_client.publish_image_post(
-                    threads_token['access_token'],
-                    content[:500],
-                    image_url,
-                )
-            else:
-                result = threads_client.publish_text_post(
-                    threads_token['access_token'],
-                    content[:500],
-                )
-            
-            if result and result.get('success'):
-                update_scheduled_post_status(
-                    scheduled_id,
-                    status='posted',
-                    linkedin_post_urn=result.get('permalink'),
-                )
-                if post['social_post_id']:
-                    mark_social_post_used(post['social_post_id'], True)
-                if post['standalone_post_id']:
-                    mark_standalone_post_used(post['standalone_post_id'], True)
-                
-                # If posted before scheduled time, redistribute remaining posts to fill the gap
-                scheduled_time = datetime.fromisoformat(post['scheduled_for'])
-                if datetime.now() < scheduled_time:
-                    redistribute_scheduled_posts(platform)
-                
-                return jsonify({"success": True, "message": "Posted to Threads!"})
-            else:
-                error_msg = result.get('error', 'Unknown error') if result else 'No response'
-                return jsonify({"error": f"Failed: {error_msg}"}), 400
-        elif platform == 'twitter':
-            twitter_token = get_twitter_token()
-            if not twitter_token:
-                return jsonify({"error": "Twitter/X not connected"}), 400
-            
-            if twitter_is_token_expired(twitter_token['expires_at']):
-                tw_client = get_twitter_client()
-                try:
-                    new_token = tw_client.refresh_access_token(twitter_token['refresh_token'])
-                    expires_at = twitter_calculate_token_expiry(new_token.get('expires_in', 7200))
-                    update_twitter_token(
-                        access_token=new_token['access_token'],
-                        expires_at=expires_at,
-                        refresh_token=new_token.get('refresh_token'),
-                    )
-                    twitter_token = get_twitter_token()
-                except Exception as e:
-                    return jsonify({"error": f"Twitter token expired: {e}"}), 400
-            
-            tw_client = get_twitter_client()
-            
-            if image_url:
-                result = tw_client.create_image_post(
-                    access_token=twitter_token['access_token'],
-                    text=content[:280],
-                    image_url=image_url,
-                )
-            else:
-                result = tw_client.create_post(
-                    access_token=twitter_token['access_token'],
-                    text=content[:280],
-                )
-            
-            if result and result.get('success'):
-                update_scheduled_post_status(
-                    scheduled_id,
-                    status='posted',
-                    linkedin_post_urn=result.get('permalink'),
-                )
-                if post['social_post_id']:
-                    mark_social_post_used(post['social_post_id'], True)
-                if post['standalone_post_id']:
-                    mark_standalone_post_used(post['standalone_post_id'], True)
-                
-                scheduled_time = datetime.fromisoformat(post['scheduled_for'])
-                if datetime.now() < scheduled_time:
-                    redistribute_scheduled_posts(platform)
-                
-                return jsonify({"success": True, "message": "Posted to X/Twitter!"})
-            else:
-                error_msg = result.get('error', 'Unknown error') if result else 'No response'
-                return jsonify({"error": f"Failed: {error_msg}"}), 400
-
-        elif platform == 'facebook':
-            fb_token = get_facebook_token()
-            if not fb_token:
-                return jsonify({"error": "Facebook not connected"}), 400
-            
-            fb_client = get_facebook_client()
-            
-            result = fb_client.publish_smart_post(
-                page_access_token=fb_token['page_access_token'],
-                page_id=fb_token['page_id'],
-                text=content[:5000],
-                image_url=image_url,
-            )
-            
-            if result and result.get('success'):
-                update_scheduled_post_status(
-                    scheduled_id,
-                    status='posted',
-                    linkedin_post_urn=result.get('permalink'),
-                )
-                if post['social_post_id']:
-                    mark_social_post_used(post['social_post_id'], True)
-                if post['standalone_post_id']:
-                    mark_standalone_post_used(post['standalone_post_id'], True)
-                
-                scheduled_time = datetime.fromisoformat(post['scheduled_for'])
-                if datetime.now() < scheduled_time:
-                    redistribute_scheduled_posts(platform)
-                
-                return jsonify({"success": True, "message": "Posted to Facebook!"})
-            else:
-                error_msg = result.get('error', 'Unknown error') if result else 'No response'
-                return jsonify({"error": f"Failed: {error_msg}"}), 400
-
-        elif platform == 'instagram':
-            ig_token = get_instagram_token()
-            if not ig_token:
-                return jsonify({"error": "Instagram not connected"}), 400
-
-            ig_client = get_instagram_client()
-
-            if instagram_is_token_expired(ig_token['expires_at']):
-                try:
-                    new_token = ig_client.refresh_access_token(ig_token['access_token'])
-                    expires_at = instagram_calculate_token_expiry(new_token.get('expires_in', 5184000))
-                    update_instagram_token(
-                        access_token=new_token['access_token'],
-                        expires_at=expires_at,
-                    )
-                    ig_token = get_instagram_token()
-                except Exception as e:
-                    return jsonify({"error": f"Instagram token expired: {e}"}), 400
-
-            # Publish honoring the post's Instagram format (feed/carousel/reel/story)
-            result = _instagram_publish_for_post(
-                ig_token['access_token'],
-                content=content,
-                image_url=image_url,
-                standalone_post_id=post['standalone_post_id'],
-                social_post_id=post['social_post_id'],
-            )
-
-            if result and result.get('success'):
-                update_scheduled_post_status(
-                    scheduled_id,
-                    status='posted',
-                    linkedin_post_urn=result.get('permalink'),
-                )
-                if post['social_post_id']:
-                    mark_social_post_used(post['social_post_id'], True)
-                if post['standalone_post_id']:
-                    mark_standalone_post_used(post['standalone_post_id'], True)
-
-                scheduled_time = datetime.fromisoformat(post['scheduled_for'])
-                if datetime.now() < scheduled_time:
-                    redistribute_scheduled_posts(platform)
-
-                return jsonify({"success": True, "message": "Posted to Instagram!"})
-            else:
-                error_msg = (result.get('friendly') or result.get('error', 'Unknown error')) if result else 'No response'
-                return jsonify({"error": f"Failed: {error_msg}"}), 400
-
-        else:
-            # Handle LinkedIn posting (default)
-            token = get_linkedin_token()
-            if not token:
-                return jsonify({"error": "LinkedIn not connected"}), 400
-            
-            client = get_linkedin_client()
-            
-            if image_url and not client.extract_first_url(content):
-                app.logger.info("Posting to LinkedIn with image: %s", image_url)
-                result = client.create_image_post(
-                    token['access_token'],
-                    token['user_urn'],
-                    content[:3000],
-                    image_url,
-                )
-            else:
-                result = client.create_smart_post(
-                    token['access_token'],
-                    token['user_urn'],
-                    content[:3000],
-                    article_title=article_topic,
-                )
-            
-            if result and result.get('success'):
-                update_scheduled_post_status(
-                    scheduled_id,
-                    status='posted',
-                    linkedin_post_urn=result.get('post_urn'),
-                )
-                if post['social_post_id']:
-                    mark_social_post_used(post['social_post_id'], True)
-                if post['standalone_post_id']:
-                    mark_standalone_post_used(post['standalone_post_id'], True)
-                
-                scheduled_time = datetime.fromisoformat(post['scheduled_for'])
-                if datetime.now() < scheduled_time:
-                    redistribute_scheduled_posts(platform)
-                
-                return jsonify({"success": True, "message": "Posted to LinkedIn!"})
-            else:
-                error_msg = result.get('error', 'Unknown error') if result else 'No response'
-                return jsonify({"error": f"Failed: {error_msg}"}), 400
-            
-    except Exception as e:
+        result = _publish_scheduled_entry(post)
+    except Exception as e:  # noqa: BLE001
         app.logger.exception("Error posting now for post %d", scheduled_id)
         return jsonify({"error": str(e)}), 500
+
+    if result['success']:
+        return jsonify({
+            "success": True,
+            "message": f"Posted to {result['account_label']}!",
+            "permalink": result['permalink'],
+        })
+    return jsonify({"error": f"Failed: {result['error']}"}), 400
 
 
 @app.route('/schedule/<int:scheduled_id>/retry', methods=['POST'])
 def schedule_retry(scheduled_id: int):
     """Retry a failed scheduled post."""
     post = get_scheduled_post(scheduled_id)
-    
+
     if not post:
         return jsonify({"error": "Post not found"}), 404
-    
+
     if post['status'] != 'failed':
         return jsonify({"error": "Only failed posts can be retried"}), 400
-    
-    platform = post['platform'] if 'platform' in post.keys() else 'linkedin'
-    
-    # Get content and image URL
-    image_url = None
-    if post['post_type'] == 'social' and post['social_content']:
-        content = post['social_content']
-        image_url = post['social_image_url'] if 'social_image_url' in post.keys() else None
-    elif post['post_type'] == 'standalone' and post['standalone_content']:
-        content = post['standalone_content']
-        image_url = post['standalone_image_url'] if 'standalone_image_url' in post.keys() else None
-    elif post['post_type'] == 'article' and post['article_content']:
-        content = f"{post['article_topic']}\n\n{post['article_content'][:2800]}"
-    else:
-        return jsonify({"error": "No content found"}), 400
-    
-    article_topic = post['article_topic'] if 'article_topic' in post.keys() else None
-    
+
     try:
-        result = None
-        urn_key = 'post_urn'
-
-        if platform == 'threads':
-            threads_token = get_threads_token()
-            if not threads_token:
-                return jsonify({"error": "Threads not connected"}), 400
-            
-            threads_client = get_threads_client()
-            if image_url:
-                result = threads_client.publish_image_post(
-                    threads_token['access_token'],
-                    content[:500],
-                    image_url,
-                )
-            else:
-                result = threads_client.publish_text_post(
-                    threads_token['access_token'],
-                    content[:500],
-                )
-            urn_key = 'permalink'
-
-        elif platform == 'twitter':
-            twitter_token = get_twitter_token()
-            if not twitter_token:
-                return jsonify({"error": "Twitter/X not connected"}), 400
-            
-            if twitter_is_token_expired(twitter_token['expires_at']):
-                tw_client = get_twitter_client()
-                try:
-                    new_token = tw_client.refresh_access_token(twitter_token['refresh_token'])
-                    expires_at = twitter_calculate_token_expiry(new_token.get('expires_in', 7200))
-                    update_twitter_token(
-                        access_token=new_token['access_token'],
-                        expires_at=expires_at,
-                        refresh_token=new_token.get('refresh_token'),
-                    )
-                    twitter_token = get_twitter_token()
-                except Exception as e:
-                    return jsonify({"error": f"Twitter token expired: {e}"}), 400
-            
-            tw_client = get_twitter_client()
-            if image_url:
-                result = tw_client.create_image_post(
-                    access_token=twitter_token['access_token'],
-                    text=content[:280],
-                    image_url=image_url,
-                )
-            else:
-                result = tw_client.create_post(
-                    access_token=twitter_token['access_token'],
-                    text=content[:280],
-                )
-            urn_key = 'permalink'
-
-        elif platform == 'facebook':
-            fb_token = get_facebook_token()
-            if not fb_token:
-                return jsonify({"error": "Facebook not connected"}), 400
-
-            fb_client = get_facebook_client()
-            result = fb_client.publish_smart_post(
-                page_access_token=fb_token['page_access_token'],
-                page_id=fb_token['page_id'],
-                text=content[:5000],
-                image_url=image_url,
-            )
-            urn_key = 'permalink'
-
-        elif platform == 'instagram':
-            ig_token = get_instagram_token()
-            if not ig_token:
-                return jsonify({"error": "Instagram not connected"}), 400
-
-            ig_client = get_instagram_client()
-
-            if instagram_is_token_expired(ig_token['expires_at']):
-                try:
-                    new_token = ig_client.refresh_access_token(ig_token['access_token'])
-                    expires_at = instagram_calculate_token_expiry(new_token.get('expires_in', 5184000))
-                    update_instagram_token(
-                        access_token=new_token['access_token'],
-                        expires_at=expires_at,
-                    )
-                    ig_token = get_instagram_token()
-                except Exception as e:
-                    return jsonify({"error": f"Instagram token expired: {e}"}), 400
-
-            # Publish honoring the post's Instagram format (feed/carousel/reel/story)
-            result = _instagram_publish_for_post(
-                ig_token['access_token'],
-                content=content,
-                image_url=image_url,
-                standalone_post_id=post['standalone_post_id'],
-                social_post_id=post['social_post_id'],
-            )
-            if result and not result.get('success') and result.get('friendly'):
-                result = dict(result, error=result['friendly'])
-            urn_key = 'permalink'
-
-        else:
-            token = get_linkedin_token()
-            if not token:
-                return jsonify({"error": "LinkedIn not connected"}), 400
-
-            client = get_linkedin_client()
-            result = client.create_smart_post(
-                token['access_token'],
-                token['user_urn'],
-                content[:3000],
-                article_title=article_topic,
-            )
-
-        if result and result.get('success'):
-            update_scheduled_post_status(
-                scheduled_id,
-                status='posted',
-                linkedin_post_urn=result.get(urn_key),
-            )
-            return jsonify({"success": True, "message": "Post successful!"})
-        else:
-            error_msg = result.get('error', 'Unknown error') if result else 'No response'
-            update_scheduled_post_status(
-                scheduled_id,
-                status='failed',
-                error_message=f"Retry failed: {error_msg}",
-            )
-            return jsonify({"error": f"Failed: {error_msg}"}), 400
-            
-    except Exception as e:
+        result = _publish_scheduled_entry(post)
+    except Exception as e:  # noqa: BLE001
         app.logger.exception("Error retrying post %d", scheduled_id)
-        update_scheduled_post_status(
-            scheduled_id,
-            status='failed',
-            error_message=f"Retry exception: {str(e)}",
-        )
         return jsonify({"error": str(e)}), 500
+
+    if result['success']:
+        return jsonify({
+            "success": True,
+            "message": f"Posted to {result['account_label']}!",
+            "permalink": result['permalink'],
+        })
+    # A retry that fails again stays failed, with the newest reason recorded so
+    # the schedule page shows why rather than the reason from the first attempt.
+    update_scheduled_post_status(
+        scheduled_id, status='failed', error_message=result['error'],
+    )
+    return jsonify({"error": f"Failed: {result['error']}"}), 400
+
 
 
 @app.route('/schedule/clear-queue', methods=['POST'])
@@ -5755,9 +5293,13 @@ def _group_standalone_posts(rows):
     view over a set of rows, not a new kind of record.
 
     Rows group when they share both the content and the image, capped at one row
-    per platform: a deliberate repost (the importer's ``repost`` column writes a
-    second identical row for the same platform) opens its own card instead of
+    per target: a deliberate repost (the importer's ``repost`` column writes a
+    second identical row for the same target) opens its own card instead of
     disappearing into the first one.
+
+    A target is a platform plus the account it publishes as, not a platform on
+    its own, which is what lets one card carry two LinkedIn accounts side by
+    side instead of the second row starting a card of its own.
 
     ``rows`` must already be in display order; each group takes the position of
     its first row, kept as ``head`` so sorts have a representative row.
@@ -5766,24 +5308,55 @@ def _group_standalone_posts(rows):
     by_key = {}
     for row in rows:
         key = (row['content'] or '', row['image_url'] or '')
+        slot = _row_target_key(row)
         candidates = by_key.setdefault(key, [])
         for group in candidates:
-            if row['platform'] not in group['platforms']:
-                group['platforms'][row['platform']] = row
+            if slot not in group['platforms']:
+                group['platforms'][slot] = row
                 break
         else:
-            group = {'platforms': {row['platform']: row}, 'head': row}
+            group = {'platforms': {slot: row}, 'head': row}
             groups.append(group)
             candidates.append(group)
     return groups
 
 
+def _row_target_key(row):
+    """The (platform, account) a saved post row publishes to.
+
+    A row with no account is one written before accounts existed, or one aimed
+    at whichever account is default. It keys on None so it stays a single slot
+    on the card rather than colliding with a row that names an account.
+    """
+    account_id = row['account_id'] if 'account_id' in row.keys() else None
+    return (row['platform'], account_id)
+
+
+def _group_row_for_platform(group, platform):
+    """The card's row for a platform, or None. First account wins when several."""
+    for (row_platform, _account), row in group['platforms'].items():
+        if row_platform == platform:
+            return row
+    return None
+
+
 def _ordered_group_rows(group):
-    """A card's rows in the order its platform chips are drawn."""
-    platforms = group['platforms']
-    known = [platforms[p] for p in COMPOSE_PLATFORMS if p in platforms]
+    """A card's rows in the order its target chips are drawn.
+
+    Platform order first, then the accounts within a platform in the order they
+    were connected, so a card's chips do not reshuffle between page loads.
+    """
+    slots = group['platforms']
+    ordered = []
+    for platform in COMPOSE_PLATFORMS:
+        for slot in sorted(
+            (s for s in slots if s[0] == platform),
+            key=lambda s: (s[1] is not None, s[1] or 0),
+        ):
+            ordered.append(slots[slot])
     # Anything unrecognised (older or hand-written data) still gets shown.
-    return known + [row for p, row in platforms.items() if p not in COMPOSE_PLATFORMS]
+    ordered.extend(row for slot, row in slots.items() if slot[0] not in COMPOSE_PLATFORMS)
+    return ordered
 
 
 def _rows_for_groups(groups, platform=None):
@@ -5806,6 +5379,89 @@ def _json_list_column(row, column):
     return value if isinstance(value, list) else []
 
 
+def _account_lookup():
+    """Every connected account by id, read once per request.
+
+    A page of cards asks for the same handful of accounts over and over, so the
+    lookup is cached on the request rather than costing a query per chip.
+    """
+    cached = getattr(g, '_social_accounts', None)
+    if cached is None:
+        cached = {row['id']: row for row in list_social_accounts()}
+        g._social_accounts = cached
+    return cached
+
+
+def _default_account_for(platform):
+    """The account id a bare platform name resolves to, from the cached lookup."""
+    for account in _account_lookup().values():
+        if account['platform'] == platform and account['is_default']:
+            return account['id']
+    for account in _account_lookup().values():
+        if account['platform'] == platform:
+            return account['id']
+    return None
+
+
+def _publish_target_options():
+    """Every (platform, account) a card can be ticked for.
+
+    One entry per connected account, plus the platform itself when it has none
+    connected yet, so the composer still offers the chip and the user finds out
+    it needs connecting when they try to post rather than when they go looking.
+    ``show_label`` is on only where a platform has more than one account: with a
+    single login there is nothing to tell apart and the chip stays as it was.
+    """
+    accounts = list(_account_lookup().values())
+    options = []
+    for platform in COMPOSE_PLATFORMS:
+        mine = [a for a in accounts if a['platform'] == platform]
+        if not mine:
+            options.append({
+                'platform': platform, 'account_id': None,
+                'label': None, 'show_label': False, 'is_default': True,
+            })
+            continue
+        for account in mine:
+            options.append({
+                'platform': platform,
+                'account_id': account['id'],
+                'label': account_label(account, platform),
+                'show_label': len(mine) > 1,
+                'is_default': bool(account['is_default']),
+            })
+    return options
+
+
+@app.context_processor
+def _inject_publish_targets():
+    """Hand every card render the targets it can offer.
+
+    Cards are rendered from several places (the page, a card refresh, a partial
+    after a tick), so the target list comes from the environment rather than
+    each caller remembering to pass it.
+    """
+    return {'PUBLISH_TARGETS': _publish_target_options()}
+
+
+def _row_account_label(row):
+    """What to call the account a card row publishes as, or None.
+
+    None means "this platform's default account", which is every row in a setup
+    with one account per platform: the chip then reads exactly as it did before
+    accounts existed instead of sprouting a label.
+    """
+    account_id = row['account_id'] if 'account_id' in row.keys() else None
+    if not account_id:
+        return None
+    accounts = _account_lookup()
+    if len([a for a in accounts.values() if a['platform'] == row['platform']]) < 2:
+        # Only one account on this platform, so naming it adds nothing.
+        return None
+    account = accounts.get(account_id)
+    return account_label(account, row['platform']) if account else None
+
+
 def _enrich_post_group(group, scheduled_info, posted_info, brief_names):
     """Turn a group of standalone_posts rows into the template's card dict."""
     rows = _ordered_group_rows(group)
@@ -5813,12 +5469,18 @@ def _enrich_post_group(group, scheduled_info, posted_info, brief_names):
     # people tags) and its own controls, so it is the card's primary row when
     # present: every DOM id and every /compose/post/<id>/... call the card makes
     # then points at the one row that has that state.
-    primary = group['platforms'].get('instagram') or rows[0]
+    primary = _group_row_for_platform(group, 'instagram') or rows[0]
 
     platforms = [
         {
             'platform': row['platform'],
             'id': row['id'],
+            # A row written before it carried an account, or one aimed at "just
+            # LinkedIn", reports the platform's default account so its chip
+            # matches the target the composer offers for that platform.
+            'account_id': (row['account_id'] if 'account_id' in row.keys() else None)
+                          or _default_account_for(row['platform']),
+            'account_label': _row_account_label(row),
             'queued': scheduled_info.get(row['id'], {}).get(row['platform']),
             'posted': posted_info.get(row['id'], {}).get(row['platform']),
         }
@@ -5829,7 +5491,15 @@ def _enrich_post_group(group, scheduled_info, posted_info, brief_names):
     card = {
         'id': primary['id'],
         'post_ids': [row['id'] for row in rows],
+        # platform -> one row id, which is what the older per-platform controls
+        # address. With two accounts on a platform the first one answers here;
+        # anything that has to reach every target reads `targets` instead.
         'platform_ids': {row['platform']: row['id'] for row in rows},
+        'targets': [
+            {'post_id': entry['id'], 'platform': entry['platform'],
+             'account_id': entry['account_id'], 'account_label': entry['account_label']}
+            for entry in platforms
+        ],
         'platforms': platforms,
         'content': primary['content'],
         'image_url': primary['image_url'],
@@ -5843,7 +5513,7 @@ def _enrich_post_group(group, scheduled_info, posted_info, brief_names):
         'ig': None,
     }
 
-    ig_row = group['platforms'].get('instagram')
+    ig_row = _group_row_for_platform(group, 'instagram')
     if ig_row is not None:
         card['ig'] = {
             'id': ig_row['id'],
@@ -6755,6 +6425,12 @@ def compose_generate():
     if not platforms:
         platforms = ['linkedin', 'threads', 'twitter']
     
+
+    # Copy is generated once per platform; the accounts decide how many rows
+    # that copy is saved into, so picking two LinkedIn accounts costs no extra
+    # generation and produces one card aimed at both.
+    accounts_by_platform = _requested_accounts_by_platform(set(platforms))
+
     posts_per_platform = max(1, min(posts_per_platform, 10))
     
     try:
@@ -7018,7 +6694,11 @@ def compose_generate():
                 saved_posts[norm_platform] = []
             
             for post_content in posts_list:
-                post_id = add_standalone_post(
+                # One row per selected account on this platform, all holding the
+                # same copy, so the generated post arrives as one card aimed at
+                # every account rather than as separate posts per account.
+                ids = _save_post_for_accounts(
+                    accounts_by_platform.get(norm_platform),
                     source_type=source_type,
                     source_content=source_label,
                     platform=norm_platform,
@@ -7026,12 +6706,13 @@ def compose_generate():
                     image_url=image_url,
                 )
                 saved_posts[norm_platform].append({
-                    'id': post_id,
+                    'id': ids[0],
+                    'post_ids': ids,
                     'content': post_content,
                     'image_url': image_url,
                 })
                 if not image_url:
-                    _maybe_attach_link_image(post_id, post_content)
+                    _maybe_attach_link_image(ids[0], post_content, sibling_ids=ids[1:])
         
         response_data = {
             "success": True,
@@ -7069,51 +6750,62 @@ def compose_get_post(post_id: int):
 def compose_create_post():
     """Create a standalone post manually (no AI generation).
 
-    Takes one ``platform`` or several (repeated or comma-joined ``platforms``):
-    the composer writes one row per ticked platform, which is exactly the set of
-    rows the resulting card is a view over.
+    Takes one ``platform`` or several (repeated or comma-joined ``platforms``),
+    or ``targets`` when a platform's account matters: the composer writes one
+    row per ticked target, which is exactly the set of rows the resulting card
+    is a view over. Ticking two LinkedIn accounts and Threads writes three rows
+    and posts the same copy to all three.
     """
-    platforms = _requested_platforms('platforms') or _requested_platforms('platform')
+    targets, target_errors = _requested_targets('targets')
+    if not targets:
+        # No explicit targets: every ticked platform goes to its default account.
+        platforms = _requested_platforms('platforms') or _requested_platforms('platform')
+        invalid = [p for p in platforms if p not in COMPOSE_PLATFORMS]
+        if invalid:
+            return jsonify({
+                "error": f"Invalid platform. Must be one of: {', '.join(COMPOSE_PLATFORMS)}"
+            }), 400
+        targets = [
+            {'platform': p, 'account_id': resolve_account_id(p)} for p in platforms
+        ]
     content = request.form.get('content', '').strip()
     image_url = request.form.get('image_url', '').strip() or None
 
-    if not platforms:
-        return jsonify({"error": "Platform is required"}), 400
+    if not targets:
+        return jsonify({"error": target_errors[0] if target_errors
+                        else "Platform is required"}), 400
     if not content:
         return jsonify({"error": "Content is required"}), 400
-
-    invalid = [p for p in platforms if p not in COMPOSE_PLATFORMS]
-    if invalid:
-        return jsonify({
-            "error": f"Invalid platform. Must be one of: {', '.join(COMPOSE_PLATFORMS)}"
-        }), 400
 
     post_ids = [
         add_standalone_post(
             source_type='manual',
             source_content='Manual post',
-            platform=platform,
+            platform=target['platform'],
             content=content,
             image_url=image_url,
+            account_id=target['account_id'],
         )
-        for platform in platforms
+        for target in targets
     ]
 
     if not image_url:
-        # One fetch for the card, applied to every platform's row — otherwise the
-        # rows would end up with different images and stop being one card.
+        # One fetch for the card, applied to every target's row, since rows with
+        # different images would stop being one card.
         _maybe_attach_link_image(post_ids[0], content, sibling_ids=post_ids[1:])
 
     return jsonify({
         "success": True,
         "post": {
             "id": post_ids[0],
-            "platform": platforms[0],
+            "platform": targets[0]['platform'],
             "content": content,
             "image_url": image_url,
         },
         "post_ids": post_ids,
-        "platforms": platforms,
+        "platforms": [t['platform'] for t in targets],
+        "targets": targets,
+        "warnings": target_errors,
     })
 
 
@@ -7145,17 +6837,93 @@ def _requested_platforms(field):
     return platforms
 
 
-def _requested_post_ids(default_id):
+def _save_post_for_accounts(account_ids, **kwargs):
+    """Write the same copy once per account, returning the row ids.
+
+    An empty or missing account list means the platform's default account, which
+    is what every caller did before accounts existed.
+    """
+    if not account_ids:
+        return [add_standalone_post(**kwargs)]
+    return [add_standalone_post(account_id=account_id, **kwargs)
+            for account_id in account_ids]
+
+
+def _requested_accounts_by_platform(platforms):
+    """Which accounts each requested platform should be written for.
+
+    Reads the same ``targets`` field the composer sends elsewhere. A platform
+    named without any account falls back to its default account, so ticking
+    "LinkedIn" and ticking "LinkedIn: Work, LinkedIn: Studio" both work and mean
+    what they say.
+    """
+    targets, _errors = _requested_targets('targets')
+    grouped = {}
+    for target in targets:
+        if target['platform'] in platforms:
+            grouped.setdefault(target['platform'], []).append(target['account_id'])
+    return grouped
+
+
+def _requested_targets(field='targets'):
+    """Read the (platform, account) pairs a card is aimed at.
+
+    A target is written ``platform`` or ``platform:account_id``, so the same
+    field carries "LinkedIn" and "LinkedIn, the second one" without the caller
+    having to send two parallel lists. A bare platform means whichever account
+    is that platform's default, decided when the row is written rather than
+    when it publishes, so the saved post records a concrete target.
+
+    Returns ``(targets, errors)``: a target that names an unknown account, or an
+    account belonging to another platform, is reported rather than silently
+    dropped, because quietly posting to the wrong account is the failure this
+    whole feature exists to avoid.
+    """
+    targets, errors, seen = [], [], set()
+    for raw in _requested_platforms(field):
+        platform, _, account_part = raw.partition(':')
+        platform = platform.strip()
+        if platform not in COMPOSE_PLATFORMS:
+            errors.append(f"Invalid platform: {platform or raw}")
+            continue
+
+        account_id = None
+        account_part = account_part.strip()
+        if account_part:
+            if not account_part.isdigit():
+                errors.append(f"Invalid account for {platform}")
+                continue
+            account_id = resolve_account_id(platform, int(account_part))
+            if not account_id:
+                errors.append(f"That {platform_name(platform)} account is not connected")
+                continue
+        else:
+            account_id = resolve_account_id(platform)
+
+        key = (platform, account_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        targets.append({'platform': platform, 'account_id': account_id})
+    return targets, errors
+
+
+def _requested_post_ids(default_id, field='post_ids'):
     """The card's rows as sent by the page, always including ``default_id``.
 
     Accepts repeated or comma-joined ``post_ids`` in a form body or JSON. When
     it is absent (older callers, direct API use) the action stays a single-post
     action, exactly as it behaved before cards existed.
+
+    ``field`` reads a different list under the same rules. A fan-out uses it to
+    read ``target_ids``, the subset of the card being published this time, where
+    ``default_id`` is deliberately not forced in: narrowing to "just these two"
+    has to be able to exclude the row the request was addressed to.
     """
-    values = request.form.getlist('post_ids')
+    values = request.form.getlist(field)
     if not values:
         payload = request.get_json(silent=True) or {}
-        raw = payload.get('post_ids')
+        raw = payload.get(field)
         values = raw if isinstance(raw, list) else ([raw] if raw else [])
 
     ids = []
@@ -7164,7 +6932,7 @@ def _requested_post_ids(default_id):
             part = part.strip()
             if part.isdigit() and int(part) not in ids:
                 ids.append(int(part))
-    if default_id not in ids:
+    if field == 'post_ids' and default_id not in ids:
         ids.append(default_id)
     return ids
 
@@ -7211,7 +6979,9 @@ def _post_card_html(post_ids, display_index=None):
         return ''
 
     group = {
-        'platforms': {row['platform']: row for row in rows},
+        # Keyed by (platform, account) like the grouper does, so a card with two
+        # accounts on one platform re-renders with both chips rather than one.
+        'platforms': {_row_target_key(row): row for row in rows},
         'head': rows[0],
         'display_index': display_index,
     }
@@ -7246,12 +7016,14 @@ def compose_render_post_card(post_id: int):
 
 @app.route('/compose/post/<int:post_id>/platform', methods=['POST'])
 def compose_toggle_post_platform(post_id: int):
-    """Tick or untick one of a card's platforms.
+    """Tick or untick one of a card's targets.
 
-    ``action=add`` copies the card's copy and image into a new saved post for
-    ``platform`` — ticking Instagram is what creates the Instagram post.
-    ``action=remove`` deletes that platform's row, which is the only thing that
-    ever recorded "this post also goes to Instagram".
+    A target is a platform plus the account it publishes as. ``action=add``
+    copies the card's copy and image into a new saved post for that target, so
+    ticking Instagram is what creates the Instagram post and ticking a second
+    LinkedIn account is what creates the second LinkedIn post.
+    ``action=remove`` deletes that target's row, which is the only thing that
+    ever recorded "this post also goes there".
 
     Removing is guarded: a row that is queued or already published should not go
     on a stray click, so those answer 409 until the caller repeats the request
@@ -7268,17 +7040,47 @@ def compose_toggle_post_platform(post_id: int):
             "error": f"Invalid platform. Must be one of: {', '.join(COMPOSE_PLATFORMS)}"
         }), 400
 
+    # Naming no account means the platform's default one, which is how the
+    # single-account chips have always behaved.
+    raw_account = (request.form.get('account_id') or '').strip()
+    if raw_account:
+        account_id = resolve_account_id(platform, int(raw_account)) \
+            if raw_account.isdigit() else None
+        if not account_id:
+            return jsonify({
+                "error": f"That {platform_name(platform)} account is not connected"
+            }), 400
+    else:
+        account_id = resolve_account_id(platform)
+
     action = (request.form.get('action') or 'add').strip().lower()
     if action not in ('add', 'remove'):
         return jsonify({"error": "action must be 'add' or 'remove'"}), 400
 
     rows = _card_rows(post, _requested_post_ids(post_id))
     display_index = request.form.get('display_index', type=int)
-    existing = next((row for row in rows if row['platform'] == platform), None)
+    existing = next(
+        (row for row in rows if _row_target_key(row) == (platform, account_id)), None
+    )
+    if existing is None and not raw_account:
+        # An older row saved before it carried an account still counts as this
+        # platform's chip, or ticking it off would leave the row stranded.
+        existing = next(
+            (row for row in rows
+             if row['platform'] == platform
+             and (row['account_id'] if 'account_id' in row.keys() else None) is None),
+            None,
+        )
+
+    target_name = platform_name(platform)
+    if account_id:
+        account = get_social_account(account_id)
+        if account:
+            target_name = account_label(account, platform)
 
     if action == 'add':
         if existing:
-            return jsonify({"error": f"This post already goes to {platform.capitalize()}"}), 400
+            return jsonify({"error": f"This post already goes to {target_name}"}), 400
 
         new_id = add_standalone_post(
             source_type=post['source_type'],
@@ -7288,19 +7090,22 @@ def compose_toggle_post_platform(post_id: int):
             image_url=post['image_url'],
             brief_id=post['brief_id'] if 'brief_id' in post.keys() else None,
             brief_run_id=post['brief_run_id'] if 'brief_run_id' in post.keys() else None,
+            account_id=account_id,
         )
         ids = [row['id'] for row in rows] + [new_id]
         return jsonify({
             "success": True,
             "action": "add",
             "platform": platform,
+            "account_id": account_id,
+            "account_label": target_name,
             "post_id": new_id,
             "post_ids": ids,
             "html": _post_card_html(ids, display_index),
         })
 
     if existing is None:
-        return jsonify({"error": f"This post does not go to {platform.capitalize()}"}), 400
+        return jsonify({"error": f"This post does not go to {target_name}"}), 400
 
     target_id = existing['id']
     scheduled = get_pending_schedules_for_standalone_posts([target_id]).get(target_id, {})
@@ -7328,6 +7133,8 @@ def compose_toggle_post_platform(post_id: int):
         "success": True,
         "action": "remove",
         "platform": platform,
+        "account_id": account_id,
+        "account_label": target_name,
         "post_id": target_id,
         "post_ids": ids,
         "html": _post_card_html(ids, display_index) if ids else '',
@@ -8141,6 +7948,12 @@ def _instagram_publish_for_post(
     return client.publish_image_post(
         access_token, caption, resolved[0]["url"], user_tags=user_tags or None,
     )
+
+
+# Instagram is the one platform whose publish depends on helpers that live here
+# (format routing, media validation, people tags), so the shared publish path
+# borrows this rather than reimplementing it.
+social_publisher.set_instagram_publisher(_instagram_publish_for_post)
 
 
 @app.route('/compose/stock-images/search', methods=['GET'])
@@ -9020,259 +8833,355 @@ def compose_bulk_toggle_used():
     })
 
 
-@app.route('/compose/post/<int:post_id>/linkedin', methods=['POST'])
-def compose_post_to_linkedin(post_id: int):
-    """Post a standalone post to LinkedIn immediately."""
+# ---------------------------------------------------------------------------
+# Publishing a saved post
+#
+# Every "post now" in the composer lands here, whichever platform it names and
+# however many targets it fans out to. The five per-platform endpoints are one
+# call each, and the card-wide publish is the same call in a loop, so a post
+# sent to one account and the same post sent to six take exactly the same route
+# through token refresh, character limits and error reporting.
+# ---------------------------------------------------------------------------
+
+
+def _publish_standalone_row(post, account_id=None):
+    """Publish one saved post row and record that it went out.
+
+    The row already knows its target account, so the usual call passes no
+    ``account_id``; a caller that names one is overriding the row, which is what
+    the composer does when the user picks a different account for a one-off.
+    """
+    row = dict(post)
+    platform = row.get('platform')
+    if account_id is None:
+        account_id = row.get('account_id')
+
+    result = social_publisher.publish(
+        platform,
+        account_id,
+        content=row.get('content') or '',
+        image_url=row.get('image_url'),
+        standalone_post_id=row.get('id'),
+    )
+
+    if result['success']:
+        mark_standalone_post_used(row['id'], True)
+        # The queue table doubles as the posting history, which is how the card
+        # knows to show a link to what went out and to which account.
+        add_scheduled_post(
+            social_post_id=None,
+            article_id=None,
+            standalone_post_id=row['id'],
+            post_type='standalone',
+            platform=platform,
+            scheduled_for=datetime.now().isoformat(timespec='seconds'),
+            status='posted',
+            linkedin_post_urn=result.get('permalink'),
+            account_id=result.get('account_id'),
+        )
+    return result
+
+
+def _publish_response(result):
+    """One publish result as the composer's JS reads it.
+
+    ``post_urn`` is kept alongside ``permalink`` because the LinkedIn chip
+    builds its link from the URN, while every other platform hands back a URL.
+    """
+    if result['success']:
+        return jsonify({
+            "success": True,
+            "platform": result['platform'],
+            "account_id": result['account_id'],
+            "account_label": result['account_label'],
+            "permalink": result['permalink'],
+            "post_urn": result['permalink'],
+            "message": f"Posted to {result['account_label']}!",
+        })
+    status = 401 if result['needs_reconnect'] else 400
+    return jsonify({
+        "success": False,
+        "platform": result['platform'],
+        "account_id": result['account_id'],
+        "account_label": result['account_label'],
+        "needs_reconnect": result['needs_reconnect'],
+        "error": result['error'],
+    }), status
+
+
+def _compose_publish_one(post_id, platform):
+    """Publish one card row to one platform, on the account the row names."""
     post = get_standalone_post(post_id)
     if not post:
         return jsonify({"error": "Post not found"}), 404
-    
-    # Get LinkedIn token
-    token = get_linkedin_token()
-    if not token:
-        return jsonify({"error": "LinkedIn not connected. Please connect your account first."}), 401
-    
-    # Check if token has user_urn
-    if not token['user_urn']:
-        return jsonify({
-            "error": "LinkedIn account needs configuration. Please configure your Member ID.",
-            "needs_configuration": True,
-        }), 401
-    
-    # Check if token is expired and try to refresh
-    if is_token_expired(token['expires_at']):
-        if token['refresh_token']:
-            client = get_linkedin_client()
-            try:
-                new_token = client.refresh_access_token(token['refresh_token'])
-                update_linkedin_token(
-                    access_token=new_token['access_token'],
-                    expires_at=calculate_token_expiry(new_token.get('expires_in', 3600)),
-                    refresh_token=new_token.get('refresh_token'),
-                )
-                token = get_linkedin_token()
-            except Exception as e:
-                app.logger.warning("Failed to refresh LinkedIn token: %s", e)
-                return jsonify({"error": "LinkedIn token expired. Please reconnect."}), 401
-        else:
-            return jsonify({"error": "LinkedIn token expired. Please reconnect."}), 401
-    
-    client = get_linkedin_client()
-    
-    try:
-        # Get image URL if available
-        image_url = post['image_url'] if 'image_url' in post.keys() else None
-        
-        # Use image post if image URL is available and no URL in content
-        if image_url and not client.extract_first_url(post['content']):
-            app.logger.info("Posting to LinkedIn with image: %s", image_url)
-            result = client.create_image_post(
-                access_token=token['access_token'],
-                author_urn=token['user_urn'],
-                text=post['content'],
-                image_url=image_url,
-            )
-        else:
-            result = client.create_smart_post(
-                access_token=token['access_token'],
-                author_urn=token['user_urn'],
-                text=post['content'],
-            )
-        
-        if result['success']:
-            # Mark the post as used
-            mark_standalone_post_used(post_id, True)
-            
-            # Record in scheduled_posts for history tracking
-            now = datetime.now().isoformat(timespec='seconds')
-            add_scheduled_post(
-                social_post_id=None,  # Not a social_post from articles
-                article_id=None,
-                standalone_post_id=post_id,
-                post_type='standalone',
-                platform='linkedin',
-                scheduled_for=now,
-                status='posted',
-                linkedin_post_urn=result.get('post_urn'),
-            )
-            
-            return jsonify({
-                "success": True,
-                "post_urn": result['post_urn'],
-                "message": "Posted to LinkedIn successfully!",
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": result.get('error', 'Unknown error'),
-            }), 400
-            
-    except Exception as e:
-        app.logger.exception("Failed to post to LinkedIn")
-        return jsonify({"error": str(e)}), 500
+
+    row = dict(post)
+    account_id = request.form.get('account_id', type=int)
+    if account_id is None and row.get('platform') == platform:
+        account_id = row.get('account_id')
+
+    result = social_publisher.publish(
+        platform,
+        account_id,
+        content=row.get('content') or '',
+        image_url=row.get('image_url'),
+        standalone_post_id=post_id,
+    )
+    if result['success']:
+        mark_standalone_post_used(post_id, True)
+        add_scheduled_post(
+            social_post_id=None,
+            article_id=None,
+            standalone_post_id=post_id,
+            post_type='standalone',
+            platform=platform,
+            scheduled_for=datetime.now().isoformat(timespec='seconds'),
+            status='posted',
+            linkedin_post_urn=result.get('permalink'),
+            account_id=result.get('account_id'),
+        )
+    else:
+        app.logger.warning(
+            "Publish to %s failed for post %s: %s", platform, post_id, result['error'],
+        )
+    return _publish_response(result)
+
+
+def _publish_social_post(post_id, platform):
+    """Publish an article's social post to one account of one platform.
+
+    Article posts go out through the same path as everything else, so they get
+    per-account routing, token refresh and error reporting without a fourth
+    copy of the publish logic living here.
+    """
+    post = get_social_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    row = dict(post)
+    account_id = request.form.get('account_id', type=int)
+    if account_id is None:
+        account_id = row.get('account_id')
+
+    result = social_publisher.publish(
+        platform,
+        account_id,
+        content=row.get('content') or '',
+        image_url=row.get('image_url'),
+        social_post_id=post_id,
+        # The article's topic becomes the link-preview title on LinkedIn.
+        article_title=row.get('article_topic'),
+    )
+
+    if result['success']:
+        mark_social_post_used(post_id, True)
+        add_scheduled_post(
+            social_post_id=post_id,
+            article_id=row.get('article_id'),
+            post_type='social',
+            platform=platform,
+            scheduled_for=datetime.now().isoformat(timespec='seconds'),
+            status='posted',
+            linkedin_post_urn=result.get('permalink'),
+            account_id=result.get('account_id'),
+        )
+    else:
+        app.logger.warning(
+            "Publishing social post %s to %s failed: %s",
+            post_id, platform, result['error'],
+        )
+    return _publish_response(result)
+
+
+
+@app.route('/compose/post/<int:post_id>/publish', methods=['POST'])
+def compose_publish_card(post_id: int):
+    """Publish one piece of copy to every target on its card, in one request.
+
+    This is the cross-platform, cross-account post: the card's rows already say
+    which platforms and which accounts the copy is aimed at, so publishing it is
+    walking them. Nothing short-circuits, so one target being disconnected or
+    rejecting the post does not stop the others, and the reply names exactly
+    which targets landed and which did not.
+    """
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    rows = _card_rows(post, _requested_post_ids(post_id))
+
+    # A caller can narrow the fan-out to a subset of the card's rows, which is
+    # how "retry the two that failed" avoids re-posting the ones that worked.
+    only = {pid for pid in _requested_post_ids(post_id, field='target_ids')}
+    if only:
+        rows = [row for row in rows if row['id'] in only]
+    if not rows:
+        return jsonify({"error": "This post has no targets to publish to"}), 400
+
+    results = [_publish_standalone_row(row) for row in rows]
+    published = [r for r in results if r['success']]
+    failed = [r for r in results if not r['success']]
+
+    if not failed:
+        message = f"Posted to {len(published)} target{'s' if len(published) != 1 else ''}"
+    elif published:
+        message = f"Posted to {len(published)} of {len(results)} targets"
+    else:
+        message = "Could not post to any target"
+
+    return jsonify({
+        "success": not failed,
+        "partial": bool(published and failed),
+        "message": message,
+        "published": len(published),
+        "attempted": len(results),
+        "results": [
+            {
+                "post_id": row['id'],
+                "platform": result['platform'],
+                "platform_name": result['platform_name'],
+                "account_id": result['account_id'],
+                "account_label": result['account_label'],
+                "success": result['success'],
+                "permalink": result['permalink'],
+                "post_urn": result['permalink'],
+                "error": result['error'],
+                "needs_reconnect": result['needs_reconnect'],
+            }
+            for row, result in zip(rows, results)
+        ],
+    })
+
+
+
+@app.route('/compose/post/<int:post_id>/linkedin', methods=['POST'])
+def compose_post_to_linkedin(post_id: int):
+    """Post a standalone post to LinkedIn immediately."""
+    return _compose_publish_one(post_id, 'linkedin')
 
 
 @app.route('/compose/post/<int:post_id>/threads', methods=['POST'])
 def compose_post_to_threads(post_id: int):
     """Post a standalone post to Threads immediately."""
-    post = get_standalone_post(post_id)
-    if not post:
-        return jsonify({"error": "Post not found"}), 404
-    
-    # Get Threads token
-    token = get_threads_token()
-    if not token:
-        return jsonify({"error": "Threads not connected. Please connect your account first."}), 401
-    
-    # Check if token is expired and try to refresh
-    if threads_is_token_expired(token['expires_at']):
-        client = get_threads_client()
-        try:
-            new_token = client.refresh_access_token(token['access_token'])
-            expires_at = threads_calculate_token_expiry(new_token.get('expires_in', 5184000))
-            update_threads_token(
-                access_token=new_token['access_token'],
-                expires_at=expires_at,
-            )
-            token = get_threads_token()
-        except Exception as e:
-            app.logger.warning("Failed to refresh Threads token: %s", e)
-            return jsonify({"error": "Threads token expired. Please reconnect."}), 401
-    
-    client = get_threads_client()
-    
-    try:
-        # Get image URL if available
-        image_url = post['image_url'] if 'image_url' in post.keys() else None
-        
-        # Use image post if image URL is available
-        if image_url:
-            app.logger.info("Posting to Threads with image: %s", image_url)
-            result = client.publish_image_post(
-                access_token=token['access_token'],
-                text=post['content'],
-                image_url=image_url,
-            )
-        else:
-            result = client.publish_text_post(
-                access_token=token['access_token'],
-                text=post['content'],
-            )
-        
-        if result['success']:
-            # Mark the post as used
-            mark_standalone_post_used(post_id, True)
-            
-            # Record in scheduled_posts for history tracking
-            now = datetime.now().isoformat(timespec='seconds')
-            add_scheduled_post(
-                social_post_id=None,
-                article_id=None,
-                standalone_post_id=post_id,
-                post_type='standalone',
-                platform='threads',
-                scheduled_for=now,
-                status='posted',
-                linkedin_post_urn=result.get('permalink'),  # Store permalink for view link
-            )
-            
-            return jsonify({
-                "success": True,
-                "post_id": result.get('post_id'),
-                "permalink": result.get('permalink'),
-                "message": "Posted to Threads successfully!",
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": result.get('error', 'Unknown error'),
-            }), 400
-            
-    except Exception as e:
-        app.logger.exception("Failed to post to Threads")
-        return jsonify({"error": str(e)}), 500
+    return _compose_publish_one(post_id, 'threads')
 
 
 @app.route('/compose/post/<int:post_id>/instagram', methods=['POST'])
 def compose_post_to_instagram(post_id: int):
     """Post a standalone post to Instagram immediately."""
-    post = get_standalone_post(post_id)
-    if not post:
-        return jsonify({"error": "Post not found"}), 404
+    return _compose_publish_one(post_id, 'instagram')
 
-    # Get Instagram token
-    token = get_instagram_token()
-    if not token:
-        return jsonify({"error": "Instagram not connected. Please connect your account first."}), 401
 
-    # Check if token is expired and try to refresh
-    if instagram_is_token_expired(token['expires_at']):
-        client = get_instagram_client()
-        try:
-            new_token = client.refresh_access_token(token['access_token'])
-            expires_at = instagram_calculate_token_expiry(new_token.get('expires_in', 5184000))
-            update_instagram_token(
-                access_token=new_token['access_token'],
-                expires_at=expires_at,
+def _queue_whole_card(post):
+    """Queue every target on a card, one slot each.
+
+    Each target gets its own next free slot on its own platform, so a card aimed
+    at two LinkedIn accounts and Threads takes three slots rather than three
+    posts landing at the same minute. A target that cannot be queued (no free
+    slot, Instagram with no usable media) is reported instead of stopping the
+    rest, so the caller knows exactly what is queued and what is not.
+    """
+    rows = _card_rows(post, _requested_post_ids(post['id']))
+    already = get_pending_schedules_for_standalone_posts([row['id'] for row in rows])
+
+    queued, skipped = [], []
+    for row in rows:
+        platform = row['platform']
+        target_name = _row_account_label(row) or platform_name(platform)
+
+        if platform not in SCHEDULABLE_PLATFORMS:
+            skipped.append({"post_id": row['id'], "platform": platform,
+                            "target": target_name,
+                            "error": f"{target_name} does not support scheduling yet"})
+            continue
+        if already.get(row['id']):
+            skipped.append({"post_id": row['id'], "platform": platform,
+                            "target": target_name,
+                            "error": f"Already queued for {target_name}"})
+            continue
+
+        if platform == 'instagram':
+            _, media_err = _ensure_instagram_media(
+                row['content'],
+                row['image_url'] if 'image_url' in row.keys() else None,
+                row['ig_post_type'] if 'ig_post_type' in row.keys() else None,
+                _json_list_column(row, 'media_items'),
+                standalone_post_id=row['id'],
             )
-            token = get_instagram_token()
-        except Exception as e:
-            app.logger.warning("Failed to refresh Instagram token: %s", e)
-            return jsonify({"error": "Instagram token expired. Please reconnect."}), 401
+            if media_err:
+                skipped.append({"post_id": row['id'], "platform": platform,
+                                "target": target_name, "error": media_err})
+                continue
 
-    client = get_instagram_client()
+        slot = get_next_available_slot(platform)
+        if not slot:
+            skipped.append({"post_id": row['id'], "platform": platform,
+                            "target": target_name,
+                            "error": f"No available time slots for {target_name}"})
+            continue
 
-    try:
-        # Publish honoring the post's Instagram format (feed/carousel/reel/story)
-        image_url = post['image_url'] if 'image_url' in post.keys() else None
-        result = _instagram_publish_for_post(
-            token['access_token'],
-            content=post['content'],
-            image_url=image_url,
-            standalone_post_id=post_id,
+        scheduled_id = add_scheduled_post(
+            social_post_id=None,
+            article_id=None,
+            standalone_post_id=row['id'],
+            post_type='standalone',
+            platform=platform,
+            scheduled_for=slot,
+            status='pending',
+            account_id=row['account_id'] if 'account_id' in row.keys() else None,
         )
+        try:
+            display = datetime.fromisoformat(slot).strftime("%A, %b %d at %I:%M %p")
+        except (ValueError, TypeError):
+            display = slot
+        queued.append({
+            "post_id": row['id'],
+            "scheduled_id": scheduled_id,
+            "platform": platform,
+            "target": target_name,
+            "account_id": row['account_id'] if 'account_id' in row.keys() else None,
+            "scheduled_for": slot,
+            "scheduled_for_display": display,
+        })
 
-        if result['success']:
-            # Mark the post as used
-            mark_standalone_post_used(post_id, True)
+    if not queued:
+        return jsonify({
+            "success": False,
+            "queued": [],
+            "skipped": skipped,
+            "error": skipped[0]['error'] if skipped else "Nothing to queue",
+        }), 400
 
-            # Record in scheduled_posts for history tracking
-            now = datetime.now().isoformat(timespec='seconds')
-            add_scheduled_post(
-                social_post_id=None,
-                article_id=None,
-                standalone_post_id=post_id,
-                post_type='standalone',
-                platform='instagram',
-                scheduled_for=now,
-                status='posted',
-                linkedin_post_urn=result.get('permalink'),  # Store permalink for view link
-            )
+    if skipped:
+        message = f"Queued {len(queued)} of {len(queued) + len(skipped)} targets"
+    else:
+        message = f"Queued for {len(queued)} target{'s' if len(queued) != 1 else ''}"
 
-            return jsonify({
-                "success": True,
-                "post_id": result.get('post_id'),
-                "permalink": result.get('permalink'),
-                "message": "Posted to Instagram successfully!",
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "error": result.get('friendly') or result.get('error', 'Unknown error'),
-            }), 400
+    return jsonify({
+        "success": True,
+        "partial": bool(skipped),
+        "message": message,
+        "queued": queued,
+        "skipped": skipped,
+    })
 
-    except Exception as e:
-        app.logger.exception("Failed to post to Instagram")
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route('/compose/post/<int:post_id>/queue', methods=['POST'])
 def compose_add_to_queue(post_id: int):
-    """Add a standalone post to the schedule queue."""
+    """Add a standalone post to the schedule queue.
+
+    With ``all=1`` this queues every target on the card instead of one row, so
+    the same copy takes a slot on each platform and each account it is aimed at
+    in a single action rather than one click per chip.
+    """
     post = get_standalone_post(post_id)
     if not post:
         return jsonify({"error": "Post not found"}), 404
-    
+
+    if str(request.form.get('all') or '').strip().lower() in ('1', 'true', 'yes', 'on'):
+        return _queue_whole_card(post)
+
     platform = request.form.get('platform', post['platform'])
     scheduled_for = request.form.get('scheduled_for', '').strip()
     
@@ -9320,6 +9229,7 @@ def compose_add_to_queue(post_id: int):
         platform=platform,
         scheduled_for=schedule_time,
         status='pending',
+        account_id=post['account_id'] if 'account_id' in post.keys() else None,
     )
     
     # Format the display time
@@ -9858,6 +9768,12 @@ def compose_generate_from_source():
     if not platforms:
         platforms = ['linkedin', 'threads', 'twitter']
     
+
+    # Copy is generated once per platform; the accounts decide how many rows
+    # that copy is saved into, so picking two LinkedIn accounts costs no extra
+    # generation and produces one card aimed at both.
+    accounts_by_platform = _requested_accounts_by_platform(set(platforms))
+
     posts_per_platform = max(1, min(posts_per_platform, 10))
     
     try:
@@ -9903,7 +9819,8 @@ def compose_generate_from_source():
                 saved_posts[norm_platform] = []
             
             for post_content in posts_list:
-                post_id = add_standalone_post(
+                ids = _save_post_for_accounts(
+                    accounts_by_platform.get(norm_platform),
                     source_type='saved_source',
                     source_content=source['url'][:1000],
                     platform=norm_platform,
@@ -9911,12 +9828,13 @@ def compose_generate_from_source():
                     image_url=image_url,
                 )
                 saved_posts[norm_platform].append({
-                    'id': post_id,
+                    'id': ids[0],
+                    'post_ids': ids,
                     'content': post_content,
                     'image_url': image_url,
                 })
                 if not image_url:
-                    _maybe_attach_link_image(post_id, post_content)
+                    _maybe_attach_link_image(ids[0], post_content, sibling_ids=ids[1:])
         
         return jsonify({
             "success": True,
@@ -10099,40 +10017,41 @@ def thumbnails_saved_delete(thumb_id: int):
 
 
 def scheduled_post_worker() -> None:
-    """Background thread that processes scheduled posts."""
+    """Background thread that processes scheduled posts.
+
+    Every queue entry names the account it publishes as, so the worker never has
+    to decide which login a platform means: it hands the entry to the shared
+    publish path, which is the same one the composer and the schedule page use.
+    Two accounts on one platform therefore go out independently, each with its
+    own token and its own failure.
+    """
     import time as time_module
     from datetime import datetime as dt_class
-    
+
     MISSED_WINDOW_MINUTES = 10  # Posts overdue by more than this are rescheduled
     MAX_RETRIES = 5             # Max retry attempts before permanent failure
-    
+
     while True:
         try:
             # Check for pending posts every 60 seconds
             time_module.sleep(60)
-            
+
             # Get pending posts that are due
             pending = get_pending_scheduled_posts()
-            
+
             if not pending:
                 continue
-            
-            # Cache tokens to avoid repeated DB queries
-            linkedin_token = None
-            threads_token = None
-            facebook_token = None
-            twitter_token = None
-            instagram_token = None
+
             redistributed_platforms = set()  # Track platforms we've redistributed
-            
+
             for post in pending:
                 try:
                     platform = post['platform'] if 'platform' in post.keys() else 'linkedin'
-                    
+
                     # Skip if we already redistributed this platform's posts in this cycle
                     if platform in redistributed_platforms:
                         continue
-                    
+
                     # --- Missed window detection ---
                     # If the post is overdue by more than MISSED_WINDOW_MINUTES,
                     # the app likely wasn't running. Reschedule instead of posting.
@@ -10142,7 +10061,7 @@ def scheduled_post_worker() -> None:
                         overdue_minutes = (now - scheduled_dt).total_seconds() / 60
                     except (ValueError, TypeError):
                         overdue_minutes = 0
-                    
+
                     if overdue_minutes > MISSED_WINDOW_MINUTES:
                         retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
                         if retry_count >= MAX_RETRIES:
@@ -10164,473 +10083,61 @@ def scheduled_post_worker() -> None:
                             post['id'], overdue_minutes, retry_count + 1, MAX_RETRIES, redistributed,
                         )
                         continue
-                    
-                    # Get article topic safely from sqlite3.Row
-                    article_topic = post['article_topic'] if 'article_topic' in post.keys() else None
-                    
-                    # Determine content and image based on post type
-                    image_url = None
-                    if post['post_type'] == 'social' and post['social_content']:
-                        content = post['social_content']
-                        image_url = post['social_image_url'] if 'social_image_url' in post.keys() else None
-                    elif post['post_type'] == 'article' and post['article_content']:
-                        content = f"{post['article_topic']}\n\n{post['article_content'][:2800]}"
-                    elif post['post_type'] == 'standalone' and post['standalone_content']:
-                        content = post['standalone_content']
-                        image_url = post['standalone_image_url'] if 'standalone_image_url' in post.keys() else None
-                    else:
-                        app.logger.warning("Scheduled post %d has no content", post['id'])
-                        update_scheduled_post_status(
-                            post['id'],
-                            status='failed',
-                            error_message='No content found',
+
+                    result = _publish_scheduled_entry(post)
+
+                    if result['success']:
+                        app.logger.info(
+                            "Published scheduled post %d to %s",
+                            post['id'], result['account_label'],
                         )
                         continue
-                    
-                    result = None
-                    
-                    if platform == 'threads':
-                        # Handle Threads posting
-                        if threads_token is None:
-                            threads_token = get_threads_token()
-                        
-                        if not threads_token:
-                            app.logger.warning("Scheduled Threads post %d due but Threads not connected", post['id'])
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='failed',
-                                error_message='Threads not connected',
-                            )
-                            continue
-                        
-                        # Check token expiry and refresh if needed
-                        if threads_is_token_expired(threads_token['expires_at']):
-                            threads_client = get_threads_client()
-                            try:
-                                new_token = threads_client.refresh_access_token(threads_token['access_token'])
-                                expires_at = threads_calculate_token_expiry(new_token.get('expires_in', 5184000))
-                                update_threads_token(
-                                    access_token=new_token['access_token'],
-                                    expires_at=expires_at,
-                                )
-                                threads_token = get_threads_token()
-                            except Exception as e:
-                                app.logger.error("Failed to refresh Threads token: %s", e)
-                                update_scheduled_post_status(
-                                    post['id'],
-                                    status='failed',
-                                    error_message='Threads token expired',
-                                )
-                                continue
-                        
-                        threads_client = get_threads_client()
-                        
-                        # Use image post if image URL is available
-                        if image_url:
-                            app.logger.info("Posting Threads with image: %s", image_url)
-                            result = threads_client.publish_image_post(
-                                access_token=threads_token['access_token'],
-                                text=content[:500],  # Threads has 500 char limit
-                                image_url=image_url,
-                            )
-                        else:
-                            result = threads_client.publish_text_post(
-                                access_token=threads_token['access_token'],
-                                text=content[:500],  # Threads has 500 char limit
-                            )
-                        
-                        if result['success']:
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='posted',
-                                linkedin_post_urn=result.get('permalink'),  # Store permalink for view link
-                            )
-                            if post['social_post_id']:
-                                mark_social_post_used(post['social_post_id'], True)
-                            if post['standalone_post_id']:
-                                mark_standalone_post_used(post['standalone_post_id'], True)
-                            app.logger.info("Scheduled Threads post %d published successfully", post['id'])
-                        else:
-                            error_msg = str(result.get('error', 'Unknown error'))[:500]
-                            retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
-                            if retry_count < MAX_RETRIES:
-                                increment_retry_count(post['id'])
-                                redistribute_scheduled_posts(platform)
-                                redistributed_platforms.add(platform)
-                                app.logger.warning(
-                                    "Threads post %d failed (%s), rescheduled to next slot (retry %d/%d)",
-                                    post['id'], error_msg, retry_count + 1, MAX_RETRIES,
-                                )
-                                break  # Slots redistributed, restart on next cycle
-                            else:
-                                update_scheduled_post_status(
-                                    post['id'],
-                                    status='failed',
-                                    error_message=f'{error_msg} (max retries exhausted)',
-                                )
-                                app.logger.error("Scheduled Threads post %d failed permanently: %s", post['id'], error_msg)
-                    
-                    elif platform == 'facebook':
-                        # Handle Facebook posting
-                        if facebook_token is None:
-                            facebook_token = get_facebook_token()
-                        
-                        if not facebook_token:
-                            app.logger.warning("Scheduled Facebook post %d due but Facebook not connected", post['id'])
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='failed',
-                                error_message='Facebook not connected',
-                            )
-                            continue
-                        
-                        if not facebook_token['page_id'] or not facebook_token['page_access_token']:
-                            app.logger.warning("Scheduled Facebook post %d due but no Page selected", post['id'])
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='failed',
-                                error_message='No Facebook Page selected',
-                            )
-                            continue
-                        
-                        if facebook_is_token_expired(facebook_token['expires_at']):
-                            fb_client = get_facebook_client()
-                            try:
-                                new_token = fb_client.refresh_access_token(facebook_token['access_token'])
-                                expires_at = facebook_calculate_token_expiry(new_token.get('expires_in', 5184000))
-                                update_facebook_token(
-                                    access_token=new_token['access_token'],
-                                    expires_at=expires_at,
-                                )
-                                facebook_token = get_facebook_token()
-                            except Exception as e:
-                                app.logger.error("Failed to refresh Facebook token: %s", e)
-                                update_scheduled_post_status(
-                                    post['id'],
-                                    status='failed',
-                                    error_message='Facebook token expired',
-                                )
-                                continue
-                        
-                        fb_client = get_facebook_client()
-                        
-                        result = fb_client.publish_smart_post(
-                            page_access_token=facebook_token['page_access_token'],
-                            page_id=facebook_token['page_id'],
-                            text=content[:5000],
-                            image_url=image_url,
+
+                    error_msg = str(result['error'] or 'Unknown error')[:500]
+
+                    # A target that is disconnected, unconfigured or carrying
+                    # media the platform will never take fails now: retrying it
+                    # only burns the platform's remaining slots.
+                    if result['permanent']:
+                        update_scheduled_post_status(
+                            post['id'], status='failed', error_message=error_msg,
                         )
-                        
-                        if result['success']:
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='posted',
-                                linkedin_post_urn=result.get('permalink'),
-                            )
-                            if post['social_post_id']:
-                                mark_social_post_used(post['social_post_id'], True)
-                            if post['standalone_post_id']:
-                                mark_standalone_post_used(post['standalone_post_id'], True)
-                            app.logger.info("Scheduled Facebook post %d published successfully", post['id'])
-                        else:
-                            error_msg = str(result.get('error', 'Unknown error'))[:500]
-                            retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
-                            if retry_count < MAX_RETRIES:
-                                increment_retry_count(post['id'])
-                                redistribute_scheduled_posts(platform)
-                                redistributed_platforms.add(platform)
-                                app.logger.warning(
-                                    "Facebook post %d failed (%s), rescheduled to next slot (retry %d/%d)",
-                                    post['id'], error_msg, retry_count + 1, MAX_RETRIES,
-                                )
-                                break
-                            else:
-                                update_scheduled_post_status(
-                                    post['id'],
-                                    status='failed',
-                                    error_message=f'{error_msg} (max retries exhausted)',
-                                )
-                                app.logger.error("Scheduled Facebook post %d failed permanently: %s", post['id'], error_msg)
-                    
-                    elif platform == 'twitter':
-                        if twitter_token is None:
-                            twitter_token = get_twitter_token()
-                        
-                        if not twitter_token:
-                            app.logger.warning("Scheduled Twitter post %d due but Twitter not connected", post['id'])
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='failed',
-                                error_message='Twitter not connected',
-                            )
-                            continue
-                        
-                        if twitter_is_token_expired(twitter_token['expires_at']):
-                            tw_client = get_twitter_client()
-                            try:
-                                new_token = tw_client.refresh_access_token(twitter_token['refresh_token'])
-                                expires_at = twitter_calculate_token_expiry(new_token.get('expires_in', 7200))
-                                update_twitter_token(
-                                    access_token=new_token['access_token'],
-                                    expires_at=expires_at,
-                                    refresh_token=new_token.get('refresh_token'),
-                                )
-                                twitter_token = get_twitter_token()
-                            except Exception as e:
-                                app.logger.error("Failed to refresh Twitter token: %s", e)
-                                update_scheduled_post_status(
-                                    post['id'],
-                                    status='failed',
-                                    error_message='Twitter token expired',
-                                )
-                                continue
-                        
-                        tw_client = get_twitter_client()
-                        
-                        if image_url:
-                            app.logger.info("Posting Twitter with image: %s", image_url)
-                            result = tw_client.create_image_post(
-                                access_token=twitter_token['access_token'],
-                                text=content[:280],
-                                image_url=image_url,
-                            )
-                        else:
-                            result = tw_client.create_post(
-                                access_token=twitter_token['access_token'],
-                                text=content[:280],
-                            )
-                        
-                        if result['success']:
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='posted',
-                                linkedin_post_urn=result.get('permalink'),
-                            )
-                            if post['social_post_id']:
-                                mark_social_post_used(post['social_post_id'], True)
-                            if post['standalone_post_id']:
-                                mark_standalone_post_used(post['standalone_post_id'], True)
-                            app.logger.info("Scheduled Twitter post %d published successfully", post['id'])
-                        else:
-                            error_msg = str(result.get('error', 'Unknown error'))[:500]
-                            retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
-                            if retry_count < MAX_RETRIES:
-                                increment_retry_count(post['id'])
-                                redistribute_scheduled_posts(platform)
-                                redistributed_platforms.add(platform)
-                                app.logger.warning(
-                                    "Twitter post %d failed (%s), rescheduled to next slot (retry %d/%d)",
-                                    post['id'], error_msg, retry_count + 1, MAX_RETRIES,
-                                )
-                                break
-                            else:
-                                update_scheduled_post_status(
-                                    post['id'],
-                                    status='failed',
-                                    error_message=f'{error_msg} (max retries exhausted)',
-                                )
-                                app.logger.error("Scheduled Twitter post %d failed permanently: %s", post['id'], error_msg)
-
-                    elif platform == 'instagram':
-                        if instagram_token is None:
-                            instagram_token = get_instagram_token()
-
-                        if not instagram_token:
-                            app.logger.warning("Scheduled Instagram post %d due but Instagram not connected", post['id'])
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='failed',
-                                error_message='Instagram not connected',
-                            )
-                            continue
-
-                        if instagram_is_token_expired(instagram_token['expires_at']):
-                            ig_client = get_instagram_client()
-                            try:
-                                new_token = ig_client.refresh_access_token(instagram_token['access_token'])
-                                expires_at = instagram_calculate_token_expiry(new_token.get('expires_in', 5184000))
-                                update_instagram_token(
-                                    access_token=new_token['access_token'],
-                                    expires_at=expires_at,
-                                )
-                                instagram_token = get_instagram_token()
-                            except Exception as e:
-                                app.logger.error("Failed to refresh Instagram token: %s", e)
-                                update_scheduled_post_status(
-                                    post['id'],
-                                    status='failed',
-                                    error_message='Instagram token expired',
-                                )
-                                continue
-
-                        # Publish honoring the post's Instagram format
-                        # (feed/carousel/reel/story). A media-validation failure
-                        # (guard_error) fails immediately with no retry — a missing
-                        # image/video won't fix itself.
-                        result = _instagram_publish_for_post(
-                            instagram_token['access_token'],
-                            content=content,
-                            image_url=image_url,
-                            standalone_post_id=post['standalone_post_id'],
-                            social_post_id=post['social_post_id'],
+                        app.logger.error(
+                            "Scheduled post %d to %s failed permanently: %s",
+                            post['id'], result['account_label'], error_msg,
                         )
+                        continue
 
-                        if result.get('guard_error'):
-                            media_err = result.get('friendly', 'Instagram media requirement not met')
-                            app.logger.warning("Scheduled Instagram post %d media invalid: %s", post['id'], media_err)
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='failed',
-                                error_message=media_err,
-                            )
-                            continue
-
-                        if result['success']:
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='posted',
-                                linkedin_post_urn=result.get('permalink'),
-                            )
-                            if post['social_post_id']:
-                                mark_social_post_used(post['social_post_id'], True)
-                            if post['standalone_post_id']:
-                                mark_standalone_post_used(post['standalone_post_id'], True)
-                            app.logger.info("Scheduled Instagram post %d published successfully", post['id'])
-                        else:
-                            error_msg = str(result.get('friendly') or result.get('error', 'Unknown error'))[:500]
-                            retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
-                            if retry_count < MAX_RETRIES:
-                                increment_retry_count(post['id'])
-                                redistribute_scheduled_posts(platform)
-                                redistributed_platforms.add(platform)
-                                app.logger.warning(
-                                    "Instagram post %d failed (%s), rescheduled to next slot (retry %d/%d)",
-                                    post['id'], error_msg, retry_count + 1, MAX_RETRIES,
-                                )
-                                break
-                            else:
-                                update_scheduled_post_status(
-                                    post['id'],
-                                    status='failed',
-                                    error_message=f'{error_msg} (max retries exhausted)',
-                                )
-                                app.logger.error("Scheduled Instagram post %d failed permanently: %s", post['id'], error_msg)
-
-                    else:
-                        # Handle LinkedIn posting (default)
-                        if linkedin_token is None:
-                            linkedin_token = get_linkedin_token()
-                        
-                        if not linkedin_token:
-                            app.logger.warning("Scheduled LinkedIn post %d due but LinkedIn not connected", post['id'])
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='failed',
-                                error_message='LinkedIn not connected',
-                            )
-                            continue
-                        
-                        # Check token expiry and refresh if needed
-                        if is_token_expired(linkedin_token['expires_at']):
-                            linkedin_client = get_linkedin_client()
-                            if linkedin_token['refresh_token']:
-                                try:
-                                    new_token = linkedin_client.refresh_access_token(linkedin_token['refresh_token'])
-                                    expires_at = calculate_token_expiry(new_token.get('expires_in', 5184000))
-                                    update_linkedin_token(
-                                        access_token=new_token['access_token'],
-                                        expires_at=expires_at,
-                                        refresh_token=new_token.get('refresh_token'),
-                                    )
-                                    linkedin_token = get_linkedin_token()
-                                except Exception as e:
-                                    app.logger.error("Failed to refresh LinkedIn token: %s", e)
-                                    update_scheduled_post_status(
-                                        post['id'],
-                                        status='failed',
-                                        error_message='LinkedIn token expired',
-                                    )
-                                    continue
-                            else:
-                                app.logger.warning("LinkedIn token expired for post %d", post['id'])
-                                update_scheduled_post_status(
-                                    post['id'],
-                                    status='failed',
-                                    error_message='LinkedIn token expired',
-                                )
-                                continue
-                        
-                        linkedin_client = get_linkedin_client()
-                        
-                        # Use image post if image URL is available and no URL in content
-                        if image_url and not linkedin_client.extract_first_url(content):
-                            app.logger.info("Posting LinkedIn with image: %s", image_url)
-                            result = linkedin_client.create_image_post(
-                                access_token=linkedin_token['access_token'],
-                                author_urn=linkedin_token['user_urn'],
-                                text=content[:3000],
-                                image_url=image_url,
-                            )
-                        else:
-                            result = linkedin_client.create_smart_post(
-                                access_token=linkedin_token['access_token'],
-                                author_urn=linkedin_token['user_urn'],
-                                text=content[:3000],
-                                article_title=article_topic,
-                            )
-                        
-                        if result['success']:
-                            update_scheduled_post_status(
-                                post['id'],
-                                status='posted',
-                                linkedin_post_urn=result.get('post_urn'),
-                            )
-                            if post['social_post_id']:
-                                mark_social_post_used(post['social_post_id'], True)
-                            if post['standalone_post_id']:
-                                mark_standalone_post_used(post['standalone_post_id'], True)
-                            app.logger.info("Scheduled LinkedIn post %d published successfully", post['id'])
-                        else:
-                            error_msg = str(result.get('error', 'Unknown error'))[:500]
-                            retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
-                            if retry_count < MAX_RETRIES:
-                                increment_retry_count(post['id'])
-                                redistribute_scheduled_posts(platform)
-                                redistributed_platforms.add(platform)
-                                app.logger.warning(
-                                    "LinkedIn post %d failed (%s), rescheduled to next slot (retry %d/%d)",
-                                    post['id'], error_msg, retry_count + 1, MAX_RETRIES,
-                                )
-                                break  # Slots redistributed, restart on next cycle
-                            else:
-                                update_scheduled_post_status(
-                                    post['id'],
-                                    status='failed',
-                                    error_message=f'{error_msg} (max retries exhausted)',
-                                )
-                                app.logger.error("Scheduled LinkedIn post %d failed permanently: %s", post['id'], error_msg)
-                        
-                except Exception as e:
-                    app.logger.exception("Error processing scheduled post %d", post['id'])
-                    error_msg = str(e)[:500]
                     retry_count = post['retry_count'] if 'retry_count' in post.keys() and post['retry_count'] else 0
                     if retry_count < MAX_RETRIES:
                         increment_retry_count(post['id'])
                         redistribute_scheduled_posts(platform)
                         redistributed_platforms.add(platform)
                         app.logger.warning(
-                            "Post %d exception (%s), rescheduled to next slot (retry %d/%d)",
-                            post['id'], error_msg, retry_count + 1, MAX_RETRIES,
+                            "Scheduled post %d to %s failed (%s), rescheduled to next slot (retry %d/%d)",
+                            post['id'], result['account_label'], error_msg,
+                            retry_count + 1, MAX_RETRIES,
                         )
-                        break  # Slots redistributed, restart on next cycle
-                    else:
-                        update_scheduled_post_status(
-                            post['id'],
-                            status='failed',
-                            error_message=f'{error_msg} (max retries exhausted)',
-                        )
-                    
-        except Exception as e:
+                        # The whole platform's queue just moved, so the rest of
+                        # this batch is looking at stale slot times.
+                        break
+
+                    update_scheduled_post_status(
+                        post['id'], status='failed',
+                        error_message=f'{error_msg} (max retries exhausted)',
+                    )
+                    app.logger.error(
+                        "Scheduled post %d to %s failed permanently: %s",
+                        post['id'], result['account_label'], error_msg,
+                    )
+
+                except Exception as e:
+                    app.logger.exception("Error publishing scheduled post %s", post['id'])
+                    update_scheduled_post_status(
+                        post['id'], status='failed', error_message=str(e),
+                    )
+
+        except Exception:
             app.logger.exception("Error in scheduled post worker")
 
 

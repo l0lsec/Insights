@@ -18,11 +18,15 @@
 {% set PLATFORM_ORDER = ['linkedin', 'threads', 'twitter', 'facebook', 'instagram'] %}
 
 {% macro render_post_item(group) %}
+{# Destinations are keyed by platform AND account, because a platform can hold
+   several logins and each is its own chip. A card row that names no account
+   already reports its platform's default one, so the keys line up either way. #}
 {% set entries = {} %}
-{% for entry in group.platforms %}{% set _ = entries.update({entry.platform: entry}) %}{% endfor %}
+{% for entry in group.platforms %}{% set _ = entries.update({(entry.platform ~ ':' ~ (entry.account_id|string if entry.account_id else '')): entry}) %}{% endfor %}
                     <div class="post-item" data-post-id="{{ group.id }}"
                          data-post-ids="{{ group.post_ids | join(',') }}"
                          data-platforms='{{ group.platform_ids | tojson }}'
+                         data-targets='{{ group.targets | tojson }}'
                          data-post-index="{{ group.display_index }}"
                          data-source="{{ 'agent' if group.source_type == 'agent' else 'manual' }}"
                          data-brief="{{ group.brief_id if group.brief_id else '' }}">
@@ -63,14 +67,14 @@
                                 </button>
                                 <ul class="dropdown-menu dropdown-menu-end">
                                     {% for entry in group.platforms %}
-                                    <li><button class="dropdown-item" type="button" onclick="postNowFromCard(this, {{ entry.id }}, '{{ entry.platform }}')">
-                                        {{ PLATFORM_META.get(entry.platform, {}).get('icon', '📱') }} Post to {{ PLATFORM_META.get(entry.platform, {}).get('label', entry.platform|capitalize) }} now
+                                    <li><button class="dropdown-item" type="button" onclick="postNowFromCard(this, {{ entry.id }}, '{{ entry.platform }}', {{ entry.account_id or 'null' }})">
+                                        {{ PLATFORM_META.get(entry.platform, {}).get('icon', '📱') }} Post to {{ entry.account_label or PLATFORM_META.get(entry.platform, {}).get('label', entry.platform|capitalize) }} now
                                     </button></li>
                                     {% endfor %}
                                     {% if group.platforms | length > 1 %}
                                     <li><hr class="dropdown-divider"></li>
                                     <li><button class="dropdown-item fw-semibold" type="button" onclick="postNowAllFromCard(this)">
-                                        🚀 Post to all {{ group.platforms | length }} platforms
+                                        🚀 Post to all {{ group.platforms | length }} accounts
                                     </button></li>
                                     {% endif %}
                                 </ul>
@@ -80,9 +84,15 @@
                                 <ul class="dropdown-menu dropdown-menu-end">
                                     {% for entry in group.platforms %}
                                     <li><button class="dropdown-item" type="button" onclick="openScheduleModal({{ entry.id }}, 'standalone', '{{ entry.platform }}')">
-                                        {{ PLATFORM_META.get(entry.platform, {}).get('icon', '📱') }} Schedule for {{ PLATFORM_META.get(entry.platform, {}).get('label', entry.platform|capitalize) }}
+                                        {{ PLATFORM_META.get(entry.platform, {}).get('icon', '📱') }} Schedule for {{ entry.account_label or PLATFORM_META.get(entry.platform, {}).get('label', entry.platform|capitalize) }}
                                     </button></li>
                                     {% endfor %}
+                                    {% if group.platforms | length > 1 %}
+                                    <li><hr class="dropdown-divider"></li>
+                                    <li><button class="dropdown-item fw-semibold" type="button" onclick="queueAllFromCard(this)">
+                                        📅 Queue all {{ group.platforms | length }} accounts
+                                    </button></li>
+                                    {% endif %}
                                 </ul>
                                 <button class="btn btn-outline-danger" onclick="deletePost({{ group.id }}, this)" title="Delete this post everywhere">
                                     🗑️
@@ -92,27 +102,33 @@
 
                         {# Destinations. Ticking a platform creates that platform's saved post,
                            unticking deletes it; the ➕/✅ next to a ticked platform is its queue. #}
-                        <div class="platform-chips mb-2" role="group" aria-label="Platforms this post goes to">
-                            {% for platform in PLATFORM_ORDER %}
-                            {% set entry = entries.get(platform) %}
+                        <div class="platform-chips mb-2" role="group" aria-label="Accounts this post goes to">
+                            {% for target in PUBLISH_TARGETS %}
+                            {% set platform = target.platform %}
+                            {% set key = platform ~ ':' ~ (target.account_id|string if target.account_id else '') %}
+                            {% set entry = entries.get(key) %}
                             {% set meta = PLATFORM_META[platform] %}
+                            {# One account per platform reads as it always did; a
+                               second account is what makes the name worth showing. #}
+                            {% set name = target.label if target.show_label else meta.label %}
                             <span class="platform-chip {% if entry %}is-on{% endif %}" data-platform="{{ platform }}"
+                                  data-account-id="{{ target.account_id or '' }}"
                                   {% if entry %}data-platform-post-id="{{ entry.id }}"{% endif %}>
                                 <button type="button" class="chip-toggle" onclick="togglePostPlatform(this, '{{ platform }}')"
-                                        title="{% if entry %}Remove this post from {{ meta.label }}{% else %}Also post this to {{ meta.label }}{% endif %}">
+                                        title="{% if entry %}Remove this post from {{ name }}{% else %}Also post this to {{ name }}{% endif %}">
                                     <span class="chip-box">{% if entry %}✓{% endif %}</span>
                                     <span class="chip-icon">{{ meta.icon }}</span>
-                                    {# X's wordmark is its name — printing both reads as "𝕏 X". #}
-                                    {% if platform != 'twitter' %}<span class="chip-name">{{ meta.label }}</span>{% endif %}
+                                    {# X's wordmark is its name, so printing both reads as "𝕏 X". #}
+                                    {% if platform != 'twitter' or target.show_label %}<span class="chip-name">{{ name }}</span>{% endif %}
                                 </button>
                                 {% if entry %}
                                 <button type="button" class="chip-queue {% if entry.queued %}is-queued{% endif %}"
                                         data-queued="{{ 'true' if entry.queued else 'false' }}"
                                         onclick="toggleChipQueue(this)"
-                                        title="{% if entry.queued %}Queued for {{ entry.queued }} — click to remove{% else %}Add to the {{ meta.label }} queue{% endif %}">{% if entry.queued %}✅{% else %}➕{% endif %}</button>
+                                        title="{% if entry.queued %}Queued for {{ entry.queued }}, click to remove{% else %}Add to the {{ name }} queue{% endif %}">{% if entry.queued %}✅{% else %}➕{% endif %}</button>
                                 {% if entry.posted and entry.posted.url %}
                                 <a class="chip-posted" href="{{ entry.posted.url }}" target="_blank" rel="noopener"
-                                   title="Posted {{ entry.posted.posted_at[:16] if entry.posted.posted_at else '' }} — click to view">🔗</a>
+                                   title="Posted {{ entry.posted.posted_at[:16] if entry.posted.posted_at else '' }}, click to view">🔗</a>
                                 {% endif %}
                                 {% endif %}
                             </span>
