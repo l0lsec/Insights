@@ -10399,6 +10399,38 @@ def _library_job_running(scan_id: int) -> bool:
         return bool(job and job.get("running"))
 
 
+def _library_job_claim(scan_id: int) -> bool:
+    """Take the scan's job slot, or return False if a job already holds it.
+
+    Claimed here, in the request, rather than inside the worker thread. Between
+    a POST returning and its thread reaching its first statement the flag would
+    otherwise still read False while the scan's status still held the previous
+    job's result, so a caller polling straight after starting a job would see
+    "not running" plus a finished status and conclude the new job had already
+    finished. The thumbnail panel reported the previous run's totals that way,
+    and two quick POSTs could both pass the check and start two workers over
+    one scan.
+
+    Every launch site claims the slot before starting its thread; the thread
+    releases it in its ``finally``.
+    """
+    with _library_jobs_lock:
+        job = _library_jobs.setdefault(scan_id, {"stop": False, "running": False})
+        if job.get("running"):
+            return False
+        job["running"] = True
+        job["stop"] = False
+        return True
+
+
+def _library_job_release(scan_id: int) -> None:
+    """Give back the scan's job slot when its worker finishes."""
+    with _library_jobs_lock:
+        job = _library_jobs.get(scan_id)
+        if job:
+            job["running"] = False
+
+
 def _active_taxonomy() -> list:
     """Load the saved taxonomy as engine ``Category`` objects."""
     return [
@@ -10452,9 +10484,10 @@ def _scanned_from_row(row) -> content_library.ScannedFile:
 
 
 def _library_scan_thread(scan_id: int, root_path: str) -> None:
-    """Walk the archive and persist the catalogue. Downloads nothing."""
-    job = _library_job(scan_id)
-    job["running"] = True
+    """Walk the archive and persist the catalogue. Downloads nothing.
+
+    The caller has already claimed the job slot; this only has to release it.
+    """
     try:
         database.update_library_scan(scan_id, status="scanning", phase="walking")
         files = content_library.scan_root(
@@ -10483,14 +10516,12 @@ def _library_scan_thread(scan_id: int, root_path: str) -> None:
         app.logger.exception("library scan failed")
         database.update_library_scan(scan_id, status="failed", error_message=str(exc)[:500])
     finally:
-        job["running"] = False
+        _library_job_release(scan_id)
 
 
 def _library_classify_thread(scan_id: int, opts: dict) -> None:
     """Run the AI classification ladder over a scanned archive."""
     job = _library_job(scan_id)
-    job["running"] = True
-    job["stop"] = False
     done = {"n": 0}
 
     try:
@@ -10624,14 +10655,12 @@ def _library_classify_thread(scan_id: int, opts: dict) -> None:
         app.logger.exception("library classification failed")
         database.update_library_scan(scan_id, status="failed", error_message=str(exc)[:500])
     finally:
-        job["running"] = False
+        _library_job_release(scan_id)
 
 
 def _library_apply_thread(scan_id: int, dest_root: str, manifest: str,
                           mode: str = "copy") -> None:
     """Copy every approved plan item into the destination tree."""
-    job = _library_job(scan_id)
-    job["running"] = True
     try:
         database.update_library_scan(scan_id, status="applying", phase="copying")
         rows = database.list_plan_items(scan_id, state="approved", limit=1_000_000)
@@ -10661,7 +10690,7 @@ def _library_apply_thread(scan_id: int, dest_root: str, manifest: str,
         app.logger.exception("library apply failed")
         database.update_library_scan(scan_id, status="failed", error_message=str(exc)[:500])
     finally:
-        job["running"] = False
+        _library_job_release(scan_id)
 
 
 @app.route('/library')
@@ -10856,6 +10885,7 @@ def library_start_scan():
         return jsonify({"error": f"Folder is unavailable: {root['path']}"}), 400
 
     scan_id = database.create_library_scan(root_id)
+    _library_job_claim(scan_id)
     threading.Thread(target=_library_scan_thread, args=(scan_id, root["path"]),
                      daemon=True).start()
     return redirect(url_for("library_page", scan=scan_id))
@@ -10948,7 +10978,7 @@ def library_estimate(scan_id: int):
 @app.route('/library/scan/<int:scan_id>/classify', methods=['POST'])
 def library_classify(scan_id: int):
     """Start the AI pass. Vision runs locally; only mapping can go to the cloud."""
-    if _library_job_running(scan_id):
+    if not _library_job_claim(scan_id):
         return jsonify({"error": "A job is already running for this scan"}), 409
     data = request.get_json(silent=True) or request.form
 
@@ -11254,6 +11284,10 @@ def library_apply(scan_id: int):
         }), 400
 
     manifest = os.path.join(dest, ".insights-library-manifest.jsonl")
+    # Claimed here rather than above, so none of the validation failures on the
+    # way down can return while still holding the slot and wedge the scan.
+    if not _library_job_claim(scan_id):
+        return jsonify({"error": "A job is already running for this scan"}), 409
     threading.Thread(target=_library_apply_thread, args=(scan_id, dest, manifest, mode),
                      daemon=True).start()
     return jsonify({"ok": True, "dest": dest, "mode": mode,
@@ -11399,8 +11433,6 @@ def _thumb_backfill_thread(scan_id: int, fetch_gb: float = 0.0,
     previews remain.
     """
     job = _library_job(scan_id)
-    job["running"] = True
-    job["stop"] = False
     done = made = skipped = fetched = 0
     budget = media_probe.HydrationBudget(limit_bytes=int(fetch_gb * 1024 ** 3))
     lock = threading.Lock()
@@ -11470,7 +11502,7 @@ def _thumb_backfill_thread(scan_id: int, fetch_gb: float = 0.0,
         app.logger.exception("thumbnail backfill failed")
         database.update_library_scan(scan_id, status="failed", error_message=str(exc)[:500])
     finally:
-        job["running"] = False
+        _library_job_release(scan_id)
 
 
 @app.route('/library/scan/<int:scan_id>/thumbnails', methods=['POST'])
@@ -11504,6 +11536,8 @@ def library_build_thumbnails(scan_id: int):
     if not kinds:
         return jsonify({"error": "kinds must include image and/or video"}), 400
 
+    if not _library_job_claim(scan_id):
+        return jsonify({"error": "A job is already running for this scan"}), 409
     threading.Thread(target=_thumb_backfill_thread,
                      args=(scan_id, fetch_gb, max_file_mb, kinds), daemon=True).start()
     return jsonify({"ok": True, "fetch_gb": fetch_gb,

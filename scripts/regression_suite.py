@@ -35,13 +35,31 @@ def build(tmp):
                 n += 1
     return n
 
-def wait(database, sid, states, limit=90):
-    for _ in range(limit):
+def wait(database, web, sid, states, limit=90):
+    """Block until the scan's background job has actually finished.
+
+    Waiting on the status alone is not enough, and was the reason this suite
+    failed about half its runs. Apply, classify and thumbnails all run in
+    threads, and a scan keeps the previous job's status until its next job
+    overwrites it, so a wait for "applied" placed straight after a second apply
+    returned at once on the *first* apply's status. The suite then walked a
+    destination that was still being written, and read "nothing placed" or
+    "undo left N behind" depending on how far the copy had got.
+
+    The job flag is the real signal: it is claimed in the request, so it is
+    already true by the time the POST returns. A terminal status with the flag
+    down is the one state that means this job, not a previous one, is done.
+    """
+    deadline = time.time() + limit * 0.5
+    while time.time() < deadline:
         s = database.get_library_scan(sid, db_path=database.DB_PATH)
-        if s["status"] in states:
+        if s["status"] in states and not web._library_job_running(sid):
             return s
-        time.sleep(0.5)
-    return database.get_library_scan(sid, db_path=database.DB_PATH)
+        time.sleep(0.1)
+    s = database.get_library_scan(sid, db_path=database.DB_PATH)
+    raise AssertionError(
+        f"job did not reach {sorted(states)} within {limit * 0.5:.0f}s "
+        f"(status={s['status']}, running={web._library_job_running(sid)})")
 
 def main() -> int:
     tmp = tempfile.mkdtemp(prefix="lib_regress_")
@@ -63,7 +81,7 @@ def main() -> int:
     c.post("/library/taxonomy/learn", data={"root_id": roots["tax"]})
     c.post("/library/scan", data={"root_id": roots["src"]})
     sid = database.latest_library_scan(db_path=database.DB_PATH)["id"]
-    s = wait(database, sid, ("scanned", "failed"))
+    s = wait(database, web, sid, ("scanned", "failed"))
     assert s["status"] == "scanned", f"scan failed: {s['error_message']}"
     assert s["files_total"] == total, f"scanned {s['files_total']} of {total}"
 
@@ -74,7 +92,7 @@ def main() -> int:
 
     # classify only 2019
     c.post(f"/library/scan/{sid}/classify", json={"budget_gb": 1, "year_from": 2019, "year_to": 2019})
-    wait(database, sid, ("classified", "failed"))
+    wait(database, web, sid, ("classified", "failed"))
     by = {}
     with sqlite3.connect(database.DB_PATH) as conn:
         for y, cat in conn.execute("SELECT year, category FROM library_files WHERE scan_id=?", (sid,)):
@@ -82,19 +100,17 @@ def main() -> int:
     assert by.get(2023) == {"Unsorted"}, f"2023 should be untouched, got {by.get(2023)}"
 
     # resume is a no-op once nothing is pending
-    c.post(f"/library/scan/{sid}/classify", json={"budget_gb": 1, "resume": "1"})
-    time.sleep(2)
-    assert database.get_library_scan(sid, db_path=database.DB_PATH)["status"] in (
-        "classified", "scanned"), "resume left the scan in a bad state"
+    r = c.post(f"/library/scan/{sid}/classify", json={"budget_gb": 1, "resume": "1"})
+    assert r.status_code == 200, f"resume refused: {r.get_json()}"
+    s = wait(database, web, sid, ("classified", "scanned", "failed"))
+    assert s["status"] in ("classified", "scanned"), \
+        f"resume left the scan in a bad state: {s['status']}"
 
     # stats from different jobs must coexist
-    c.post(f"/library/scan/{sid}/thumbnails", json={"fetch_gb": 0})
-    for _ in range(60):
-        st = json.loads(database.get_library_scan(sid, db_path=database.DB_PATH)["stats"] or "{}")
-        if "thumbnails" in st:
-            break
-        time.sleep(0.5)
-    st = json.loads(database.get_library_scan(sid, db_path=database.DB_PATH)["stats"] or "{}")
+    r = c.post(f"/library/scan/{sid}/thumbnails", json={"fetch_gb": 0})
+    assert r.status_code == 200, f"thumbnails refused: {r.get_json()}"
+    s = wait(database, web, sid, ("classified", "scanned", "applied", "failed"))
+    st = json.loads(s["stats"] or "{}")
     assert "classify" in st and "thumbnails" in st, f"stats clobbered: {sorted(st)}"
 
     results = {}
@@ -104,7 +120,8 @@ def main() -> int:
         c.post(f"/library/scan/{sid}/plan/approve", json={"state": "approved"})
         r = c.post(f"/library/scan/{sid}/apply", json={"dest_root": dest, "mode": mode}).get_json()
         assert r.get("ok"), f"{mode} apply refused: {r}"
-        wait(database, sid, ("applied", "failed"))
+        s = wait(database, web, sid, ("applied", "failed"))
+        assert s["status"] == "applied", f"{mode} apply failed: {s['error_message']}"
         placed = [os.path.join(dp, f) for dp, _, fs in os.walk(dest)
                   for f in fs if not f.startswith(".")]
         assert placed, f"{mode}: nothing placed"
@@ -114,8 +131,11 @@ def main() -> int:
             assert not any(os.path.islink(p) for p in placed), "copy mode produced links"
         # re-apply must be idempotent
         c.post(f"/library/scan/{sid}/plan/approve", json={"state": "approved"})
-        c.post(f"/library/scan/{sid}/apply", json={"dest_root": dest, "mode": mode})
-        wait(database, sid, ("applied", "failed"))
+        again_r = c.post(f"/library/scan/{sid}/apply",
+                         json={"dest_root": dest, "mode": mode}).get_json()
+        assert again_r.get("ok"), f"{mode} re-apply refused: {again_r}"
+        s = wait(database, web, sid, ("applied", "failed"))
+        assert s["status"] == "applied", f"{mode} re-apply failed: {s['error_message']}"
         again = [os.path.join(dp, f) for dp, _, fs in os.walk(dest)
                  for f in fs if not f.startswith(".")]
         assert len(again) == len(placed), f"{mode} apply not idempotent: {len(placed)} -> {len(again)}"
