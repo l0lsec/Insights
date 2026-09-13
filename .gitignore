@@ -3,6 +3,8 @@
 !.env.example
 *.pyc
 __pycache__/
+venv/
+.venv/
 *.txt
 .DS_Store
 *.md
