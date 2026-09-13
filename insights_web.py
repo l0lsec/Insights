@@ -10723,6 +10723,227 @@ def _library_apply_thread(scan_id: int, dest_root: str, manifest: str,
         job["running"] = False
 
 
+def _copy_to_exfat(src: str, dest: str) -> None:
+    """Copy file bytes and mtime without the metadata ExFAT cannot hold.
+
+    shutil.copy2 also copies BSD file flags, and ExFAT rejects chflags with
+    EINVAL, so a copy to a typical external drive fails after writing every
+    byte. Data plus modification time is all a backup needs.
+    """
+    shutil.copyfile(src, dest)
+    try:
+        st = os.stat(src)
+        os.utime(dest, (st.st_atime, st.st_mtime))
+    except OSError:
+        pass
+
+
+def _vision_model_answers() -> bool:
+    """One tiny real inference, so 'installed' is not mistaken for 'working'."""
+    try:
+        import base64
+        from PIL import Image
+        import io
+        buf = io.BytesIO()
+        Image.new("RGB", (32, 32), (120, 80, 200)).save(buf, format="JPEG")
+        content_library._ollama_generate(
+            content_library.OLLAMA_VISION_MODEL, "One word: what colour is this?",
+            images=[base64.b64encode(buf.getvalue()).decode()], num_predict=5, timeout=120)
+        return True
+    except Exception:
+        return False
+
+
+def _library_sync_thread(scan_id: int, opts: dict) -> None:
+    """Bring the catalogue, previews, link tree and drive up to date.
+
+    Built for an archive that keeps growing -- a phone syncing into the folder
+    every day -- where the owner should not have to press anything.
+
+    This converges state rather than processing a batch of "new" files. Every
+    step asks "what is still missing?" against the whole catalogue: files not
+    yet catalogued, events not yet classified, previews not yet rendered, links
+    and drive copies not yet present. That is what makes it safe to run on a
+    schedule: a run that finds nothing costs seconds, a run interrupted partway
+    is simply finished by the next one, and a step that failed last time (a
+    budget that ran out, a drive that was unplugged) is retried without anyone
+    having to notice. Existing labels and corrections are never touched.
+    """
+    job = _library_job(scan_id)
+    job["running"] = True
+    job["stop"] = False
+    summary: dict = {}
+    t0 = time.time()
+    try:
+        scan = database.get_library_scan(scan_id)
+        root = scan["root_path"]
+        database.update_library_scan(scan_id, status="syncing", phase="finding new files")
+
+        # 1. Catalogue what is new.
+        files = content_library.scan_root(root)
+        known = database.known_library_paths(scan_id)
+        fresh = [f for f in files if f.path not in known]
+        summary["new_files"] = len(fresh)
+        if fresh:
+            events_new = content_library.group_events(fresh)
+            in_use = database.event_keys_in_use(scan_id)
+            stamp = datetime.now().strftime("%y%m%d%H%M")
+            for key in list(events_new):
+                # A new file on a day that already has a classified event must
+                # not join it: resume would skip the event and the file would
+                # stay unlabelled forever. Give it a distinct key.
+                if key in in_use:
+                    nk = f"{key}~{stamp}"
+                    for f in events_new[key]:
+                        f.event_key = nk
+                    events_new[nk] = events_new.pop(key)
+            for key, group in events_new.items():
+                database.upsert_library_event(scan_id, content_library.event_summary(key, group))
+            database.insert_new_library_files(scan_id, [f.as_dict() for f in fresh])
+            summary["new_events"] = len(events_new)
+
+        # 2. Classify everything still pending -- new events and anything an
+        #    earlier run could not finish. Residency is read live so the budget
+        #    is charged only for real downloads.
+        rows, _ = database.query_library_files(scan_id, limit=1_000_000)
+        allf = [_scanned_from_row(r) for r in rows]
+        _refresh_residency(allf)
+        events: dict[str, list] = {}
+        for f in allf:
+            events.setdefault(f.event_key, []).append(f)
+        pending = content_library.pending_events(events)
+        summary["pending_events"] = len(pending)
+        # Confirm the vision model actually answers before starting. Ollama can
+        # report a model as installed while its runtime rejects it -- seen
+        # after an upgrade that dropped the model's architecture -- and the
+        # symptom is every event failing in under a second. Skip the step and
+        # say why, so the pending events wait for the next run instead of
+        # being churned through pointlessly.
+        vision_ok = bool(pending) and _vision_model_answers()
+        if pending and not vision_ok:
+            summary["classification_skipped"] = "vision model not answering (check `ollama run llama3.2-vision`)"
+            app.logger.error("library sync: vision model is not answering; leaving %d events pending", len(pending))
+        if pending and vision_ok:
+            taxonomy = _active_taxonomy()
+            # Size the allowance to the work: enough to fetch every pending
+            # sample, capped by what the volume can hold above its reserve.
+            need = sum(content_library.sample_cost(g, 2, 32 * 1024 ** 2, 2) for g in pending.values())
+            free = media_probe.free_bytes("/")
+            cap = max(0, free - 6 * 1024 ** 3)
+            limit = min(int(need * 1.2) + 512 * 1024 ** 2, cap)
+            budget = content_library.HydrationBudget(limit_bytes=limit)
+            summary["budget_gb"] = round(limit / 1024 ** 3, 2)
+            database.update_library_scan(scan_id, status="classifying", phase="classifying",
+                                         events_total=len(pending), events_done=0)
+
+            def on_event(key: str, ev: dict) -> None:
+                database.upsert_library_event(scan_id, ev)
+                database.apply_event_labels(scan_id, key, ev.get("category") or content_library.UNSORTED,
+                                            ev.get("confidence", 0), ev.get("classified_by", ""),
+                                            ev.get("reason", ""))
+
+            def on_category(name: str, n: int) -> None:
+                database.save_library_categories(
+                    [{"name": name, "subcategories": [], "keywords": [], "example_count": n}],
+                    source="discovered")
+
+            stats = content_library.classify_events(
+                pending, taxonomy, budget, use_ai=True,
+                max_samples=2, max_sample_bytes=32 * 1024 ** 2, motion_samples=2,
+                on_event=on_event, should_stop=lambda: _library_job(scan_id).get("stop", False),
+                use_cloud_mapping=bool(opts.get("use_cloud_mapping", True)),
+                allow_new_categories=bool(opts.get("allow_new_categories", True)),
+                on_category=on_category,
+            )
+            for key, group in pending.items():
+                if group and group[0].category:
+                    database.apply_event_labels(scan_id, key, group[0].category, group[0].confidence,
+                                                group[0].classified_by, group[0].notes)
+            summary["classified"] = stats.get("by_vision", 0) + stats.get("by_rule", 0)
+            summary["still_unsorted"] = (stats.get("low_confidence", 0) + stats.get("no_match", 0)
+                                         + stats.get("budget_skipped", 0) + stats.get("deferred_large", 0))
+            summary["downloaded_gb"] = round(budget.spent_bytes / 1024 ** 3, 2)
+            # labels changed; reload for the steps below
+            rows, _ = database.query_library_files(scan_id, limit=1_000_000)
+            allf = [_scanned_from_row(r) for r in rows]
+
+        # 3. Previews for any local file that lacks one. Free.
+        database.update_library_scan(scan_id, phase="rendering previews")
+        made = 0
+        for f in allf:
+            if f.kind in ("image", "video") and not media_probe.cached_thumb(f.path) \
+                    and media_probe.is_materialized(f.path) and media_probe.ensure_thumb(f.path):
+                made += 1
+        summary["previews"] = made
+
+        # 4. Link tree and 5. drive: add whatever is missing.
+        link_root = opts.get("link_root")
+        drive_root = opts.get("drive_root")
+        drive_ok = bool(drive_root and os.path.isdir(drive_root))
+        database.update_library_scan(scan_id, phase="updating links and drive")
+        linked = copied = copy_fail = 0
+        for f in allf:
+            cat = content_library.safe_component(f.category or content_library.UNSORTED)
+            year = str(f.year) if f.year else "Undated"
+            if link_root:
+                dest = os.path.join(link_root, cat, year, f.name)
+                if not os.path.lexists(dest):
+                    os.makedirs(os.path.dirname(dest), exist_ok=True)
+                    os.symlink(f.path, dest)
+                    linked += 1
+            if drive_ok:
+                sorted_ = bool(f.category) and f.category != content_library.UNSORTED
+                dest = (os.path.join(drive_root, "Sorted", cat, year, f.name) if sorted_
+                        else os.path.join(drive_root, "Unsorted", year, f.name))
+                try:
+                    if not (os.path.exists(dest) and os.path.getsize(dest) == f.size):
+                        # Only copy what is on this Mac; a placeholder would be
+                        # a download, and the drive is synced from the cloud
+                        # by the rclone path for those.
+                        if media_probe.is_materialized(f.path):
+                            os.makedirs(os.path.dirname(dest), exist_ok=True)
+                            _copy_to_exfat(f.path, dest)
+                            copied += 1
+                except OSError as exc:
+                    copy_fail += 1
+                    if copy_fail <= 3:
+                        app.logger.warning("drive copy failed %s: %s", f.name, exc)
+        summary.update({"linked": linked, "copied_to_drive": copied,
+                        "drive_copy_failed": copy_fail, "drive_mounted": drive_ok,
+                        "seconds": int(time.time() - t0)})
+
+        database.recount_library_categories(scan_id)
+        database.update_library_scan(
+            scan_id, status="classified", phase="sync complete",
+            stats={"sync": {**summary, "at": datetime.now().isoformat(timespec="seconds")}},
+            finished_at=datetime.now().isoformat(timespec="seconds"))
+        log_activity("library_sync", details=json.dumps(summary))
+    except Exception as exc:
+        app.logger.exception("library sync failed")
+        summary["error"] = str(exc)[:200]
+        database.update_library_scan(scan_id, status="failed", error_message=str(exc)[:500],
+                                     stats={"sync": summary})
+    finally:
+        job["running"] = False
+
+
+@app.route('/library/scan/<int:scan_id>/sync', methods=['POST'])
+def library_sync(scan_id: int):
+    """Run the whole pipeline for anything new in the archive."""
+    if _library_job_running(scan_id):
+        return jsonify({"error": "A job is already running for this scan"}), 409
+    data = request.get_json(silent=True) or request.form or {}
+    opts = {
+        "budget_gb": float(data.get("budget_gb", 2) or 2),
+        "use_cloud_mapping": str(data.get("use_cloud_mapping", "1")) in ("1", "true", "on", "True"),
+        "allow_new_categories": str(data.get("allow_new_categories", "1")) in ("1", "true", "on", "True"),
+        "link_root": data.get("link_root") or None,
+        "drive_root": data.get("drive_root") or None,
+    }
+    threading.Thread(target=_library_sync_thread, args=(scan_id, opts), daemon=True).start()
+    return jsonify({"ok": True, "options": opts})
+
+
 @app.route('/library')
 def library_page():
     """Dashboard: registered folders, latest catalogue, and its breakdown."""

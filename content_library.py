@@ -1655,6 +1655,7 @@ def classify_events(
             captions: list[str] = []
             transcript = ""
             exhausted = False
+            model_down = False
 
             with TempWorkspace() as workspace:
                 for sample in samples:
@@ -1665,8 +1666,13 @@ def classify_events(
                         exhausted = True
                         break
                     except OllamaUnavailable:
+                        # Kept distinct from a spent budget. Conflating them
+                        # once labelled 217 files "budget_exhausted" when the
+                        # real cause was the vision model failing to load
+                        # after an Ollama upgrade -- a diagnosis the label
+                        # actively pointed away from.
                         stats["ollama_unavailable"] = 1
-                        exhausted = True
+                        model_down = True
                         break
                     if caption:
                         captions.append(caption)
@@ -1693,6 +1699,13 @@ def classify_events(
                         except BudgetExhausted:
                             exhausted = True
 
+            if model_down and not captions and not transcript:
+                stats["unresolved"] += 1
+                for f in files:
+                    if not f.category:
+                        f.category, f.classified_by = UNSORTED, "unresolved"
+                        f.notes = "vision model unavailable"
+                continue
             if exhausted and not captions and not transcript:
                 stats["budget_skipped"] += 1
                 for f in files:
