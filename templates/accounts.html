@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% block title %}Accounts | Insights{% endblock %}
+{% block header %}Accounts{% endblock %}
+
+{# Every login the app can publish as, grouped by platform.
+
+   A platform is not one account any more, so this page is where a second (or
+   fifth) login is added, named, made the default, or disconnected on its own.
+   The composer reads the same list to offer targets, which is why naming an
+   account here is worth doing: "Work" and "Studio" tell two LinkedIn chips
+   apart in a way "LinkedIn" and "LinkedIn" never could. #}
+
+{% block content %}
+<style>
+    .account-platform {
+        border: 1px solid #dee2e6;
+        border-radius: 10px;
+        margin-bottom: 1.25rem;
+        overflow: hidden;
+    }
+    .account-platform-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 1rem;
+        padding: 0.85rem 1.1rem;
+        background: linear-gradient(135deg, #f8f9fa 0%, #eef0f4 100%);
+        border-bottom: 1px solid #dee2e6;
+    }
+    .account-platform-name {
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+    }
+    .account-row {
+        display: flex;
+        align-items: center;
+        gap: 0.9rem;
+        padding: 0.85rem 1.1rem;
+        border-bottom: 1px solid #f1f3f5;
+    }
+    .account-row:last-child { border-bottom: none; }
+    .account-avatar {
+        width: 38px;
+        height: 38px;
+        border-radius: 50%;
+        object-fit: cover;
+        background: #e9ecef;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 1.1rem;
+        flex: 0 0 auto;
+    }
+    .account-identity { flex: 1 1 auto; min-width: 0; }
+    .account-name {
+        font-weight: 600;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+    }
+    .account-handle {
+        font-size: 0.85rem;
+        color: #6c757d;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+    }
+    .account-empty {
+        padding: 1rem 1.1rem;
+        color: #6c757d;
+        font-size: 0.9rem;
+    }
+    .account-actions { flex: 0 0 auto; display: flex; gap: 0.35rem; }
+    .account-warn {
+        font-size: 0.82rem;
+        color: #b8860b;
+        margin-top: 0.15rem;
+    }
+</style>
+
+<p class="text-muted">
+    {{ total }} account{{ '' if total == 1 else 's' }} connected.
+    Connect more than one per platform and the composer lets you send the same
+    post to whichever mix of them you want.
+</p>
+
+<div id="accounts-flash"></div>
+
+{% for entry in platforms %}
+<div class="account-platform" data-platform="{{ entry.platform }}">
+    <div class="account-platform-head">
+        <div class="account-platform-name">
+            {{ entry.name }}
+            <span class="badge bg-secondary">{{ entry.accounts | length }}</span>
+        </div>
+        <div>
+            {% if entry.configured %}
+            <a class="btn btn-sm btn-outline-primary" href="{{ entry.connect_url }}">
+                {% if entry.accounts %}Connect another{% else %}Connect{% endif %}
+            </a>
+            {% else %}
+            <span class="badge bg-light text-dark border" title="Set this platform's API credentials in .env to connect it">
+                Not configured
+            </span>
+            {% endif %}
+        </div>
+    </div>
+
+    {% if entry.accounts %}
+    {% for account in entry.accounts %}
+    <div class="account-row" data-account-id="{{ account.id }}">
+        <div class="account-avatar">
+            {% if account.avatar_url %}
+            <img src="{{ account.avatar_url }}" alt="" class="account-avatar">
+            {% else %}
+            👤
+            {% endif %}
+        </div>
+        <div class="account-identity">
+            <div class="account-name">
+                <span class="account-label-text">{{ account.label }}</span>
+                {% if account.is_default %}
+                <span class="badge bg-success default-badge">Default</span>
+                {% endif %}
+                {% if account.status == 'expired' %}
+                <span class="badge bg-warning text-dark">Expired</span>
+                {% endif %}
+            </div>
+            <div class="account-handle">
+                {% if account.handle %}{{ account.handle }}{% else %}{{ account.display_name or account.external_id }}{% endif %}
+            </div>
+            {% if account.needs_attention %}
+            <div class="account-warn">⚠ {{ account.needs_attention }}</div>
+            {% endif %}
+        </div>
+        <div class="account-actions">
+            <button class="btn btn-sm btn-outline-secondary"
+                    onclick="renameAccount({{ account.id }}, this)" title="Give this account a name">
+                Rename
+            </button>
+            {% if not account.is_default %}
+            <button class="btn btn-sm btn-outline-success set-default-btn"
+                    onclick="makeAccountDefault({{ account.id }}, this)"
+                    title="New posts for {{ entry.name }} go here unless told otherwise">
+                Make default
+            </button>
+            {% endif %}
+            <button class="btn btn-sm btn-outline-danger"
+                    onclick="disconnectAccount({{ account.id }}, this)" title="Disconnect this account only">
+                Disconnect
+            </button>
+        </div>
+    </div>
+    {% endfor %}
+    {% else %}
+    <div class="account-empty">
+        {% if entry.configured %}
+        No {{ entry.name }} account connected yet.
+        {% else %}
+        Set this platform's API credentials in <code>.env</code> to connect an account.
+        {% endif %}
+    </div>
+    {% endif %}
+</div>
+{% endfor %}
+
+<script>
+function accountsFlash(message, kind) {
+    const box = document.getElementById('accounts-flash');
+    box.innerHTML = `<div class="alert alert-${kind} alert-dismissible fade show" role="alert">`
+        + message
+        + '<button type="button" class="btn-close" data-bs-dismiss="alert"></button></div>';
+}
+
+async function accountsPost(url, body) {
+    const res = await fetch(url, { method: 'POST', body: body || new FormData() });
+    let data = {};
+    try { data = await res.json(); } catch (e) { data = {}; }
+    if (!res.ok || data.error) throw new Error(data.error || `Request failed (${res.status})`);
+    return data;
+}
+
+async function makeAccountDefault(accountId, btn) {
+    btn.disabled = true;
+    try {
+        const data = await accountsPost(`/accounts/${accountId}/default`);
+        accountsFlash(data.message, 'success');
+        // The badge moves rather than the page reloading, so a rename typed a
+        // moment ago is not lost to a refresh.
+        const card = btn.closest('.account-platform');
+        card.querySelectorAll('.default-badge').forEach(b => b.remove());
+        card.querySelectorAll('.set-default-btn').forEach(b => { b.hidden = false; b.disabled = false; });
+        const row = btn.closest('.account-row');
+        const badge = document.createElement('span');
+        badge.className = 'badge bg-success default-badge';
+        badge.textContent = 'Default';
+        row.querySelector('.account-name').appendChild(badge);
+        btn.hidden = true;
+    } catch (e) {
+        accountsFlash(e.message, 'danger');
+        btn.disabled = false;
+    }
+}
+
+async function renameAccount(accountId, btn) {
+    const row = btn.closest('.account-row');
+    const current = row.querySelector('.account-label-text').textContent.trim();
+    const label = prompt('Name this account (blank clears it back to the profile name):', current);
+    if (label === null) return;
+    btn.disabled = true;
+    try {
+        const body = new FormData();
+        body.append('label', label);
+        const data = await accountsPost(`/accounts/${accountId}/label`, body);
+        row.querySelector('.account-label-text').textContent = data.label;
+        accountsFlash('Renamed', 'success');
+    } catch (e) {
+        accountsFlash(e.message, 'danger');
+    }
+    btn.disabled = false;
+}
+
+async function disconnectAccount(accountId, btn) {
+    const row = btn.closest('.account-row');
+    const name = row.querySelector('.account-label-text').textContent.trim();
+    if (!confirm(`Disconnect ${name}? Queued posts for this account are removed. Other accounts on this platform keep working.`)) return;
+    btn.disabled = true;
+    try {
+        const data = await accountsPost(`/accounts/${accountId}/disconnect`);
+        accountsFlash(
+            data.unqueued
+                ? `${data.message}. ${data.unqueued} queued post${data.unqueued === 1 ? '' : 's'} removed.`
+                : data.message,
+            'success');
+        // Reload so the platform's default badge and count come from the server
+        // rather than being guessed at here.
+        setTimeout(() => window.location.reload(), 600);
+    } catch (e) {
+        accountsFlash(e.message, 'danger');
+        btn.disabled = false;
+    }
+}
+</script>
+{% endblock %}

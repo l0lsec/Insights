@@ -1,2 +1,2 @@
-{% from 'partials/post_item.html' import render_post_item %}
+{% from 'partials/post_item.html' import render_post_item with context %}
 {% for group in groups %}{{ render_post_item(group) }}{% endfor %}

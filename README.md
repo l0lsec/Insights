@@ -57,6 +57,15 @@ Catalogue a large media archive and sort it by **year** and **category** — bui
 - **Image Management** - Upload images, search stock photos (Unsplash, Pexels, Pixabay), and attach to posts
 - **Bulk Operations** - Bulk edit, delete, find-and-replace, and image assignment across posts
 
+#### Accounts & Cross-Posting
+- **Multiple Accounts per Platform** - Connect as many logins as you like on each platform (two LinkedIn profiles, a personal and a brand Threads, several Facebook Pages). Each keeps its own token, and disconnecting one leaves the others posting
+- **Named Accounts** - Give each login a name ("Work", "Studio") so two accounts on the same platform are told apart everywhere they appear
+- **Default Account** - Each platform has a default that anything not naming an account goes to, so a single-account setup behaves exactly as it always did
+- **Cross-Posting** - Write once and aim the same copy at any mix of platforms and accounts. One action publishes it to all of them and reports which landed and which did not, rather than stopping at the first failure
+- **Cross-Posting to the Queue** - Queue the same copy for every target at once; each takes its own next free slot on its own platform, so nothing stacks up at the same minute
+- **Per-Account Scheduling** - Every queued post records the account that will publish it, so two accounts on one platform move through the queue independently
+- **Accounts Page** - `/accounts` lists every connected login, flags the ones that still need configuring or reconnecting, and is where accounts are added, named, defaulted and disconnected
+
 #### Publishing & Scheduling
 - **LinkedIn Integration** - OAuth-based posting with rich link previews and image support
 - **Threads Integration** - OAuth-based posting with text and image support
@@ -148,6 +157,7 @@ Catalogue a media archive by year and category, browse it by either, review disc
 |------|-------------|
 | `insights.py` | CLI entry point and core AI generation library (transcription, summaries, articles, social copy, vision, thumbnails) |
 | `insights_web.py` | Flask web application with all routes, background workers, and UI logic |
+| `social_publisher.py` | One publish path for every platform and account - resolves the target account, refreshes its token, calls the right client, and reports each target's outcome in the same shape |
 | `database.py` | SQLite database operations for feeds, episodes, articles, posts, schedules, sources, library, and more |
 | `content_agent.py` | Content brief orchestrator - researches sources and prepares draft posts and articles for review |
 | `content_library.py` | Content Library engine - archive scanning, event grouping, taxonomy learning, classification, and copy planning |
@@ -501,6 +511,44 @@ Create JIRA issues directly from extracted action items. Set the following envir
 - `JIRA_PROJECT_KEY` - project key for new issues
 
 Select action items on any results page and click **Create JIRA Tickets**. Each ticket includes the source context (episode title and summary) so your team has immediate background. Ticket status syncs live from JIRA whenever you view the tickets page.
+
+### Managing Accounts and Cross-Posting
+
+Open **Accounts** in the navigation to see every connected login, grouped by
+platform.
+
+#### Connecting more than one account on a platform
+
+1. Click **Connect** for a platform to add your first login, then **Connect
+   another** to add a second (or fifth) on the same platform
+2. Each login keeps its own credentials. Re-authorising an account you already
+   connected refreshes it in place rather than adding a duplicate
+3. Click **Rename** to name an account ("Work", "Studio"). The name is what
+   tells two accounts on the same platform apart everywhere they appear
+4. Click **Make default** to choose which account a bare platform name means.
+   Anything that does not name an account, including posts saved before you
+   connected a second one, goes to the default
+5. Click **Disconnect** to remove one login. The platform's other accounts keep
+   working; any queued posts aimed at the removed account are taken out of the
+   queue rather than quietly published from a different account
+
+#### Sending one post to several platforms and accounts
+
+In the Command Center, each saved post is a card with a chip per destination:
+one chip per platform, and one chip per account where a platform has more than
+one connected.
+
+- **Tick a chip** to send this card's copy there. Ticking creates that
+  destination's post; unticking removes it
+- **🚀 Post to all** publishes the same copy to every ticked destination in one
+  action. Targets are published independently, so one failing does not stop the
+  rest, and the result names exactly which landed and which did not
+- **📅 Queue all** puts the same copy in the queue for every ticked destination.
+  Each takes its own next free slot on its own platform, so two accounts on one
+  platform do not land at the same minute
+- When generating posts, the **Accounts** row under the platform picker chooses
+  which accounts each platform writes to. Copy is generated once per platform
+  whatever you pick, so aiming at two accounts costs nothing extra
 
 ### Posting to LinkedIn
 
