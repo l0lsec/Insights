@@ -592,6 +592,9 @@ def init_db(db_path: str = DB_PATH) -> None:
             "CREATE INDEX IF NOT EXISTS idx_lib_files_year ON library_files(scan_id, year)",
             "CREATE INDEX IF NOT EXISTS idx_lib_files_event ON library_files(scan_id, event_key)",
             "CREATE INDEX IF NOT EXISTS idx_lib_files_dup ON library_files(scan_id, dup_group)",
+            # A file appears once per scan. This is what lets a rescan add only
+            # what is new instead of duplicating the whole catalogue.
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_lib_files_path ON library_files(scan_id, path)",
         ):
             conn.execute(stmt)
         # Events are the unit the classifier actually labels; files inherit.
@@ -5585,3 +5588,49 @@ def review_candidates(scan_id: int, limit: int = 200,
             """,
             (scan_id, int(limit)),
         ).fetchall()
+
+
+def insert_new_library_files(scan_id: int, rows: Iterable[dict], db_path: str = DB_PATH) -> List[int]:
+    """Insert only files not already catalogued for this scan; return new ids.
+
+    The incremental counterpart of :func:`bulk_insert_library_files`. A sync
+    that runs on a schedule re-walks the whole archive every time, and almost
+    everything it sees is already known; inserting with IGNORE against the
+    (scan_id, path) index keeps the catalogue append-only and lets the caller
+    act on just the files that are genuinely new.
+    """
+    payload = [
+        (scan_id, r.get("path"), r.get("rel_path"), r.get("name"), r.get("ext"),
+         r.get("kind"), r.get("size", 0), r.get("mtime"),
+         1 if r.get("materialized") else 0, r.get("captured_at"), r.get("date_source"),
+         r.get("year"), r.get("month"), r.get("event_key"), r.get("dup_group", 1))
+        for r in rows
+    ]
+    if not payload:
+        return []
+    new_ids: List[int] = []
+    with sqlite3.connect(db_path) as conn:
+        for row in payload:
+            cur = conn.execute(
+                """INSERT OR IGNORE INTO library_files
+                     (scan_id, path, rel_path, name, ext, kind, size, mtime, materialized,
+                      captured_at, date_source, year, month, event_key, dup_group)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                row,
+            )
+            if cur.rowcount:
+                new_ids.append(int(cur.lastrowid))
+    return new_ids
+
+
+def known_library_paths(scan_id: int, db_path: str = DB_PATH) -> set:
+    """Every path already in the catalogue for a scan, for cheap membership tests."""
+    with sqlite3.connect(db_path) as conn:
+        return {r[0] for r in conn.execute(
+            "SELECT path FROM library_files WHERE scan_id = ?", (scan_id,))}
+
+
+def event_keys_in_use(scan_id: int, db_path: str = DB_PATH) -> set:
+    with sqlite3.connect(db_path) as conn:
+        return {r[0] for r in conn.execute(
+            "SELECT DISTINCT event_key FROM library_files WHERE scan_id = ?", (scan_id,))}
