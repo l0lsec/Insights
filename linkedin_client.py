@@ -6,13 +6,19 @@ import os
 import re
 import logging
 import secrets
+import time
 from datetime import datetime, timedelta
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 from typing import Optional
 
 import requests
 
+import video_media
+
 logger = logging.getLogger(__name__)
+
+# Seam for tests: a gate replaces this so status polling does not really wait.
+_sleep = time.sleep
 
 
 def fetch_og_metadata(url: str, timeout: int = 10) -> dict:
@@ -92,6 +98,13 @@ LINKEDIN_TOKEN_URL = "https://www.linkedin.com/oauth/v2/accessToken"
 LINKEDIN_USERINFO_URL = "https://api.linkedin.com/v2/userinfo"
 LINKEDIN_POSTS_URL = "https://api.linkedin.com/rest/posts"
 LINKEDIN_IMAGES_URL = "https://api.linkedin.com/rest/images"
+LINKEDIN_VIDEOS_URL = "https://api.linkedin.com/rest/videos"
+
+# LinkedIn finishes processing a video some seconds to a few minutes after the
+# upload is finalized, and a post that points at a video that is not AVAILABLE
+# yet is refused, so the client waits (2s * 150 = five minutes) before giving up.
+VIDEO_POLL_INTERVAL = 2.0
+VIDEO_POLL_ATTEMPTS = 150
 
 # API version for LinkedIn REST API (format: YYYYMM)
 # LinkedIn keeps versions active for ~1 year, use a recent stable version
@@ -532,6 +545,185 @@ class LinkedInClient:
                 "error": error_data,
             }
 
+    def upload_video_from_url(
+        self,
+        access_token: str,
+        owner_urn: str,
+        video_url: str,
+    ) -> str:
+        """Upload a video through LinkedIn's Videos API and return its URN.
+
+        The protocol has four steps: declare the upload (which returns one
+        pre-signed URL per 4 MB part), PUT each part and keep the ETag it
+        answers with, finalize with those ETags in order, then wait for
+        LinkedIn to finish processing. The file is streamed from disk a part at
+        a time, so a large video is never held in memory.
+
+        Raises ``video_media.VideoError`` with a readable reason on any failure;
+        ``permanent`` on it says whether a retry could help.
+        """
+        limits = video_media.PLATFORM_LIMITS["linkedin"]
+        with video_media.downloaded(video_url, max_bytes=limits["max_bytes"]) as (path, size):
+            refusal = video_media.preflight("linkedin", size)
+            if refusal:
+                raise video_media.VideoError(refusal)
+
+            init = requests.post(
+                f"{LINKEDIN_VIDEOS_URL}?action=initializeUpload",
+                json={"initializeUploadRequest": {
+                    "owner": owner_urn,
+                    "fileSizeBytes": size,
+                    "uploadCaptions": False,
+                    "uploadThumbnail": False,
+                }},
+                headers=self._get_api_headers(access_token),
+                timeout=30,
+            )
+            if init.status_code != 200:
+                raise video_media.VideoError(
+                    f"LinkedIn would not start the video upload ({init.status_code}): "
+                    f"{_error_text(init)}",
+                    permanent=init.status_code in (400, 401, 403),
+                )
+            value = init.json().get("value", {})
+            video_urn = value.get("video")
+            instructions = value.get("uploadInstructions") or []
+            upload_token = value.get("uploadToken", "")
+            if not video_urn or not instructions:
+                raise video_media.VideoError(
+                    "LinkedIn's upload reply had no video id or upload URL", permanent=False,
+                )
+
+            part_ids = []
+            with open(path, "rb") as source:
+                for part in instructions:
+                    first, last = int(part["firstByte"]), int(part["lastByte"])
+                    source.seek(first)
+                    body = source.read(last - first + 1)
+                    put = requests.put(
+                        part["uploadUrl"],
+                        data=body,
+                        headers={"Content-Type": "application/octet-stream"},
+                        timeout=120,
+                    )
+                    if put.status_code not in (200, 201):
+                        raise video_media.VideoError(
+                            f"LinkedIn rejected part {len(part_ids) + 1} of the video "
+                            f"({put.status_code}): {_error_text(put)}",
+                            permanent=False,
+                        )
+                    etag = (put.headers.get("etag") or put.headers.get("ETag") or "").strip('"')
+                    if not etag:
+                        raise video_media.VideoError(
+                            f"LinkedIn gave no ETag for part {len(part_ids) + 1}, so the "
+                            "upload cannot be finalized",
+                            permanent=False,
+                        )
+                    part_ids.append(etag)
+
+            fin = requests.post(
+                f"{LINKEDIN_VIDEOS_URL}?action=finalizeUpload",
+                json={"finalizeUploadRequest": {
+                    "video": video_urn,
+                    "uploadToken": upload_token,
+                    "uploadedPartIds": part_ids,
+                }},
+                headers=self._get_api_headers(access_token),
+                timeout=30,
+            )
+            if fin.status_code != 200:
+                raise video_media.VideoError(
+                    f"LinkedIn could not finalize the video ({fin.status_code}): "
+                    f"{_error_text(fin)}",
+                    permanent=False,
+                )
+
+        self._wait_for_video(access_token, video_urn)
+        return video_urn
+
+    def _wait_for_video(self, access_token: str, video_urn: str) -> None:
+        """Block until LinkedIn reports the video AVAILABLE, or raise why not."""
+        status = None
+        for _attempt in range(VIDEO_POLL_ATTEMPTS):
+            response = requests.get(
+                f"{LINKEDIN_VIDEOS_URL}/{quote(video_urn, safe='')}",
+                headers=self._get_api_headers(access_token),
+                timeout=30,
+            )
+            if response.status_code == 200:
+                data = response.json()
+                status = data.get("status")
+                if status == "AVAILABLE":
+                    return
+                if status == "PROCESSING_FAILED":
+                    raise video_media.VideoError(
+                        "LinkedIn could not process the video: "
+                        f"{data.get('processingFailureReason') or 'unsupported file'}",
+                        permanent=True,
+                    )
+            _sleep(VIDEO_POLL_INTERVAL)
+        raise video_media.VideoError(
+            f"LinkedIn was still processing the video (last status {status or 'unknown'}) "
+            "after waiting; try again shortly",
+            permanent=False,
+        )
+
+    def create_video_post(
+        self,
+        access_token: str,
+        author_urn: str,
+        text: str,
+        video_url: str,
+        visibility: str = "PUBLIC",
+    ) -> dict:
+        """Create a post with a video on LinkedIn.
+
+        Unlike ``create_image_post`` this never falls back to a text post when
+        the upload fails: someone who attached a video does not want the words
+        going out without it, so the failure is returned and nothing is posted.
+        """
+        try:
+            video_urn = self.upload_video_from_url(access_token, author_urn, video_url)
+        except video_media.VideoError as exc:
+            logger.error("LinkedIn video upload failed: %s", exc)
+            return video_media.failure(str(exc), permanent=exc.permanent)
+        except requests.RequestException as exc:
+            logger.error("LinkedIn video upload request failed: %s", exc)
+            return video_media.failure(f"LinkedIn video upload failed: {exc}")
+
+        payload = {
+            "author": author_urn,
+            "commentary": text,
+            "visibility": visibility,
+            "distribution": {
+                "feedDistribution": "MAIN_FEED",
+                "targetEntities": [],
+                "thirdPartyDistributionChannels": [],
+            },
+            "content": {"media": {"id": video_urn}},
+            "lifecycleState": "PUBLISHED",
+            "isReshareDisabledByAuthor": False,
+        }
+        try:
+            response = requests.post(
+                LINKEDIN_POSTS_URL,
+                json=payload,
+                headers=self._get_api_headers(access_token),
+                timeout=30,
+            )
+        except requests.RequestException as exc:
+            return video_media.failure(f"LinkedIn video post failed: {exc}")
+
+        if response.status_code == 201:
+            return {
+                "success": True,
+                "post_urn": response.headers.get("x-restli-id", ""),
+                "status_code": response.status_code,
+            }
+        error_data = _error_json(response)
+        logger.error("LinkedIn video post failed: %s - %s", response.status_code, error_data)
+        return {"success": False, "status_code": response.status_code, "error": error_data}
+
     def create_article_post(
         self,
         access_token: str,
@@ -745,6 +937,19 @@ class LinkedInClient:
             timeout=30,
         )
         return response.status_code == 204
+
+
+def _error_json(response: requests.Response) -> dict:
+    try:
+        return response.json()
+    except Exception:
+        return {"raw": response.text}
+
+
+def _error_text(response: requests.Response) -> str:
+    """A platform error as one short line, for a message a person will read."""
+    data = _error_json(response)
+    return str(data.get("message") or data.get("raw") or data)[:200]
 
 
 def get_linkedin_client() -> LinkedInClient:

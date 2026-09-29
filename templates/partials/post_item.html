@@ -321,6 +321,62 @@
                                 {% endif %}
                                 </div><!-- /ig-feed-block -->
                             </div>
+                            {# One video for the whole card, like the image: it is stored on every
+                               row and is part of what groups them. A card with a video posts the
+                               video (Instagram as a Reel) and the image is not sent. #}
+                            <div class="post-video-section mt-2" id="video-section-{{ group.id }}"
+                                 data-video-url="{{ group.video_url or '' }}">
+                                <div class="align-items-center gap-2 mb-2 {{ 'd-flex' if group.video_url else 'd-none' }}"
+                                     id="video-preview-{{ group.id }}">
+                                    <video src="{{ group.video_url or '' }}" controls preload="metadata" muted playsinline
+                                           class="rounded border" style="max-height: 90px; max-width: 160px; background: #000;"></video>
+                                    <span class="text-muted small text-truncate" style="max-width: 200px;">{{ group.video_url or '' }}</span>
+                                    <button class="btn btn-sm btn-outline-warning" onclick="editPostVideo({{ group.id }})" title="Change Video">
+                                        ✏️
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-danger" onclick="removePostVideo({{ group.id }})" title="Remove Video">
+                                        ✕
+                                    </button>
+                                </div>
+                                <div class="small text-muted mb-1 {{ '' if group.video_url else 'd-none' }}" id="video-note-{{ group.id }}">
+                                    🎬 The video posts instead of the image{% if group.ig %}; on Instagram it goes out as a Reel{% endif %}.
+                                </div>
+                                <ul class="list-unstyled small mb-2" id="video-warnings-{{ group.id }}"></ul>
+                                <div class="video-edit-form d-none" id="video-edit-form-{{ group.id }}">
+                                    <div class="input-group input-group-sm mb-1">
+                                        <input type="file" class="form-control form-control-sm"
+                                               id="video-file-input-{{ group.id }}"
+                                               accept="video/mp4,video/quicktime,.mp4,.mov"
+                                               onchange="uploadPostVideo({{ group.id }}, this)">
+                                        <button class="btn btn-outline-secondary" type="button" onclick="cancelPostVideo({{ group.id }})" title="Cancel">
+                                            ✕
+                                        </button>
+                                    </div>
+                                    <div class="input-group input-group-sm mb-1">
+                                        <input type="url" class="form-control" id="video-url-input-{{ group.id }}"
+                                               placeholder="…or paste a public video URL (https://…/clip.mp4)"
+                                               onkeydown="if(event.key === 'Enter') { event.preventDefault(); savePostVideoUrl({{ group.id }}); }">
+                                        <button class="btn btn-success" type="button" onclick="savePostVideoUrl({{ group.id }})" title="Use this URL">
+                                            💾
+                                        </button>
+                                    </div>
+                                    <select class="form-select form-select-sm mb-1" id="video-library-{{ group.id }}"
+                                            onchange="pickPostVideoFromLibrary({{ group.id }}, this)">
+                                        <option value="">📚 Or pick a video you uploaded before…</option>
+                                    </select>
+                                    <div id="video-progress-{{ group.id }}" class="mt-1 d-none">
+                                        <div class="progress" style="height: 16px;">
+                                            <div class="progress-bar progress-bar-striped progress-bar-animated" style="width: 100%; font-size: 0.7rem;">
+                                                Uploading video…
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                <button class="btn btn-sm btn-outline-secondary add-video-btn {{ 'd-none' if group.video_url else '' }}"
+                                        id="add-video-btn-{{ group.id }}" onclick="editPostVideo({{ group.id }})">
+                                    🎬 Add Video
+                                </button>
+                            </div>
                             <div class="edit-form d-none" id="edit-form-{{ group.id }}">
                                 <textarea class="form-control mb-2" id="edit-textarea-{{ group.id }}" rows="4">{{ group.content }}</textarea>
                                 <div class="d-flex gap-2">

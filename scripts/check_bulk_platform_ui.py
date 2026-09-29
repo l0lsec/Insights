@@ -27,7 +27,7 @@ from _accounts_gate import (  # noqa: E402
 # Every function the feature adds. Each must be declared exactly once: a second
 # declaration of the same name silently replaces the first in a classic script.
 FEATURE_FUNCTIONS = (
-    "bulkPlatformCount", "bulkPlatformChips", "bulkPlatformChosen",
+    "bulkPlatformCount", "bulkPlatformChips", "bulkPlatformChosen", "bulkPlatformPresence",
     "showBulkPlatformModal", "toggleBulkPlatformTarget", "updateBulkPlatformSummary",
     "setBulkPlatformBusy", "postBulkPlatform", "newBulkPlatformTotals",
     "mergeBulkPlatformTotals", "applyBulkPlatformCards", "applyBulkPlatform",
@@ -75,9 +75,16 @@ def section_wiring():
     button = re.search(r'<button[^>]*id="add-platform-selected-btn"[^>]*>', html)
     check(button, "the toolbar has no Add Platform button")
     check("d-none" in button.group(0), "the Add Platform button is visible before anything is selected")
-    check('onclick="showBulkPlatformModal()"' in button.group(0),
-          "the Add Platform button is not bound to showBulkPlatformModal()")
+    check("onclick=\"showBulkPlatformModal('add')\"" in button.group(0),
+          "the Add Platform button does not open the modal in add mode")
     check('id="add-platform-count"' in html, "the button has no count to update")
+
+    remove_button = re.search(r'<button[^>]*id="remove-platform-selected-btn"[^>]*>', html)
+    check(remove_button, "the toolbar has no Remove Platform button")
+    check("d-none" in remove_button.group(0), "the Remove Platform button is visible before anything is selected")
+    check("onclick=\"showBulkPlatformModal('remove')\"" in remove_button.group(0),
+          "the Remove Platform button does not open the modal in remove mode")
+    check('id="remove-platform-count"' in html, "the Remove Platform button has no count to update")
 
     # --- the modal: one chip per publish target, queue option, apply button --
     check('id="bulkPlatformModal"' in html, "the page has no bulk platform modal")
@@ -101,6 +108,17 @@ def section_wiring():
           "a connected platform is marked unconnected")
     check(re.search(r'id="bulk-platform-queue"[^>]*checked', html),
           "the queue option should start ticked: queueing is what was asked for")
+    modal_tag = re.search(r'<div[^>]*id="bulkPlatformModal"[^>]*>', html).group(0)
+    check('data-mode="add"' in modal_tag, "the modal does not start in add mode")
+    add_only = region(html, 'class="form-check mb-2 bulk-only-add"', 'id="bulk-platform-force"')
+    check('id="bulk-platform-queue"' in add_only, "the queue option is not confined to add mode")
+    check('id="bulk-platform-force"' in region(html, 'class="form-check mb-2 bulk-only-remove"', 'id="bulk-platform-summary"'),
+          "the queued-or-published option is not confined to remove mode")
+    check(not re.search(r'id="bulk-platform-force"[^>]*checked', html),
+          "removing queued or published posts must be opt-in, not ticked by default")
+    for rule in ('#bulkPlatformModal[data-mode="add"] .bulk-only-remove',
+                 '#bulkPlatformModal[data-mode="remove"] .bulk-only-add'):
+        check(rule in html, f"the stylesheet never hides the other mode's controls ({rule})")
     apply_button = re.search(r'<button[^>]*id="bulk-platform-apply-btn"[^>]*>', html)
     check(apply_button and 'onclick="applyBulkPlatform()"' in apply_button.group(0),
           "the modal's apply button is not bound to applyBulkPlatform()")
@@ -112,8 +130,11 @@ def section_wiring():
     check("/compose/posts/bulk-add-platform" in html, "no handler calls the bulk endpoint")
     apply_src = function_body(html, "applyBulkPlatform")
     for token in ("post_ids:", "filters: selectAllScope.filters", "targets: targets",
-                  "queue: queue", "render: true", "BULK_PLATFORM_BATCH"):
+                  "queue: queue", "force: force", "render: true", "BULK_PLATFORM_BATCH"):
         check(token in apply_src, f"applyBulkPlatform() never sends `{token}`")
+    check("/compose/posts/bulk-remove-platform" in html, "no handler calls the bulk remove endpoint")
+    check("This cannot be undone" in apply_src,
+          "an across-pages removal is not confirmed before it runs")
     check("selectAllScope" in function_body(html, "bulkPlatformCount"),
           "the count ignores an across-pages selection")
 
@@ -121,15 +142,30 @@ def section_wiring():
     toggle_src = function_body(html, "toggleSelectMode")
     check("add-platform-selected-btn" in toggle_src and "addPlatformBtn.classList.add('d-none')" in toggle_src,
           "leaving select mode does not hide the Add Platform button")
+    check("remove-platform-selected-btn" in toggle_src and "removePlatformBtn.classList.add('d-none')" in toggle_src,
+          "leaving select mode does not hide the Remove Platform button")
     count_src = function_body(html, "updateSelectedCount")
     check("addPlatformBtn.classList.remove('d-none')" in count_src,
           "a selection does not reveal the Add Platform button")
+    check("removePlatformBtn.classList.remove('d-none')" in count_src
+          and count_src.count("removePlatformBtn.classList.add('d-none')") >= 1,
+          "the Remove Platform button is not shown and hidden with the selection")
     check(count_src.count("addPlatformBtn.classList.add('d-none')") >= 1,
           "an empty selection does not hide the Add Platform button")
     remove_at = count_src.index("addPlatformBtn.classList.remove('d-none')")
     scoped_at = count_src.index("if (scoped) {")
     check(remove_at < scoped_at,
           "the Add Platform button is shown only for one selection kind: it must work for both")
+
+    # --- every element the feature's code reaches for exists on the page ------
+    # A getElementById that returns null throws on the next property read, which
+    # takes the whole modal down, and only when that branch runs.
+    bulk_js = html[html.index("// ============ Bulk: add or remove a platform"):
+                   html.index("// Bulk image operations")]
+    wanted = sorted(set(re.findall(r"getElementById\('([^']+)'\)", bulk_js)))
+    check(len(wanted) >= 10, f"only {len(wanted)} element ids found in the feature's code: the scan is broken")
+    absent = [i for i in wanted if f'id="{i}"' not in html]
+    check(not absent, f"the feature's code looks up elements the page does not have: {absent}")
 
     # --- one declaration per function, none shadowing an existing one ---------
     for name in FEATURE_FUNCTIONS:
@@ -142,8 +178,8 @@ def section_wiring():
     check('id="bulkPlatformModal"' in empty,
           "with no saved posts the modal is missing, and the page script would throw at parse time")
 
-    print(f"Add Platform: button, modal with {len(modal_chips)} account-aware chips, "
-          f"queue option and handlers are wired to /compose/posts/bulk-add-platform")
+    print(f"Add/Remove Platform: buttons, modal with {len(modal_chips)} account-aware chips, "
+          f"mode-specific options and handlers are wired to the bulk add and remove endpoints")
     print("BULK_PLATFORM_UI_OK")
 
 

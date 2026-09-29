@@ -343,6 +343,52 @@ class FacebookClient:
             logger.error("Facebook image post request failed: %s", e)
             return {"success": False, "error": {"message": str(e)}}
 
+    def publish_video_post(
+        self,
+        page_access_token: str,
+        page_id: str,
+        text: str,
+        video_url: str,
+    ) -> dict:
+        """Publish a video to a Facebook Page.
+
+        Hands Facebook the video's public URL (``file_url``) and lets it fetch
+        the file, which is limited to 1 GB and 20 minutes. There is no
+        text-only fallback: a video Facebook cannot fetch is a failed post.
+        """
+        try:
+            response = requests.post(
+                f"{GRAPH_API_BASE}/{page_id}/videos",
+                data={
+                    "file_url": video_url,
+                    "description": text,
+                    "access_token": page_access_token,
+                },
+                timeout=120,
+            )
+        except requests.RequestException as e:
+            logger.error("Facebook video post request failed: %s", e)
+            return {"success": False, "error": {"message": str(e)}}
+
+        data = _safe_json(response)
+        video_id = data.get("id") if isinstance(data, dict) else None
+        if response.status_code == 200 and video_id:
+            return {
+                "success": True,
+                "post_id": video_id,
+                "permalink": f"https://www.facebook.com/{page_id}/videos/{video_id}",
+                "status_code": response.status_code,
+            }
+        if response.status_code == 200:
+            return {
+                "success": False,
+                "status_code": response.status_code,
+                "error": {"message": "Facebook accepted the video but returned no video id"},
+            }
+
+        logger.error("Facebook video post failed: %s - %s", response.status_code, data)
+        return {"success": False, "status_code": response.status_code, "error": data}
+
     def publish_link_post(
         self,
         page_access_token: str,
@@ -426,12 +472,18 @@ class FacebookClient:
         page_id: str,
         text: str,
         image_url: str | None = None,
+        video_url: str | None = None,
     ) -> dict:
-        """Post to a Page, choosing text/image/link format automatically."""
+        """Post to a Page, choosing video/image/link/text format automatically.
+
+        A video wins over an image: the two never go out together.
+        """
         import re
         url_match = re.search(r'https?://[^\s<>"\')\]]+', text)
 
-        if image_url:
+        if video_url:
+            return self.publish_video_post(page_access_token, page_id, text, video_url)
+        elif image_url:
             return self.publish_image_post(page_access_token, page_id, text, image_url)
         elif url_match:
             return self.publish_link_post(page_access_token, page_id, text, url_match.group(0).rstrip(".,;:!?"))

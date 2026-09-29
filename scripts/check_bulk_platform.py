@@ -8,6 +8,8 @@ schema:
     python scripts/check_bulk_platform.py queue    BULK_QUEUE_OK
     python scripts/check_bulk_platform.py select   BULK_SELECT_OK
     python scripts/check_bulk_platform.py guard    SINGLE_CARD_GUARD_OK
+    python scripts/check_bulk_platform.py remove       BULK_REMOVE_OK
+    python scripts/check_bulk_platform.py removeselect BULK_REMOVE_SELECT_OK
 
 ``guard`` pins the behaviour of the single-card endpoints (tick a platform,
 queue a whole card) that the bulk endpoint shares code with, so it is written
@@ -27,6 +29,7 @@ from _accounts_gate import (  # noqa: E402
 )
 
 BULK = "/compose/posts/bulk-add-platform"
+BULK_REMOVE = "/compose/posts/bulk-remove-platform"
 IMAGE = "https://example.test/pic.jpg"
 
 
@@ -584,11 +587,255 @@ def section_select():
     print("BULK_SELECT_OK")
 
 
+
+# ===========================================================================
+# remove: take chosen targets off every selected card, safely
+# ===========================================================================
+def section_remove():
+    rig = Rig()
+    db, P = rig.database, rig.P
+    default_li = rig.accounts["linkedin"]
+
+    def remove(anchors, targets, **extra):
+        return rig.post({"post_ids": anchors, "targets": targets, **extra}, url=BULK_REMOVE)
+
+    def gone(row_id):
+        return db.get_standalone_post(row_id, db_path=P) is None
+
+    def orphans():
+        """Pending queue entries whose saved post no longer exists."""
+        return [s_ for s_ in rig.pending()
+                if s_["standalone_post_id"] and gone(s_["standalone_post_id"])]
+
+    A = rig.card("R-A", ["linkedin", "threads", "twitter"])
+    B = rig.card("R-B", ["linkedin", "threads"], image_url=None)
+    C = rig.card("R-C only", ["linkedin"])
+    cards_before = len(rig.cards())
+
+    # -- remove Threads from two cards: exactly those rows go, cards stay whole
+    status, res = remove([A["linkedin"], B["linkedin"], C["linkedin"]], ["threads"])
+    check(status == 200 and res.get("success"), f"bulk remove failed: {status} {trim(res)}")
+    check(res["cards"] == 3 and res["removed"] == 2 and res["absent"] == 1 and res["skipped_count"] == 0,
+          f"expected 2 removed, 1 card without Threads, no skips: {trim(res)}")
+    check(gone(A["threads"]) and gone(B["threads"]), "the Threads rows were not deleted")
+    check(not gone(A["linkedin"]) and not gone(A["twitter"]) and not gone(B["linkedin"]),
+          "a row that was not asked for was deleted")
+    check(rig.targets_of("R-A") == sorted([("linkedin", default_li), ("twitter", rig.accounts["twitter"])]),
+          f"card A does not have exactly LinkedIn and X left: {rig.targets_of('R-A')}")
+    check(len(rig.cards()) == cards_before, "removing a platform changed the number of cards")
+    check(all(len({(r["content"], r["image_url"]) for r in rig.rows_for(c)}) == 1
+              for c in ("R-A", "R-B", "R-C only")), "removing a platform split a card")
+
+    # -- the same request again removes nothing and says so
+    before = len(rig.rows())
+    status, res = remove([A["linkedin"], B["linkedin"], C["linkedin"]], ["threads"])
+    check(status == 200 and res["removed"] == 0 and res["absent"] == 3 and res["skipped_count"] == 0,
+          f"a repeat request was not a no-op: {trim(res)}")
+    check(len(rig.rows()) == before, "a repeat request deleted rows")
+
+    # -- a post's only platform is never removed: that would delete the post
+    status, res = remove([C["linkedin"]], ["linkedin"])
+    check(status == 200 and res["removed"] == 0 and res["skipped_count"] == 1
+          and res["skipped"][0]["code"] == "last", f"an only platform was not protected: {trim(res)}")
+    check(not gone(C["linkedin"]), "the post's only row was deleted")
+    check(rig.rows_for("R-C only")[0]["content"] == "R-C only", "the protected post lost its copy")
+
+    # -- asking for every platform of a card keeps the card whole, all reported
+    G = rig.card("R-G both", ["linkedin", "threads"])
+    status, res = remove([G["linkedin"]], ["linkedin", "threads"])
+    check(status == 200 and res["removed"] == 0 and res["skipped_count"] == 2
+          and {s_["code"] for s_ in res["skipped"]} == {"last"},
+          f"removing every platform of a card was not refused as a whole: {trim(res)}")
+    check(not gone(G["linkedin"]) and not gone(G["threads"]), "a card lost rows it should have kept")
+
+    # -- but two of three is fine
+    H = rig.card("R-H three", ["linkedin", "threads", "twitter"])
+    status, res = remove([H["linkedin"]], ["linkedin", "threads"])
+    check(status == 200 and res["removed"] == 2 and res["skipped_count"] == 0
+          and rig.targets_of("R-H three") == [("twitter", rig.accounts["twitter"])],
+          f"removing two of three platforms failed: {trim(res)}")
+
+    # -- a used row is just a row: used is not a queue state
+    F = rig.card("R-F used", ["linkedin", "twitter"])
+    db.mark_standalone_post_used(F["twitter"], True, db_path=P)
+    status, res = remove([F["linkedin"]], ["twitter"])
+    check(status == 200 and res["removed"] == 1 and gone(F["twitter"]), f"a used row was not removable: {trim(res)}")
+
+    # -- a queued row is kept unless the caller says to take it out of the queue
+    D = rig.card("R-D queued", ["linkedin", "threads"])
+    db.add_scheduled_post(scheduled_for="2099-01-01T09:00:00", post_type="standalone",
+                          standalone_post_id=D["threads"], platform="threads",
+                          account_id=rig.accounts["threads"], db_path=P)
+    status, res = remove([D["linkedin"]], ["threads"])
+    check(status == 200 and res["removed"] == 0 and res["skipped_count"] == 1
+          and res["skipped"][0]["code"] == "queued", f"a queued row was not kept: {trim(res)}")
+    check(not gone(D["threads"]) and len(rig.pending_for(D["threads"])) == 1,
+          "an unforced remove touched a queued row or its schedule")
+    status, res = remove([D["linkedin"]], ["threads"], force=True)
+    check(status == 200 and res["removed"] == 1 and res["unqueued"] == 1 and gone(D["threads"]),
+          f"a forced remove did not remove the queued row: {trim(res)}")
+    check(not orphans(), "a forced remove left a queue entry pointing at a deleted post")
+
+    # -- a published row is kept unless forced, and its history survives a forced remove
+    E = rig.card("R-E posted", ["linkedin", "threads"])
+    db.add_scheduled_post(scheduled_for="2020-01-01T09:00:00", post_type="standalone",
+                          standalone_post_id=E["threads"], platform="threads", status="posted",
+                          account_id=rig.accounts["threads"], db_path=P)
+    status, res = remove([E["linkedin"]], ["threads"])
+    check(status == 200 and res["removed"] == 0 and res["skipped"][0]["code"] == "published",
+          f"a published row was not kept: {trim(res)}")
+    check(not gone(E["threads"]), "an unforced remove deleted a published row")
+    status, res = remove([E["linkedin"]], ["threads"], force="true")
+    check(status == 200 and res["removed"] == 1 and gone(E["threads"]),
+          f"a forced remove (string flag) did not remove the published row: {trim(res)}")
+    history = [h for h in db.list_scheduled_posts(status="posted", db_path=P)
+               if h["standalone_post_id"] == E["threads"]]
+    check(len(history) == 1, "removing a published row erased its posting history")
+
+    # -- force never overrides the only-platform rule, and touches no queue entry
+    K = rig.card("R-K both queued", ["linkedin", "threads"])
+    for platform in ("linkedin", "threads"):
+        db.add_scheduled_post(scheduled_for="2099-02-01T09:00:00", post_type="standalone",
+                              standalone_post_id=K[platform], platform=platform,
+                              account_id=rig.accounts[platform], db_path=P)
+    status, res = remove([K["linkedin"]], ["linkedin", "threads"], force=True)
+    check(status == 200 and res["removed"] == 0 and res["unqueued"] == 0
+          and {s_["code"] for s_ in res["skipped"]} == {"last"},
+          f"force overrode the only-platform rule: {trim(res)}")
+    check(len(rig.pending_for(K["linkedin"])) == 1 and len(rig.pending_for(K["threads"])) == 1,
+          "a refused forced remove still took entries out of the queue")
+
+    # -- a kept (queued) row means the card is not emptied, so the rest can go
+    M = rig.card("R-M partly queued", ["linkedin", "threads"])
+    db.add_scheduled_post(scheduled_for="2099-03-01T09:00:00", post_type="standalone",
+                          standalone_post_id=M["linkedin"], platform="linkedin",
+                          account_id=default_li, db_path=P)
+    status, res = remove([M["linkedin"]], ["linkedin", "threads"])
+    check(status == 200 and res["removed"] == 1 and res["skipped_count"] == 1
+          and res["skipped"][0]["code"] == "queued" and gone(M["threads"]) and not gone(M["linkedin"]),
+          f"a card with one queued row could not shed its other platform: {trim(res)}")
+
+    # -- one account of two on a platform
+    studio = rig.studio
+    L = rig.card("R-L accounts", ["linkedin", ("linkedin", studio), "threads"])
+    status, res = remove([L["linkedin"]], [f"linkedin:{studio}"])
+    check(status == 200 and res["removed"] == 1 and gone(L[f"linkedin:{studio}"])
+          and not gone(L["linkedin"]), f"removing one LinkedIn account took the other: {trim(res)}")
+    per = by_target(res)[("linkedin", studio)]
+    check(per["removed"] == 1 and per["label"] == "Studio", f"per-target breakdown is wrong: {res['by_target']}")
+
+    # -- render hands back the redrawn cards for the changed ones only
+    N = rig.card("R-N render", ["linkedin", "threads"])
+    O = rig.card("R-O render", ["linkedin"])
+    status, res = remove([N["linkedin"], O["linkedin"]], ["threads"], render=True)
+    check(status == 200 and len(res["results"]) == 1, f"render should redraw only the changed card: {trim(res)}")
+    only = res["results"][0]
+    check(N["linkedin"] in only["anchor_ids"] and only["post_ids"] == [N["linkedin"]],
+          f"render result does not list the surviving rows: {only['post_ids']}")
+    check(f'data-post-ids="{N["linkedin"]}"' in only["html"] and "R-N render" in only["html"],
+          "render result is not the redrawn card")
+    status, res = remove([O["linkedin"]], ["threads"])
+    check("results" not in res, "render leaked into a request that did not ask")
+
+    check(not orphans(), "the run left queue entries pointing at deleted posts")
+    print("bulk remove: rows deleted per target, queued/published kept unless forced, an only platform never removed")
+    print("BULK_REMOVE_OK")
+
+
+# ===========================================================================
+# removeselect: which cards, and what is refused
+# ===========================================================================
+def section_removeselect():
+    rig = Rig()
+    X = rig.card("RS-X", ["linkedin", "threads"])
+    Y = rig.card("RS-Y", ["linkedin", "threads"])
+    Z = rig.card("RS-Z", ["linkedin", "threads"])
+
+    def remove(payload):
+        return rig.post(payload, url=BULK_REMOVE)
+
+    # A platform-filtered selection sends one row id per card, and it need not be
+    # the row being removed.
+    status, res = remove({"post_ids": [X["linkedin"], Y["threads"]], "targets": ["threads"]})
+    check(status == 200 and res["cards"] == 2 and res["removed"] == 2,
+          f"a one-row-per-card selection did not resolve to 2 cards: {status} {trim(res)}")
+    check([r["platform"] for r in rig.rows_for("RS-X")] == ["linkedin"]
+          and [r["platform"] for r in rig.rows_for("RS-Y")] == ["linkedin"],
+          "the wrong rows were removed")
+    check(sorted(r["platform"] for r in rig.rows_for("RS-Z")) == ["linkedin", "threads"],
+          "an unselected card was touched")
+
+    # Two rows of one card and a repeated id are one card, processed once.
+    status, res = remove({"post_ids": [Z["linkedin"], Z["threads"], Z["linkedin"]], "targets": ["twitter"]})
+    check(status == 200 and res["cards"] == 1 and res["absent"] == 1 and res["removed"] == 0,
+          f"one card selected by two rows was counted twice: {status} {trim(res)}")
+
+    # Stale ids beside real ones are ignored; only-stale is refused.
+    status, res = remove({"post_ids": [Z["linkedin"], 987654], "targets": ["threads"]})
+    check(status == 200 and res["cards"] == 1 and res["removed"] == 1,
+          f"a stale id beside a real one was not ignored: {status} {trim(res)}")
+    before = len(rig.rows())
+    status, res = remove({"post_ids": [987654, 987655], "targets": ["threads"]})
+    check(status == 400 and res.get("error"), f"an all-stale selection was not refused: {status} {res}")
+    check(len(rig.rows()) == before, "an all-stale selection deleted rows")
+
+    # Refusals delete nothing.
+    W = rig.card("RS-W", ["linkedin", "threads"])
+    before = len(rig.rows())
+    other_account = rig.accounts["threads"]
+    bad = [
+        ("no selection", {"targets": ["threads"]}),
+        ("empty ids", {"post_ids": [], "targets": ["threads"]}),
+        ("no targets", {"post_ids": [W["linkedin"]]}),
+        ("empty targets", {"post_ids": [W["linkedin"]], "targets": []}),
+        ("unknown platform", {"post_ids": [W["linkedin"]], "targets": ["myspace"]}),
+        ("another platform's account", {"post_ids": [W["linkedin"]],
+                                        "targets": [f"linkedin:{other_account}"]}),
+        ("one bad target among good ones", {"post_ids": [W["linkedin"]],
+                                            "targets": ["threads", "myspace"]}),
+        ("non-numeric ids", {"post_ids": ["abc"], "targets": ["threads"]}),
+        ("ids not a list", {"post_ids": "12", "targets": ["threads"]}),
+        ("filters not an object", {"filters": "unused", "targets": ["threads"]}),
+    ]
+    for name, payload in bad:
+        status, res = remove(payload)
+        check(status == 400 and res.get("error"), f"'{name}' was not refused with 400: {status} {res}")
+    check(len(rig.rows()) == before, "a refused request still deleted rows")
+    response = rig.client.post(BULK_REMOVE, data={"targets": "threads"})
+    check(response.status_code == 400, f"a form-encoded request did not answer 400: {response.status_code}")
+
+    # Every Rig repoints the app's default database at its own directory, so the
+    # earlier rig is finished with before this one is built.
+    rig2 = Rig()
+    db2, P2 = rig2.database, rig2.P
+    rig2.card("RF-1 unused", ["linkedin", "threads"])
+    rig2.card("RF-2 unused", ["linkedin", "threads"])
+    used = rig2.card("RF-3 used", ["linkedin", "threads"])
+    rig2.card("RF-4 linkedin only", ["linkedin"])
+    db2.mark_standalone_post_used(used["linkedin"], True, db_path=P2)
+    db2.mark_standalone_post_used(used["threads"], True, db_path=P2)
+
+    expected = {g["head"]["content"] for g in rig2.web._filtered_post_groups({"used": "unused"})[0]}
+    check(expected == {"RF-1 unused", "RF-2 unused", "RF-4 linkedin only"},
+          f"the filter bar's own answer is not what the seed implies: {expected}")
+    status, res = rig2.post({"filters": {"used": "unused"}, "targets": ["threads"]}, url=BULK_REMOVE)
+    check(status == 200 and res["cards"] == 3 and res["removed"] == 2 and res["absent"] == 1,
+          f"filters mode did not act on exactly the 3 unused cards: {status} {trim(res)}")
+    threads_left = {r["content"] for r in rig2.rows() if r["platform"] == "threads"}
+    check(threads_left == {"RF-3 used"}, f"filters mode removed Threads from the wrong cards: {threads_left}")
+    check("results" not in res, "filters mode rendered cards nobody asked for")
+
+    print("bulk remove resolves cards from ids and filters the way the page does, and refuses bad requests cleanly")
+    print("BULK_REMOVE_SELECT_OK")
+
+
 SECTIONS = {
     "guard": section_guard,
     "add": section_add,
     "queue": section_queue,
     "select": section_select,
+    "remove": section_remove,
+    "removeselect": section_removeselect,
 }
 
 if __name__ == "__main__":

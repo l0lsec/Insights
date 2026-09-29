@@ -1,0 +1,64 @@
+name: gates
+
+# Every completion gate, on every push to main and every pull request.
+#
+# The gates run against throwaway databases with faked platform clients, so this
+# needs no secrets and makes no network calls. All of the logic lives in
+# scripts/run_all_gates.py, which is also what to run locally, so what passes
+# here is what passes on a developer machine.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same ref makes an older run pointless.
+concurrency:
+  group: gates-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # The app generates an ephemeral key when this is unset and warns about it
+      # on every import. Nothing here reads it as a secret.
+      FLASK_SECRET_KEY: ci-only-not-a-secret
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # Two of the Compose gates run the page's JavaScript through node rather
+      # than only checking how it is written, so it has to be there. Named here
+      # instead of relying on whatever the runner image happens to ship.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # The video gates make a real MP4 with ffmpeg and read it back with
+      # ffprobe, so both have to be there rather than assumed from the image.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install dependencies
+        run: |
+          # mlx-whisper only installs on Apple Silicon and nothing the gates
+          # exercise calls it. Everything else is installed exactly as listed,
+          # so a dependency the app needs but requirements.txt omits fails here.
+          grep -v '^mlx-whisper' requirements.txt > "$RUNNER_TEMP/requirements-ci.txt"
+          python -m pip install --upgrade pip
+          pip install -r "$RUNNER_TEMP/requirements-ci.txt"
+
+      - name: Run every gate
+        run: python scripts/run_all_gates.py

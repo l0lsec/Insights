@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import logging
 import secrets
+import time
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from typing import Optional
@@ -12,6 +13,15 @@ from typing import Optional
 import requests
 
 logger = logging.getLogger(__name__)
+
+# Seam for tests: a gate replaces this so container polling does not really wait.
+_sleep = time.sleep
+
+# Threads processes a video for a while after the container is created (its own
+# guidance is "wait about 30 seconds"), so a video is polled far longer than the
+# 30 one-second checks an image gets: 2s * 150 = five minutes.
+VIDEO_POLL_INTERVAL = 2.0
+VIDEO_POLL_ATTEMPTS = 150
 
 # Threads API endpoints
 THREADS_AUTH_HOST = "https://www.threads.net"
@@ -401,23 +411,78 @@ class ThreadsClient:
         Returns:
             Dict with success status and post details
         """
-        import time
-
         # Truncate text if needed (Threads has 500 char limit)
         if len(text) > 500:
             text = text[:497] + "..."
             logger.warning("Threads post truncated to 500 characters")
 
-        params = {
-            "text": text,
-            "media_type": "IMAGE",
-            "image_url": image_url,
-            "access_token": access_token,
-        }
+        logger.info("Creating Threads image container with image: %s", image_url)
+        return self._publish_media_container(
+            access_token,
+            {
+                "text": text,
+                "media_type": "IMAGE",
+                "image_url": image_url,
+                "access_token": access_token,
+            },
+            label="Image",
+            # Image containers take longer to process than text
+            max_retries=30,
+            poll_interval=1.0,
+        )
 
+    def publish_video_post(
+        self,
+        access_token: str,
+        text: str,
+        video_url: str,
+        reply_control: str = "everyone",
+    ) -> dict:
+        """Publish a video post to Threads.
+
+        Threads fetches the video itself, so ``video_url`` must be publicly
+        reachable. Videos must be MP4 or MOV, up to 5 minutes and 1 GB.
+
+        Returns:
+            Dict with success status and post details. A video that Threads
+            cannot process is a failure; there is no text-only fallback.
+        """
+        if len(text) > 500:
+            text = text[:497] + "..."
+            logger.warning("Threads post truncated to 500 characters")
+
+        logger.info("Creating Threads video container with video: %s", video_url)
+        return self._publish_media_container(
+            access_token,
+            {
+                "text": text,
+                "media_type": "VIDEO",
+                "video_url": video_url,
+                "access_token": access_token,
+            },
+            label="Video",
+            max_retries=VIDEO_POLL_ATTEMPTS,
+            poll_interval=VIDEO_POLL_INTERVAL,
+        )
+
+    def _publish_media_container(
+        self,
+        access_token: str,
+        params: dict,
+        *,
+        label: str,
+        max_retries: int,
+        poll_interval: float,
+    ) -> dict:
+        """Create a media container, wait for FINISHED, then publish it.
+
+        The three-step Threads flow shared by image and video posts. ``label``
+        only words the error messages; ``max_retries`` and ``poll_interval``
+        are what differ, because a video takes far longer to process.
+        """
+        label_lower = label.lower()
         try:
-            # Step 1: Create media container with image
-            logger.info("Creating Threads image container with image: %s", image_url)
+            # Step 1: Create media container
             response = requests.post(
                 f"{THREADS_API_HOST}/me/threads",
                 params=params,
@@ -431,7 +496,8 @@ class ThreadsClient:
                 except Exception:
                     error_data = {"raw": response.text}
                 logger.error(
-                    "Threads image container creation failed: %s - %s",
+                    "Threads %s container creation failed: %s - %s",
+                    label_lower,
                     response.status_code,
                     error_data,
                 )
@@ -451,10 +517,6 @@ class ThreadsClient:
                 }
 
             # Step 2: Poll container status until FINISHED
-            # Image containers take longer to process than text
-            max_retries = 30  # More retries for image processing
-            poll_interval = 1.0  # seconds
-
             for attempt in range(max_retries):
                 status_params = {
                     "fields": "status,error_message",
@@ -471,40 +533,42 @@ class ThreadsClient:
                     container_status = status_data.get("status")
 
                     if container_status == "FINISHED":
-                        logger.debug("Image container %s is ready (attempt %d)", container_id, attempt + 1)
+                        logger.debug("%s container %s is ready (attempt %d)", label, container_id, attempt + 1)
                         break
                     elif container_status == "ERROR":
-                        error_msg = status_data.get("error_message", "Image container processing failed")
-                        logger.error("Image container %s failed: %s", container_id, error_msg)
+                        error_msg = status_data.get("error_message", f"{label} container processing failed")
+                        logger.error("%s container %s failed: %s", label, container_id, error_msg)
                         return {
                             "success": False,
                             "error": {"message": error_msg},
+                            # A file Threads has rejected will be rejected again.
+                            "guard_error": label == "Video",
                         }
                     elif container_status == "EXPIRED":
-                        logger.error("Image container %s expired", container_id)
+                        logger.error("%s container %s expired", label, container_id)
                         return {
                             "success": False,
                             "error": {"message": "Container expired before publishing"},
                         }
                     elif container_status == "PUBLISHED":
-                        logger.warning("Image container %s already published", container_id)
+                        logger.warning("%s container %s already published", label, container_id)
                         return {
                             "success": False,
                             "error": {"message": "Container already published"},
                         }
                     else:
                         # IN_PROGRESS or other status, wait and retry
-                        logger.debug("Image container %s status: %s, waiting...", container_id, container_status)
-                        time.sleep(poll_interval)
+                        logger.debug("%s container %s status: %s, waiting...", label, container_id, container_status)
+                        _sleep(poll_interval)
                 else:
-                    logger.warning("Failed to check image container status: %s", status_response.status_code)
-                    time.sleep(poll_interval)
+                    logger.warning("Failed to check %s container status: %s", label_lower, status_response.status_code)
+                    _sleep(poll_interval)
             else:
                 # Exhausted retries
-                logger.error("Image container %s not ready after %d attempts", container_id, max_retries)
+                logger.error("%s container %s not ready after %d attempts", label, container_id, max_retries)
                 return {
                     "success": False,
-                    "error": {"message": "Image processing timed out"},
+                    "error": {"message": f"{label} processing timed out"},
                 }
 
             # Step 3: Publish the container
@@ -558,7 +622,8 @@ class ThreadsClient:
                 except Exception:
                     error_data = {"raw": publish_response.text}
                 logger.error(
-                    "Threads image publish failed: %s - %s",
+                    "Threads %s publish failed: %s - %s",
+                    label_lower,
                     publish_response.status_code,
                     error_data,
                 )
@@ -569,7 +634,7 @@ class ThreadsClient:
                 }
 
         except requests.RequestException as e:
-            logger.error("Threads image API request failed: %s", e)
+            logger.error("Threads %s API request failed: %s", label_lower, e)
             return {
                 "success": False,
                 "error": {"message": str(e)},

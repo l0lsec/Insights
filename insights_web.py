@@ -125,6 +125,8 @@ from database import (
     get_social_account,
     set_default_social_account,
     set_social_account_label,
+    identity_in_use,
+    account_id_for_token,
     delete_social_account,
     resolve_account_id,
     count_social_accounts,
@@ -165,6 +167,7 @@ from database import (
     get_standalone_post,
     update_standalone_post,
     update_standalone_post_image,
+    update_standalone_post_video,
     update_social_post_image,
     set_standalone_post_media,
     set_standalone_post_user_tags,
@@ -180,6 +183,7 @@ from database import (
     update_url_source_last_used,
     update_url_source_content,
     # Standalone post scheduling
+    get_pending_schedule_ids_for_standalone_posts,
     get_pending_schedules_for_standalone_posts,
     get_posted_info_for_standalone_posts,
     # Uploaded images library
@@ -242,6 +246,7 @@ from database import (
     get_active_brief_run,
 )
 import social_publisher
+import video_media
 from social_publisher import (
     account_label,
     account_summary,
@@ -383,7 +388,8 @@ swagger = Swagger(app, config=swagger_config, template=swagger_template)
 # Configure image uploads
 UPLOAD_FOLDER = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'uploads')
 ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
-# Video uploads for Instagram Reels / video Stories / video carousel items.
+# Video uploads: a post's video on any platform, and Instagram Reels / video Stories
+# / video carousel items.
 ALLOWED_VIDEO_EXTENSIONS = {'mp4', 'mov'}
 MAX_IMAGE_BYTES = 16 * 1024 * 1024   # 16MB — enforced manually on the image path
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
@@ -1048,6 +1054,11 @@ def _assert_safe_url(url: str):
                 f"URL host {host!r} resolves to non-public address {ip_str}"
             )
     return parsed
+
+
+# LinkedIn and X make this server download a video before uploading it, so the
+# video downloader gets the same guard as every other user-influenced fetch.
+video_media.set_url_guard(_assert_safe_url)
 
 
 def _fetch_safely(
@@ -3192,6 +3203,15 @@ def _account_needs_attention(platform, summary):
     """
     if summary['status'] == 'expired':
         return 'Token expired, reconnect to keep posting'
+    if str(summary.get('external_id') or '').startswith('pending:'):
+        # The platform returned no identity for this login. It is connected but
+        # cannot be told apart from a second login until that is filled in.
+        return {
+            'linkedin': 'Needs its Member ID configured before it can post',
+            'facebook': 'Needs a Page selected before it can post',
+            'threads': 'Needs its User ID configured before it can post',
+            'instagram': 'Needs its User ID configured before it can post',
+        }.get(platform, 'The platform returned no profile, reconnect this account')
     token = None
     if platform == 'linkedin':
         token = get_linkedin_token(summary['id'])
@@ -3225,6 +3245,14 @@ def _accounts_payload():
         accounts = grouped.get(platform, [])
         for summary in accounts:
             summary['needs_attention'] = _account_needs_attention(platform, summary)
+            # Only the platforms with a configure screen can be fixed in place.
+            # The link names the account, because those screens act on the
+            # default account when they are not told which one.
+            summary['configure_url'] = (
+                url_for(f'{platform}_configure', account_id=summary['id'])
+                if summary['needs_attention'] and platform in
+                ('linkedin', 'facebook', 'threads', 'instagram') else None
+            )
         platforms.append({
             'platform': platform,
             'name': platform_name(platform),
@@ -3524,7 +3552,7 @@ def linkedin_callback():
             email = ''
         
         # Save token (with or without profile info)
-        save_linkedin_token(
+        token_row = save_linkedin_token(
             access_token=access_token,
             expires_at=expires_at,
             member_id=member_id,
@@ -3538,7 +3566,13 @@ def linkedin_callback():
         
         # If we couldn't get profile info, redirect to configuration page
         if not user_urn:
-            return redirect(url_for('linkedin_configure') + '?new=1')
+            # Name the account that just connected. Left out, the configure
+            # screen acts on the platform's default account, so with a second
+            # login it would write this person's Member ID onto the first one.
+            return redirect(url_for(
+                'linkedin_configure', new=1,
+                account_id=account_id_for_token('linkedin', token_row),
+            ))
         
         # Redirect to articles page with success message
         return _oauth_return_redirect(url_for('view_articles') + '?linkedin=connected')
@@ -3585,6 +3619,16 @@ def linkedin_configure():
                 is_new=request.args.get('new') == '1',
             )
         
+        # A real account cannot be moved onto another account's Member ID, so
+        # say so rather than reporting a generic failure.
+        if identity_in_use('linkedin', member_id, account_id=account_id):
+            return render_template(
+                'linkedin_configure.html',
+                token=token,
+                error="That Member ID already belongs to another connected LinkedIn account.",
+                is_new=request.args.get('new') == '1',
+            )
+
         # Update the token with the manual member ID
         success = update_linkedin_member_urn(
             member_id=member_id,
@@ -3820,6 +3864,13 @@ def threads_configure():
                 'threads_configure.html',
                 token=token,
                 error="User ID is required",
+            )
+
+        if identity_in_use('threads', user_id, account_id=account_id):
+            return render_template(
+                'threads_configure.html',
+                token=token,
+                error="That User ID already belongs to another connected Threads account.",
             )
 
         success = update_threads_user_info(
@@ -4066,6 +4117,13 @@ def instagram_configure():
                 error="User ID is required",
             )
 
+        if identity_in_use('instagram', ig_user_id or user_id, account_id=account_id):
+            return render_template(
+                'instagram_configure.html',
+                token=token,
+                error="That Instagram account is already connected.",
+            )
+
         success = update_instagram_user_info(
             user_id=user_id,
             username=username or None,
@@ -4220,7 +4278,7 @@ def facebook_callback():
         groups = client.get_user_groups(access_token)
         group_ids = ','.join(g['id'] for g in groups) if groups else None
 
-        save_facebook_token(
+        token_row = save_facebook_token(
             access_token=access_token,
             expires_at=expires_at,
             user_id=user_id,
@@ -4234,7 +4292,10 @@ def facebook_callback():
         app.logger.info("Facebook connected for user: %s", user_name)
 
         if pages and len(pages) > 1:
-            return redirect(url_for('facebook_configure') + '?new=1')
+            return redirect(url_for(
+                'facebook_configure', new=1,
+                account_id=account_id_for_token('facebook', token_row),
+            ))
 
         return _oauth_return_redirect(url_for('schedule_list') + '?facebook=connected')
 
@@ -4259,6 +4320,7 @@ def facebook_configure():
     # single account rather than the platform.
     account_id = request.args.get('account_id', type=int)
     token = get_facebook_token(account_id)
+    error = None
 
     if request.method == 'POST':
         if not token:
@@ -4267,23 +4329,27 @@ def facebook_configure():
         page_id = request.form.get('page_id', '').strip()
         group_ids = request.form.get('group_ids', '').strip()
 
-        if page_id:
-            client = get_facebook_client()
-            pages = client.get_user_pages(token['access_token'])
-            selected = next((p for p in pages if p['id'] == page_id), None)
-            if selected:
-                update_facebook_page_selection(
-                    page_id=selected['id'],
-                    page_name=selected['name'],
-                    page_access_token=selected['access_token'],
-                    account_id=account_id,
-                )
+        if page_id and identity_in_use('facebook', page_id, account_id=account_id):
+            # Two accounts on one Page would publish the same post twice.
+            error = "That Page is already connected as another Facebook account."
+        else:
+            if page_id:
+                client = get_facebook_client()
+                pages = client.get_user_pages(token['access_token'])
+                selected = next((p for p in pages if p['id'] == page_id), None)
+                if selected:
+                    update_facebook_page_selection(
+                        page_id=selected['id'],
+                        page_name=selected['name'],
+                        page_access_token=selected['access_token'],
+                        account_id=account_id,
+                    )
 
-        if group_ids is not None:
-            update_facebook_group_ids(group_ids, account_id=account_id)
+            if group_ids is not None:
+                update_facebook_group_ids(group_ids, account_id=account_id)
 
-        app.logger.info("Facebook page/group selection updated")
-        return redirect(url_for('schedule_list') + '?facebook=configured')
+            app.logger.info("Facebook page/group selection updated")
+            return redirect(url_for('schedule_list') + '?facebook=configured')
 
     pages = []
     groups = []
@@ -4297,6 +4363,7 @@ def facebook_configure():
         token=token,
         pages=pages,
         groups=groups,
+        error=error,
         is_new=request.args.get('new') == '1',
     )
 
@@ -4763,16 +4830,21 @@ def schedule_delete(scheduled_id: int):
 
 
 def _scheduled_post_content(post):
-    """The copy and image a queue entry will publish, or (None, None, error)."""
+    """The copy, image and video a queue entry will publish.
+
+    Returns ``(content, image_url, video_url, error)``; on failure the first
+    three are None. Only a saved Compose post can carry a video.
+    """
     if post['post_type'] == 'social' and post['social_content']:
         image = post['social_image_url'] if 'social_image_url' in post.keys() else None
-        return post['social_content'], image, None
+        return post['social_content'], image, None, None
     if post['post_type'] == 'standalone' and post['standalone_content']:
         image = post['standalone_image_url'] if 'standalone_image_url' in post.keys() else None
-        return post['standalone_content'], image, None
+        video = post['standalone_video_url'] if 'standalone_video_url' in post.keys() else None
+        return post['standalone_content'], image, video, None
     if post['post_type'] == 'article' and post['article_content']:
-        return f"{post['article_topic']}\n\n{post['article_content'][:2800]}", None, None
-    return None, None, 'No content found'
+        return f"{post['article_topic']}\n\n{post['article_content'][:2800]}", None, None, None
+    return None, None, None, 'No content found'
 
 
 def _publish_scheduled_entry(post):
@@ -4784,7 +4856,7 @@ def _publish_scheduled_entry(post):
     """
     platform = post['platform'] if 'platform' in post.keys() else 'linkedin'
     account_id = post['account_id'] if 'account_id' in post.keys() else None
-    content, image_url, error = _scheduled_post_content(post)
+    content, image_url, video_url, error = _scheduled_post_content(post)
     if error:
         return {"success": False, "platform": platform, "platform_name": platform_name(platform),
                 "account_id": account_id, "account_label": platform_name(platform),
@@ -4795,6 +4867,7 @@ def _publish_scheduled_entry(post):
         account_id,
         content=content,
         image_url=image_url,
+        video_url=video_url,
         standalone_post_id=post['standalone_post_id'],
         social_post_id=post['social_post_id'],
         # An article's topic becomes the link-preview title on LinkedIn.
@@ -5315,8 +5388,8 @@ def _group_standalone_posts(rows):
     row is what queueing, scheduling and publishing key on — so the card is a
     view over a set of rows, not a new kind of record.
 
-    Rows group when they share both the content and the image, capped at one row
-    per target: a deliberate repost (the importer's ``repost`` column writes a
+    Rows group when they share the content, the image and the video, capped at one
+    row per target: a deliberate repost (the importer's ``repost`` column writes a
     second identical row for the same target) opens its own card instead of
     disappearing into the first one.
 
@@ -5330,7 +5403,7 @@ def _group_standalone_posts(rows):
     groups = []
     by_key = {}
     for row in rows:
-        key = (row['content'] or '', row['image_url'] or '')
+        key = (row['content'] or '', row['image_url'] or '', _row_video(row))
         slot = _row_target_key(row)
         candidates = by_key.setdefault(key, [])
         for group in candidates:
@@ -5342,6 +5415,11 @@ def _group_standalone_posts(rows):
             groups.append(group)
             candidates.append(group)
     return groups
+
+
+def _row_video(row):
+    """A saved post row's video URL, or '' for one without (or from before videos)."""
+    return (row['video_url'] if 'video_url' in row.keys() else None) or ''
 
 
 def _row_target_key(row):
@@ -5526,6 +5604,7 @@ def _enrich_post_group(group, scheduled_info, posted_info, brief_names):
         'platforms': platforms,
         'content': primary['content'],
         'image_url': primary['image_url'],
+        'video_url': _row_video(primary) or None,
         # A card only reads as used once every platform it targets is done.
         'used': all(row['used'] for row in rows),
         'source_type': primary['source_type'],
@@ -6136,6 +6215,7 @@ def _queue_unscheduled_rows(platform, rows):
                 ig_post_type,
                 media_items,
                 standalone_post_id=pid,
+                video_url=post.get('video_url'),
             )
             if media_err:
                 skipped += 1
@@ -6778,6 +6858,10 @@ def compose_create_post():
     row per ticked target, which is exactly the set of rows the resulting card
     is a view over. Ticking two LinkedIn accounts and Threads writes three rows
     and posts the same copy to all three.
+
+    An optional ``video`` file or ``video_url`` is attached to every one of
+    those rows; ``video_warnings`` in the reply says what each platform will
+    make of it.
     """
     targets, target_errors = _requested_targets('targets')
     if not targets:
@@ -6800,6 +6884,13 @@ def compose_create_post():
     if not content:
         return jsonify({"error": "Content is required"}), 400
 
+    # Last, so a request that was going to be refused anyway never uploads a
+    # video; and before any row is written, so a video that cannot be used
+    # leaves no half-made post behind.
+    video_url, video_report, error = _requested_video()
+    if error:
+        return error
+
     post_ids = [
         add_standalone_post(
             source_type='manual',
@@ -6807,14 +6898,16 @@ def compose_create_post():
             platform=target['platform'],
             content=content,
             image_url=image_url,
+            video_url=video_url,
             account_id=target['account_id'],
         )
         for target in targets
     ]
 
-    if not image_url:
+    if not image_url and not video_url:
         # One fetch for the card, applied to every target's row, since rows with
-        # different images would stop being one card.
+        # different images would stop being one card. A card with a video posts
+        # the video, so there is no image worth fetching for it.
         _maybe_attach_link_image(post_ids[0], content, sibling_ids=post_ids[1:])
 
     return jsonify({
@@ -6824,11 +6917,13 @@ def compose_create_post():
             "platform": targets[0]['platform'],
             "content": content,
             "image_url": image_url,
+            "video_url": video_url,
         },
         "post_ids": post_ids,
         "platforms": [t['platform'] for t in targets],
         "targets": targets,
         "warnings": target_errors,
+        "video_warnings": video_report.get('warnings', []),
     })
 
 
@@ -6990,6 +7085,19 @@ def _apply_card_image(post, image_url):
     return [row['id'] for row in rows]
 
 
+def _apply_card_video(post, video_url):
+    """Set (or with None, clear) the video on every row of ``post``'s card.
+
+    The video is part of what groups a card's rows, just as the image is, so
+    attaching it to one platform's row alone would split the card in two.
+    Returns the ids written.
+    """
+    rows = _card_rows(post, _requested_post_ids(post['id']))
+    for row in rows:
+        update_standalone_post_video(row['id'], video_url)
+    return [row['id'] for row in rows]
+
+
 def _post_card_html(post_ids, display_index=None):
     """Render one Compose card for ``post_ids``, or '' if none of them survive.
 
@@ -7056,7 +7164,7 @@ def _find_target_row(rows, platform, account_id):
 
 
 def _copy_post_to_target(post, platform, account_id):
-    """Save ``post``'s copy, image and brief as a new row for one target.
+    """Save ``post``'s copy, image, video and brief as a new row for one target.
 
     This is what "also post it there" means in the database: the row per
     (platform, copy) is the only record that a card goes to that platform.
@@ -7068,6 +7176,7 @@ def _copy_post_to_target(post, platform, account_id):
         platform=platform,
         content=post['content'],
         image_url=post['image_url'],
+        video_url=_row_video(post) or None,
         brief_id=post['brief_id'] if 'brief_id' in post.keys() else None,
         brief_run_id=post['brief_run_id'] if 'brief_run_id' in post.keys() else None,
         account_id=account_id,
@@ -7234,6 +7343,29 @@ def _target_display_name(platform, account_id):
         or platform_name(platform)
 
 
+def _bulk_platform_request():
+    """Read the body the bulk add and remove endpoints share.
+
+    A JSON object naming the cards (``post_ids`` or ``filters``) and the targets
+    to change. Returns ``(payload, targets, groups, error)``, where ``error`` is
+    a ready-to-return response.
+    """
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return None, None, None, (jsonify({"error": "Send a JSON body"}), 400)
+
+    targets, errors = _requested_targets('targets')
+    if errors:
+        return None, None, None, (jsonify({"error": errors[0]}), 400)
+    if not targets:
+        return None, None, None, (jsonify({"error": "Choose at least one platform"}), 400)
+
+    groups, error = _selected_post_groups(payload)
+    if error:
+        return None, None, None, error
+    return payload, targets, groups, None
+
+
 @app.route('/compose/posts/bulk-add-platform', methods=['POST'])
 def compose_bulk_add_platform():
     """Give every selected card the chosen posting targets, optionally queueing them.
@@ -7256,17 +7388,7 @@ def compose_bulk_add_platform():
     ``render`` adds a freshly drawn card for every card that changed, so the page
     can swap them in without a reload.
     """
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return jsonify({"error": "Send a JSON body"}), 400
-
-    targets, errors = _requested_targets('targets')
-    if errors:
-        return jsonify({"error": errors[0]}), 400
-    if not targets:
-        return jsonify({"error": "Choose at least one platform"}), 400
-
-    groups, error = _selected_post_groups(payload)
+    payload, targets, groups, error = _bulk_platform_request()
     if error:
         return error
 
@@ -7362,6 +7484,120 @@ def compose_bulk_add_platform():
         "skipped": skipped,
         "skipped_count": skipped_count,
         "needs_image": needs_image,
+        "by_target": by_target,
+    }
+    if render:
+        reply["results"] = results
+    return jsonify(reply)
+
+
+@app.route('/compose/posts/bulk-remove-platform', methods=['POST'])
+def compose_bulk_remove_platform():
+    """Take the chosen posting targets off every selected card.
+
+    Body: ``{"post_ids": [...] | "filters": {...}, "targets": ["threads",
+    "linkedin:<account id>", ...], "force": bool, "render": bool}``.
+
+    The bulk form of unticking a chip: each matching row is deleted, and a card
+    that never went to a target is left alone and counted. Three things are kept
+    rather than removed, and reported per row with a ``code``:
+
+      ``queued``     the row is in the queue. ``force`` takes it out of the queue
+                     and removes it, as confirming the single-chip prompt does.
+      ``published``  the row has been posted. ``force`` removes it anyway; the
+                     posting history stays, and it is not unpublished.
+      ``last``       removing would leave the card with no platform at all, which
+                     deletes the post and its copy. ``force`` does not override
+                     this: Delete Selected is the action for that.
+
+    A card is judged as a whole, so asking for every one of its platforms keeps
+    all of them rather than removing whichever came first. As with adding, each
+    card is its own write and running the same request again is a no-op.
+
+    ``render`` adds a freshly drawn card for every card that changed.
+    """
+    payload, targets, groups, error = _bulk_platform_request()
+    if error:
+        return error
+
+    force = _search_flag(payload.get('force'))
+    render = _search_flag(payload.get('render'))
+
+    row_ids = [row['id'] for group in groups for row in group['platforms'].values()]
+    pending = get_pending_schedule_ids_for_standalone_posts(row_ids)
+    posted = get_posted_info_for_standalone_posts(row_ids)
+
+    by_target = [
+        {'platform': t['platform'], 'account_id': t['account_id'],
+         'label': _target_display_name(t['platform'], t['account_id']),
+         'removed': 0, 'absent': 0, 'skipped': 0}
+        for t in targets
+    ]
+    skipped = []
+    skipped_count = 0
+    unqueued = 0
+    results = []
+
+    def keep(stats, row, code, reason):
+        nonlocal skipped_count
+        stats['skipped'] += 1
+        skipped_count += 1
+        if len(skipped) < BULK_SKIP_LIST_LIMIT:
+            skipped.append({'post_id': row['id'], 'platform': row['platform'],
+                            'target': stats['label'], 'code': code, 'reason': reason})
+
+    for group in groups:
+        original_ids = [row['id'] for row in group['platforms'].values()]
+        card_rows = _ordered_group_rows(group)
+
+        going = []
+        for target, stats in zip(targets, by_target):
+            row = _find_target_row(card_rows, target['platform'], target['account_id'])
+            if row is None:
+                stats['absent'] += 1
+                continue
+            # Published wins over queued: a row can be both if it was posted and
+            # then queued again, and the published part is the one that cannot
+            # be undone.
+            if not force and posted.get(row['id']):
+                keep(stats, row, 'published', 'Already published')
+            elif not force and pending.get(row['id']):
+                keep(stats, row, 'queued', 'Queued')
+            else:
+                going.append((stats, row))
+
+        if not going:
+            continue
+        if len(going) == len(card_rows):
+            for stats, row in going:
+                keep(stats, row, 'last', "The post's only platform")
+            continue
+
+        going_ids = [row['id'] for _stats, row in going]
+        schedule_ids = [sid for rid in going_ids for sid in pending.get(rid, [])]
+        # The queue entries go first: deleting a post under a pending entry
+        # leaves an entry that would publish nothing.
+        unqueued += delete_scheduled_posts_bulk(schedule_ids)
+        delete_standalone_posts_bulk(going_ids)
+        for stats, _row in going:
+            stats['removed'] += 1
+
+        if render:
+            left = [row['id'] for row in card_rows if row['id'] not in going_ids]
+            results.append({
+                'anchor_ids': original_ids,
+                'post_ids': left,
+                'html': _post_card_html(left, group.get('display_index')),
+            })
+
+    reply = {
+        "success": True,
+        "cards": len(groups),
+        "removed": sum(t['removed'] for t in by_target),
+        "absent": sum(t['absent'] for t in by_target),
+        "unqueued": unqueued,
+        "skipped": skipped,
+        "skipped_count": skipped_count,
         "by_target": by_target,
     }
     if render:
@@ -7600,6 +7836,66 @@ def compose_update_post_image(post_id: int):
         "success": True,
         "image_url": image_url,
         "updated_ids": _apply_card_image(post, image_url),
+    })
+
+
+def _requested_video():
+    """The video a request carries, checked and ready to attach.
+
+    Reads an uploaded ``video`` file (put on Cloudinary) or a ``video_url``; an
+    empty ``video_url`` and no file means no video. Returns
+    ``(video_url, report, error_response)``: exactly one of ``error_response``
+    (a ready-to-return ``(json, status)``) or the first two is meaningful.
+    ``report`` is what the composer needs to judge the video: its size, its
+    duration when known, and the per-platform ``warnings``.
+    """
+    uploaded = request.files.get('video')
+    if uploaded is not None and uploaded.filename:
+        payload, error, status = _store_uploaded_video(uploaded)
+        if error:
+            return None, {}, (jsonify({"error": error}), status)
+        return payload['video_url'], {
+            key: payload[key] for key in ('size_bytes', 'duration', 'warnings')
+        }, None
+
+    video_url = request.form.get('video_url', '').strip() or None
+    if not video_url:
+        return None, {}, None
+    try:
+        video_url = video_media.check_url(video_url)
+    except video_media.VideoError as exc:
+        return None, {}, (jsonify({"error": str(exc)}), 400)
+    size = video_media.head_size(video_url)
+    return video_url, {
+        'size_bytes': size,
+        'duration': None,
+        'warnings': video_media.check_compat(size_bytes=size),
+    }, None
+
+
+@app.route('/compose/post/<int:post_id>/video', methods=['POST'])
+def compose_update_post_video(post_id: int):
+    """Attach, replace or clear a standalone post's video.
+
+    Takes a ``video_url`` (an empty one clears the video) or a ``video`` file to
+    upload. Applies to every row of the card, since the video is part of what
+    groups them. The reply carries ``warnings``: what each platform will make of
+    a video this size and length, so a problem shows when the video is attached
+    rather than when the post fails.
+    """
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    video_url, report, error = _requested_video()
+    if error:
+        return error
+
+    return jsonify({
+        "success": True,
+        "video_url": video_url,
+        "updated_ids": _apply_card_video(post, video_url),
+        **report,
     })
 
 
@@ -8074,19 +8370,25 @@ def _ensure_instagram_media(
     *,
     standalone_post_id: int | None = None,
     social_post_id: int | None = None,
+    video_url: str | None = None,
 ) -> tuple[list | None, str | None]:
     """Validate/prepare Instagram media by format. Returns (resolved_items, error).
 
     resolved_items is the list of {"url","kind"} to publish. error is set on failure.
     - feed: delegates to _ensure_instagram_image (stock auto-attach); 1 image.
+      A card that carries a video has nothing to look for: Instagram no longer
+      has feed video, so the video goes out as a Reel and resolves to it.
     - carousel: 2-10 items.
-    - reel: exactly one video item.
-    - story: exactly one media item (image or video).
+    - reel: exactly one video item (the card's video when the builder is empty).
+    - story: exactly one media item (the card's video when the builder is empty).
     """
     ig_post_type = ig_post_type or 'feed'
     items = [it for it in (media_items or []) if it]
+    card_video = [{"url": video_url, "kind": "video"}] if video_url else []
 
     if ig_post_type == 'feed':
+        if card_video:
+            return card_video, None
         url, err = _ensure_instagram_image(
             content, image_url,
             standalone_post_id=standalone_post_id, social_post_id=social_post_id,
@@ -8103,13 +8405,13 @@ def _ensure_instagram_media(
         return items, None
 
     if ig_post_type == 'reel':
-        videos = [it for it in items if it.get("kind") == "video" and it.get("url")]
+        videos = [it for it in items if it.get("kind") == "video" and it.get("url")] or card_video
         if len(videos) != 1:
             return None, "Instagram Reels require exactly one video. Attach a video and retry."
         return [videos[0]], None
 
     if ig_post_type == 'story':
-        valid = [it for it in items if it.get("url")]
+        valid = [it for it in items if it.get("url")] or card_video
         if len(valid) != 1:
             return None, "A story needs exactly one image or video. Attach one and retry."
         return [valid[0]], None
@@ -8124,6 +8426,7 @@ def _instagram_publish_for_post(
     image_url: str | None,
     standalone_post_id: int | None = None,
     social_post_id: int | None = None,
+    video_url: str | None = None,
 ) -> dict:
     """Publish an Instagram post honoring its media format (feed/carousel/reel/story).
 
@@ -8131,6 +8434,10 @@ def _instagram_publish_for_post(
     validates via _ensure_instagram_media, routes to the right client method, and
     returns the client result dict unchanged. On a validation failure the result
     carries ``guard_error: True`` so the worker can fail fast instead of retrying.
+
+    A card-level ``video_url`` publishes as a Reel when the format is still the
+    default feed; a format chosen on purpose (carousel, reel, story) is kept, and
+    a reel or story with an empty builder falls back to the card's video.
     """
     ig_post_type = 'feed'
     media_items: list = []
@@ -8139,6 +8446,7 @@ def _instagram_publish_for_post(
         row = get_standalone_post(standalone_post_id)
         if row:
             row = dict(row)
+            video_url = video_url or row.get('video_url')
             ig_post_type = row.get('ig_post_type') or 'feed'
             raw = row.get('media_items')
             if raw:
@@ -8156,12 +8464,16 @@ def _instagram_publish_for_post(
     resolved, err = _ensure_instagram_media(
         content, image_url, ig_post_type, media_items,
         standalone_post_id=standalone_post_id, social_post_id=social_post_id,
+        video_url=video_url,
     )
     if err:
         return {"success": False, "error": {"message": err}, "friendly": err, "guard_error": True}
 
     client = get_instagram_client()
     caption = (content or "")[:2200]
+
+    if ig_post_type == 'feed' and video_url:
+        return client.publish_reel_post(access_token, caption, resolved[0]["url"])
 
     if ig_post_type == 'carousel':
         return client.publish_carousel_post(access_token, caption, resolved)
@@ -8329,34 +8641,41 @@ def compose_upload_image():
     })
 
 
-@app.route('/compose/upload-video', methods=['POST'])
-def compose_upload_video():
-    """Upload a video for Instagram Reels / video Stories / video carousel items.
+def _store_uploaded_video(file):
+    """Validate an uploaded video and put it on Cloudinary.
 
-    Requires Cloudinary (Instagram's fetcher can't reach local /static/uploads in
-    most deploys). No transcoding — Instagram rejects wrong codec/aspect/duration,
-    surfaced back through the publish flow. For large files, paste a public URL
-    instead.
+    Returns ``(payload, error, status)``: ``payload`` on success, otherwise a
+    readable ``error`` and the HTTP status to send it with. The payload carries
+    what the composer needs to judge the video: its size and, when ffprobe is
+    installed, its duration, plus the per-platform ``warnings`` for both.
+
+    Requires Cloudinary (the platforms' fetchers can't reach local
+    /static/uploads in most deploys). No transcoding: a platform that rejects
+    the codec, shape or length says so through the publish flow. For large files,
+    paste a public URL instead.
     """
-    if 'video' not in request.files:
-        return jsonify({"error": "No video file provided"}), 400
-
-    file = request.files['video']
-    if file.filename == '':
-        return jsonify({"error": "No file selected"}), 400
-
     if not allowed_video_file(file.filename):
-        return jsonify({"error": f"Video type not allowed. Allowed types: {', '.join(ALLOWED_VIDEO_EXTENSIONS)}"}), 400
+        return None, f"Video type not allowed. Allowed types: {', '.join(sorted(ALLOWED_VIDEO_EXTENSIONS))}", 400
 
     if not CLOUDINARY_CONFIGURED:
-        return jsonify({
-            "error": "Video upload needs Cloudinary. Configure Cloudinary, or paste a "
-                     "public video URL instead.",
-        }), 400
+        return None, (
+            "Video upload needs Cloudinary. Configure Cloudinary, or paste a "
+            "public video URL instead."
+        ), 400
 
     video_bytes = file.read()
     if not video_bytes:
-        return jsonify({"error": "Empty video file"}), 400
+        return None, "Empty video file", 400
+
+    # Probe the local copy for its length (ffprobe, when installed) so the reply
+    # can warn about platforms it is too short or long for. It only warns: a
+    # video one platform refuses still goes out to the others.
+    duration = None
+    suffix = os.path.splitext(file.filename)[1].lower() or '.mp4'
+    with tempfile.NamedTemporaryFile(suffix=suffix) as probe_copy:
+        probe_copy.write(video_bytes)
+        probe_copy.flush()
+        duration = video_media.probe_file(probe_copy.name).get('duration')
 
     try:
         result = cloudinary.uploader.upload(
@@ -8366,25 +8685,44 @@ def compose_upload_video():
         )
     except Exception as e:
         app.logger.error("Cloudinary video upload failed: %s", str(e))
-        return jsonify({
-            "error": f"Video upload failed: {e}. Try a smaller/shorter clip or paste a public URL.",
-        }), 400
+        return None, (
+            f"Video upload failed: {e}. Try a smaller/shorter clip or paste a public URL."
+        ), 400
 
     video_url = result['secure_url']
     filename = result['public_id'].split('/')[-1]
+    size = result.get('bytes', len(video_bytes))
     add_uploaded_image(
         filename=filename,
         url=video_url,
         storage='cloudinary',
-        size=result.get('bytes', len(video_bytes)),
+        size=size,
         media_type='video',
     )
-    return jsonify({
-        "success": True,
+    return {
         "video_url": video_url,
         "filename": filename,
         "storage": "cloudinary",
-    })
+        "size_bytes": size,
+        "duration": duration,
+        "warnings": video_media.check_compat(size_bytes=size, duration_seconds=duration),
+    }, None, 200
+
+
+@app.route('/compose/upload-video', methods=['POST'])
+def compose_upload_video():
+    """Upload a video for a post, Instagram Reel, video Story or carousel item."""
+    if 'video' not in request.files:
+        return jsonify({"error": "No video file provided"}), 400
+
+    file = request.files['video']
+    if file.filename == '':
+        return jsonify({"error": "No file selected"}), 400
+
+    payload, error, status = _store_uploaded_video(file)
+    if error:
+        return jsonify({"error": error}), status
+    return jsonify({"success": True, **payload})
 
 
 def _load_image_for_fit(url: str) -> bytes:
@@ -8875,15 +9213,23 @@ def compose_annotate_media():
 
 @app.route('/compose/list-images', methods=['GET'])
 def compose_list_images():
-    """List all uploaded images from database and local folder."""
+    """List uploaded media from the database and local folder.
+
+    The library holds videos as well as images, so ``?type=`` picks which:
+    ``image`` (the default, which is what every image picker wants) or ``video``.
+    """
     from datetime import datetime as dt
-    
+
+    wanted = 'video' if request.args.get('type') == 'video' else 'image'
     images = []
     seen_urls = set()
     
     # First, get images from the database (includes Cloudinary images)
     db_images = list_uploaded_images()
     for img in db_images:
+        kind = (img['media_type'] if 'media_type' in img.keys() else None) or 'image'
+        if kind != wanted:
+            continue
         # Convert ISO datetime string to timestamp for consistent sorting
         created_at = img['created_at']
         try:
@@ -8902,12 +9248,13 @@ def compose_list_images():
             'storage': img['storage'],
             'created_at': created_at,
             'modified': timestamp,
+            'media_type': kind,
         })
         seen_urls.add(img['url'])
     
     # Also scan local uploads folder for any images not in database (backward compatibility)
     upload_dir = app.config['UPLOAD_FOLDER']
-    if os.path.exists(upload_dir):
+    if wanted == 'image' and os.path.exists(upload_dir):
         for filename in os.listdir(upload_dir):
             if allowed_file(filename):
                 local_url = f"/static/uploads/{filename}"
@@ -9089,6 +9436,7 @@ def _publish_standalone_row(post, account_id=None):
         account_id,
         content=row.get('content') or '',
         image_url=row.get('image_url'),
+        video_url=row.get('video_url'),
         standalone_post_id=row.get('id'),
     )
 
@@ -9153,6 +9501,7 @@ def _compose_publish_one(post_id, platform):
         account_id,
         content=row.get('content') or '',
         image_url=row.get('image_url'),
+        video_url=row.get('video_url'),
         standalone_post_id=post_id,
     )
     if result['success']:
@@ -9338,6 +9687,7 @@ def _queue_row(row, already, card_rows=None, no_slots=None):
             row['ig_post_type'] if 'ig_post_type' in row.keys() else None,
             _json_list_column(row, 'media_items'),
             standalone_post_id=row['id'],
+            video_url=_row_video(row) or None,
         )
         if media_err:
             return skip(media_err)
@@ -9456,6 +9806,7 @@ def compose_add_to_queue(post_id: int):
             ig_post_type,
             media_items,
             standalone_post_id=post_id,
+            video_url=_row_video(post) or None,
         )
         if media_err:
             return jsonify({"error": media_err}), 400
