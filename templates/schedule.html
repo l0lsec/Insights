@@ -609,6 +609,9 @@ th[onclick]:hover {
                             {% else %}
                             <span class="text-muted">No content preview</span>
                             {% endif %}
+                            {% if post.standalone_video_url %}
+                            <span class="badge bg-dark ms-1 video-badge" title="This post goes out with a video">🎬 Video</span>
+                            {% endif %}
                         </td>
                         <td>
                             {% if post.platform == 'linkedin' %}
@@ -1230,7 +1233,7 @@ function rebuildQueueTable(posts) {
                     ${post.posted_at ? `<br><small class="text-muted">Posted: ${post.posted_at}</small>` : ''}
                 </td>
                 <td>${typeBadge}</td>
-                <td class="description-cell" style="max-width: 300px;">${contentPreview}</td>
+                <td class="description-cell" style="max-width: 300px;">${contentPreview}${post.standalone_video_url ? ' <span class="badge bg-dark ms-1 video-badge" title="This post goes out with a video">🎬 Video</span>' : ''}</td>
                 <td>${platformBadge}</td>
                 <td>${getActionButtons(post)}</td>
             </tr>

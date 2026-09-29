@@ -177,8 +177,14 @@ def publish(
     social_post_id: int | None = None,
     article_title: str | None = None,
     db_path: str | None = None,
+    video_url: str | None = None,
 ) -> dict:
     """Publish one piece of copy to one account, in one normalized result.
+
+    A ``video_url`` makes it a video post on every platform (Instagram sends it
+    as a Reel) and the image, if any, is ignored. A video that cannot be
+    delivered fails the post; it is never quietly swapped for a text or image
+    post, because the copy was written to go with the video.
 
     Every step that can fail (no token, an expired token that will not refresh,
     the platform rejecting the post) comes back as ``success: False`` with a
@@ -208,16 +214,17 @@ def publish(
         return handler(
             resolved_id, account, text, image_url,
             standalone_post_id, social_post_id, article_title, db_path,
+            video_url,
         )
     except Exception as exc:  # noqa: BLE001 - a target's failure must not end the fan-out
         return _result(platform, resolved_id, account, False, error=str(exc))
 
 
-def publish_targets(targets, *, content, image_url=None, db_path=None) -> list[dict]:
+def publish_targets(targets, *, content, image_url=None, db_path=None, video_url=None) -> list[dict]:
     """Publish the same copy to several targets, reporting each one.
 
     ``targets`` are dicts of ``platform`` plus optionally ``account_id``,
-    ``standalone_post_id`` and ``social_post_id``. Nothing short-circuits: the
+    ``standalone_post_id``, ``social_post_id`` and a per-target ``video_url``. Nothing short-circuits: the
     caller gets one result per target, in order, so a partial success reads as a
     partial success instead of a single yes or no.
     """
@@ -228,6 +235,7 @@ def publish_targets(targets, *, content, image_url=None, db_path=None) -> list[d
             target.get("account_id"),
             content=target.get("content", content),
             image_url=target.get("image_url", image_url),
+            video_url=target.get("video_url", video_url),
             standalone_post_id=target.get("standalone_post_id"),
             social_post_id=target.get("social_post_id"),
             article_title=target.get("article_title"),
@@ -246,7 +254,7 @@ def publish_targets(targets, *, content, image_url=None, db_path=None) -> list[d
 
 
 def _linkedin(account_id, account, text, image_url, standalone_id, social_id,
-              article_title, db_path):
+              article_title, db_path, video_url=None):
     token = database.get_linkedin_token(account_id, db_path=db_path)
     if not token:
         return _result("linkedin", account_id, account, False,
@@ -277,7 +285,14 @@ def _linkedin(account_id, account, text, image_url, standalone_id, social_id,
                            error=f"LinkedIn token expired: {exc}", needs_reconnect=True)
 
     body = text[:CHAR_LIMITS["linkedin"]]
-    if image_url and not client.extract_first_url(body):
+    if video_url:
+        result = client.create_video_post(
+            access_token=token["access_token"],
+            author_urn=token["user_urn"],
+            text=body,
+            video_url=video_url,
+        )
+    elif image_url and not client.extract_first_url(body):
         result = client.create_image_post(
             access_token=token["access_token"],
             author_urn=token["user_urn"],
@@ -295,7 +310,7 @@ def _linkedin(account_id, account, text, image_url, standalone_id, social_id,
 
 
 def _threads(account_id, account, text, image_url, standalone_id, social_id,
-             article_title, db_path):
+             article_title, db_path, video_url=None):
     token = database.get_threads_token(account_id, db_path=db_path)
     if not token:
         return _result("threads", account_id, account, False,
@@ -317,7 +332,9 @@ def _threads(account_id, account, text, image_url, standalone_id, social_id,
                            error=f"Threads token expired: {exc}", needs_reconnect=True)
 
     body = text[:CHAR_LIMITS["threads"]]
-    if image_url:
+    if video_url:
+        result = client.publish_video_post(token["access_token"], body, video_url)
+    elif image_url:
         result = client.publish_image_post(token["access_token"], body, image_url)
     else:
         result = client.publish_text_post(token["access_token"], body)
@@ -325,7 +342,7 @@ def _threads(account_id, account, text, image_url, standalone_id, social_id,
 
 
 def _twitter(account_id, account, text, image_url, standalone_id, social_id,
-             article_title, db_path):
+             article_title, db_path, video_url=None):
     token = database.get_twitter_token(account_id, db_path=db_path)
     if not token:
         return _result("twitter", account_id, account, False,
@@ -352,7 +369,11 @@ def _twitter(account_id, account, text, image_url, standalone_id, social_id,
                            error=f"X/Twitter token expired: {exc}", needs_reconnect=True)
 
     body = text[:CHAR_LIMITS["twitter"]]
-    if image_url:
+    if video_url:
+        result = client.create_video_post(
+            access_token=token["access_token"], text=body, video_url=video_url,
+        )
+    elif image_url:
         result = client.create_image_post(
             access_token=token["access_token"], text=body, image_url=image_url,
         )
@@ -362,7 +383,7 @@ def _twitter(account_id, account, text, image_url, standalone_id, social_id,
 
 
 def _facebook(account_id, account, text, image_url, standalone_id, social_id,
-              article_title, db_path):
+              article_title, db_path, video_url=None):
     token = database.get_facebook_token(account_id, db_path=db_path)
     if not token:
         return _result("facebook", account_id, account, False,
@@ -378,17 +399,19 @@ def _facebook(account_id, account, text, image_url, standalone_id, social_id,
         database.set_social_account_status(account_id, "expired", db_path=db_path)
 
     client = get_facebook_client()
+    extra = {"video_url": video_url} if video_url else {}
     result = client.publish_smart_post(
         page_access_token=token["page_access_token"],
         page_id=token["page_id"],
         text=text[:CHAR_LIMITS["facebook"]],
         image_url=image_url,
+        **extra,
     )
     return _from_client("facebook", account_id, account, result)
 
 
 def _instagram(account_id, account, text, image_url, standalone_id, social_id,
-               article_title, db_path):
+               article_title, db_path, video_url=None):
     token = database.get_instagram_token(account_id, db_path=db_path)
     if not token:
         return _result("instagram", account_id, account, False,
@@ -411,13 +434,17 @@ def _instagram(account_id, account, text, image_url, standalone_id, social_id,
 
     caption = text[:CHAR_LIMITS["instagram"]]
     if _instagram_publisher is not None:
+        extra = {"video_url": video_url} if video_url else {}
         result = _instagram_publisher(
             token["access_token"],
             content=caption,
             image_url=image_url,
             standalone_post_id=standalone_id,
             social_post_id=social_id,
+            **extra,
         )
+    elif video_url:
+        result = client.publish_reel_post(token["access_token"], caption, video_url)
     elif image_url:
         result = client.publish_image_post(token["access_token"], caption, image_url)
     else:
@@ -440,7 +467,8 @@ def _from_client(platform, account_id, account, result, urn_key="permalink") -> 
 
     The five clients disagree on what they return, so this is the one place that
     knows a LinkedIn success carries a post URN while the rest carry a permalink,
-    and that Instagram attaches a friendlier message than its raw error.
+    that Instagram attaches a friendlier message than its raw error, and that a
+    client can flag a failure as one only reconnecting the account will fix.
     """
     if not result:
         return _result(platform, account_id, account, False,
@@ -457,6 +485,8 @@ def _from_client(platform, account_id, account, result, urn_key="permalink") -> 
         else:
             error = raw or "Unknown error"
     # Instagram's media guard rejects a post the platform was never going to
-    # accept, so retrying it just burns slots.
+    # accept, so retrying it just burns slots. A video the platform refused, or
+    # one X refused for a missing grant, is the same kind of failure.
     return _result(platform, account_id, account, False, error=str(error),
+                   needs_reconnect=bool(result.get("needs_reconnect")),
                    permanent=bool(result.get("guard_error")))

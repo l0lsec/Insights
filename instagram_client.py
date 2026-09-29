@@ -556,7 +556,8 @@ class InstagramClient:
         Args:
             access_token: Valid Instagram access token
             caption: The post caption (max 2200 characters)
-            video_url: Public URL of the video (MP4/MOV, H.264/AAC, ~90s)
+            video_url: Public URL of the video (MP4/MOV, H.264/AAC; Instagram enforces
+                its own length and size limits and reports a rejection)
             share_to_feed: Also show the reel on the main feed grid
 
         Returns:

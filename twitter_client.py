@@ -7,13 +7,19 @@ import hashlib
 import base64
 import logging
 import secrets
+import time
 from datetime import datetime, timedelta
 from urllib.parse import urlencode
 from typing import Optional
 
 import requests
 
+import video_media
+
 logger = logging.getLogger(__name__)
+
+# Seam for tests: a gate replaces this so status polling does not really wait.
+_sleep = time.sleep
 
 # X API v2 endpoints
 TWITTER_AUTH_URL = "https://x.com/i/oauth2/authorize"
@@ -22,10 +28,25 @@ TWITTER_USERS_ME_URL = "https://api.x.com/2/users/me"
 TWITTER_TWEETS_URL = "https://api.x.com/2/tweets"
 TWITTER_MEDIA_UPLOAD_URL = "https://api.x.com/2/media/upload"
 
+# media.write is what X's v2 media upload endpoint requires; without it an
+# uploaded image or video is refused, so it has to be part of the grant.
 TWITTER_SCOPES = os.environ.get(
     "TWITTER_SCOPES",
-    "tweet.read tweet.write users.read offline.access"
+    "tweet.read tweet.write users.read media.write offline.access"
 )
+
+# X takes a video in segments of at most 5 MB; stay a little under.
+VIDEO_SEGMENT_BYTES = 4 * 1024 * 1024
+# 2s * 180 = six minutes of waiting for X to finish processing a video.
+VIDEO_POLL_ATTEMPTS = 180
+VIDEO_POLL_MAX_WAIT = 15
+
+
+class MediaScopeError(video_media.VideoError):
+    """X refused the media upload because the connected login lacks media.write."""
+
+    def __init__(self, message: str):
+        super().__init__(message, permanent=True)
 
 
 def _generate_pkce_pair() -> tuple[str, str]:
@@ -291,8 +312,8 @@ class TwitterClient:
                 )
                 return None
 
+            media_id = _media_id(init_response.json())
             init_data = init_response.json()
-            media_id = init_data.get("media_id") or init_data.get("data", {}).get("media_id")
             if not media_id:
                 logger.error("No media_id in init response: %s", init_data)
                 return None
@@ -374,6 +395,168 @@ class TwitterClient:
             text=text,
             media_ids=[media_id],
         )
+
+
+    def upload_video(self, access_token: str, video_url: str) -> str:
+        """Upload a video through X's chunked media upload and return its media id.
+
+        Streams the file from disk in segments of at most 5 MB (initialize,
+        append each segment, finalize), then waits while X processes it. The
+        image upload above reads the whole file into memory, which is fine for
+        5 MB and not for a video.
+
+        Raises ``video_media.VideoError`` with a readable reason on any failure
+        (``MediaScopeError`` when the login lacks the media.write grant).
+        """
+        auth = {"Authorization": f"Bearer {access_token}"}
+        limits = video_media.PLATFORM_LIMITS["twitter"]
+        with video_media.downloaded(video_url, max_bytes=limits["max_bytes"]) as (path, size):
+            init = requests.post(
+                f"{TWITTER_MEDIA_UPLOAD_URL}/initialize",
+                json={
+                    "media_type": _video_mime(video_url),
+                    "total_bytes": size,
+                    "media_category": "tweet_video",
+                },
+                headers={**auth, "Content-Type": "application/json"},
+                timeout=30,
+            )
+            if init.status_code in (401, 403):
+                raise MediaScopeError(
+                    f"X refused the video upload ({init.status_code}). Reconnect X so it "
+                    "can grant the media.write permission, then try again."
+                )
+            if init.status_code not in (200, 201, 202):
+                raise video_media.VideoError(
+                    f"X would not start the video upload ({init.status_code}): "
+                    f"{_error_text(init)}",
+                    permanent=init.status_code in (400, 401),
+                )
+            media_id = _media_id(init.json())
+            if not media_id:
+                raise video_media.VideoError(
+                    "X's upload reply had no media id", permanent=False,
+                )
+
+            with open(path, "rb") as source:
+                index = 0
+                while True:
+                    chunk = source.read(VIDEO_SEGMENT_BYTES)
+                    if not chunk:
+                        break
+                    append = requests.post(
+                        f"{TWITTER_MEDIA_UPLOAD_URL}/{media_id}/append",
+                        files={"media": ("video", chunk, "application/octet-stream")},
+                        data={"segment_index": str(index)},
+                        headers=auth,
+                        timeout=120,
+                    )
+                    if append.status_code not in (200, 201, 202, 204):
+                        raise video_media.VideoError(
+                            f"X rejected segment {index + 1} of the video "
+                            f"({append.status_code}): {_error_text(append)}",
+                            permanent=False,
+                        )
+                    index += 1
+
+            final = requests.post(
+                f"{TWITTER_MEDIA_UPLOAD_URL}/{media_id}/finalize",
+                headers={**auth, "Content-Type": "application/json"},
+                timeout=60,
+            )
+            if final.status_code not in (200, 201, 202):
+                raise video_media.VideoError(
+                    f"X could not finalize the video ({final.status_code}): "
+                    f"{_error_text(final)}",
+                    permanent=False,
+                )
+            info = (final.json().get("data") or {}).get("processing_info")
+
+        self._wait_for_media(access_token, media_id, info)
+        return media_id
+
+    def _wait_for_media(self, access_token: str, media_id: str, info: dict | None) -> None:
+        """Poll X's media STATUS until processing succeeds, or raise why not.
+
+        ``info`` is the ``processing_info`` finalize returned; None means X had
+        nothing left to do and the media is already usable.
+        """
+        state = (info or {}).get("state")
+        for _attempt in range(VIDEO_POLL_ATTEMPTS):
+            if not info or state == "succeeded":
+                return
+            if state == "failed":
+                detail = (info.get("error") or {}).get("message") or "unsupported file"
+                raise video_media.VideoError(
+                    f"X could not process the video: {detail}", permanent=True,
+                )
+            _sleep(min(max(int(info.get("check_after_secs") or 1), 1), VIDEO_POLL_MAX_WAIT))
+            response = requests.get(
+                TWITTER_MEDIA_UPLOAD_URL,
+                params={"command": "STATUS", "media_id": media_id},
+                headers={"Authorization": f"Bearer {access_token}"},
+                timeout=30,
+            )
+            if response.status_code == 200:
+                info = (response.json().get("data") or {}).get("processing_info")
+                state = (info or {}).get("state")
+        raise video_media.VideoError(
+            "X was still processing the video after waiting; try again shortly",
+            permanent=False,
+        )
+
+    def create_video_post(
+        self,
+        access_token: str,
+        text: str,
+        video_url: str,
+    ) -> dict:
+        """Create a post with a video on X/Twitter.
+
+        Unlike ``create_image_post`` this never falls back to a text post when
+        the upload fails: the copy was written to go with a video, so the
+        failure is returned and nothing is posted.
+        """
+        try:
+            media_id = self.upload_video(access_token, video_url)
+        except MediaScopeError as exc:
+            logger.error("X video upload lacks media.write: %s", exc)
+            result = video_media.failure(str(exc), permanent=True)
+            result["needs_reconnect"] = True
+            return result
+        except video_media.VideoError as exc:
+            logger.error("X video upload failed: %s", exc)
+            return video_media.failure(str(exc), permanent=exc.permanent)
+        except requests.RequestException as exc:
+            logger.error("X video upload request failed: %s", exc)
+            return video_media.failure(f"X video upload failed: {exc}")
+
+        return self.create_post(access_token=access_token, text=text, media_ids=[media_id])
+
+
+def _media_id(data: dict) -> str | None:
+    """The media id from an upload reply, whichever shape carries it.
+
+    The v2 endpoint answers ``{"data": {"id": ...}}``; older replies put
+    ``media_id`` at the top or under ``data``.
+    """
+    inner = data.get("data") if isinstance(data.get("data"), dict) else {}
+    found = inner.get("id") or inner.get("media_id") or data.get("media_id") or data.get("id")
+    return str(found) if found else None
+
+
+def _video_mime(video_url: str) -> str:
+    path = video_url.split("?", 1)[0].lower()
+    return "video/quicktime" if path.endswith(".mov") else "video/mp4"
+
+
+def _error_text(response: requests.Response) -> str:
+    """A platform error as one short line, for a message a person will read."""
+    try:
+        data = response.json()
+    except Exception:
+        data = {"raw": response.text}
+    return str(data.get("detail") or data.get("title") or data.get("raw") or data)[:200]
 
 
 def get_twitter_client() -> TwitterClient:

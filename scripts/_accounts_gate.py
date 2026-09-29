@@ -65,6 +65,9 @@ class RecordingClient:
     def create_image_post(self, access_token, author_urn=None, text=None, image_url=None):
         return self._record("image", access_token, text=text, image=image_url)
 
+    def create_video_post(self, access_token, author_urn=None, text=None, video_url=None):
+        return self._record("video", access_token, text=text, video=video_url)
+
     # --- Threads --------------------------------------------------------
     def publish_text_post(self, access_token, text):
         return self._record("text", access_token, text=text)
@@ -72,13 +75,27 @@ class RecordingClient:
     def publish_image_post(self, access_token, text=None, image_url=None, user_tags=None):
         return self._record("image", access_token, text=text, image=image_url)
 
+    def publish_video_post(self, access_token, text=None, video_url=None):
+        return self._record("video", access_token, text=text, video=video_url)
+
     # --- X/Twitter ------------------------------------------------------
     def create_post(self, access_token, text):
         return self._record("text", access_token, text=text)
 
+    # (LinkedIn's create_video_post above has the same name and role; X's takes
+    # text and video_url only, which the keyword call from the publisher fits.)
+
     # --- Facebook -------------------------------------------------------
-    def publish_smart_post(self, page_access_token, page_id, text, image_url=None):
+    def publish_smart_post(self, page_access_token, page_id, text, image_url=None,
+                           video_url=None):
+        if video_url:
+            return self._record("video", page_access_token, page=page_id, text=text,
+                                video=video_url)
         return self._record("text", page_access_token, page=page_id, text=text)
+
+    # --- Instagram ------------------------------------------------------
+    def publish_reel_post(self, access_token, caption=None, video_url=None):
+        return self._record("video", access_token, text=caption, video=video_url)
 
 
 def isolated_app():
@@ -130,8 +147,9 @@ def install_fake_clients(publisher, web=None, **overrides):
     # helpers; the gates test account routing, not media validation.
     publisher.set_instagram_publisher(
         lambda token, content=None, image_url=None,
-        standalone_post_id=None, social_post_id=None:
-        clients["instagram"].publish_image_post(token, content, image_url)
+        standalone_post_id=None, social_post_id=None, video_url=None:
+        (clients["instagram"].publish_reel_post(token, content, video_url) if video_url
+         else clients["instagram"].publish_image_post(token, content, image_url))
     )
     if web is not None:
         web.PLATFORM_CLIENTS = {

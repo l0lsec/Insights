@@ -3144,6 +3144,157 @@ function savePostImageWithUrl(postId, imageUrl) {
     });
 }
 
+// Video attachment. A card has at most one video, stored on every row of the
+// card (the server applies it card-wide, like the image), and it is what gets
+// posted: Instagram sends it as a Reel and the image is not sent.
+let cachedVideos = null;
+
+function postVideoEls(postId) {
+    const el = (name) => document.getElementById(`${name}-${postId}`);
+    return {
+        section: el('video-section'), preview: el('video-preview'), note: el('video-note'),
+        warnings: el('video-warnings'), form: el('video-edit-form'), addBtn: el('add-video-btn'),
+        progress: el('video-progress'), urlInput: el('video-url-input'),
+        fileInput: el('video-file-input'), library: el('video-library'),
+    };
+}
+
+function editPostVideo(postId) {
+    const els = postVideoEls(postId);
+    if (!els.form) return;
+    if (els.fileInput) els.fileInput.value = '';
+    if (els.urlInput) els.urlInput.value = '';
+    els.form.classList.remove('d-none');
+    if (els.addBtn) els.addBtn.classList.add('d-none');
+    loadPostVideoLibrary(postId);
+}
+
+function cancelPostVideo(postId) {
+    const els = postVideoEls(postId);
+    if (!els.form) return;
+    els.form.classList.add('d-none');
+    if (els.progress) els.progress.classList.add('d-none');
+    if (els.addBtn && !els.section.dataset.videoUrl) els.addBtn.classList.remove('d-none');
+}
+
+function renderPostVideo(postId, videoUrl, warnings) {
+    const els = postVideoEls(postId);
+    if (!els.section) return;
+    els.section.dataset.videoUrl = videoUrl || '';
+    const player = els.preview.querySelector('video');
+    if (videoUrl) {
+        player.src = videoUrl;
+        els.preview.querySelector('span').textContent = videoUrl;
+    } else {
+        player.removeAttribute('src');
+        player.load();
+    }
+    els.preview.classList.toggle('d-none', !videoUrl);
+    els.preview.classList.toggle('d-flex', !!videoUrl);
+    els.note.classList.toggle('d-none', !videoUrl);
+    els.form.classList.add('d-none');
+    if (els.progress) els.progress.classList.add('d-none');
+    if (els.addBtn) els.addBtn.classList.toggle('d-none', !!videoUrl);
+    els.warnings.replaceChildren();
+    (warnings || []).forEach((w) => {
+        const li = document.createElement('li');
+        li.className = w.level === 'error' ? 'text-danger' : 'text-warning';
+        li.textContent = (w.level === 'error' ? '⛔ ' : '⚠️ ') + w.message;
+        els.warnings.appendChild(li);
+    });
+}
+
+function sendPostVideo(postId, body, doneMessage) {
+    body.append('post_ids', cardIdsParam(postId));
+    const els = postVideoEls(postId);
+    if (els.progress) els.progress.classList.remove('d-none');
+    return fetch(`/compose/post/${postId}/video`, { method: 'POST', body })
+        .then((response) => response.json().then((data) => ({ ok: response.ok, data })))
+        .then(({ ok, data }) => {
+            if (els.progress) els.progress.classList.add('d-none');
+            if (!ok || !data.success) {
+                showToast('Video: ' + (data.error || 'could not save'), 'error');
+                return false;
+            }
+            renderPostVideo(postId, data.video_url, data.warnings);
+            showToast(data.video_url ? doneMessage : 'Video removed!', 'success');
+            return true;
+        })
+        .catch((error) => {
+            if (els.progress) els.progress.classList.add('d-none');
+            showToast('Video: ' + error.message, 'error');
+            return false;
+        });
+}
+
+function savePostVideoUrl(postId) {
+    const url = postVideoEls(postId).urlInput.value.trim();
+    if (!url) {
+        showToast('Paste a video URL first', 'warning');
+        return;
+    }
+    const body = new FormData();
+    body.append('video_url', url);
+    sendPostVideo(postId, body, 'Video attached!');
+}
+
+function uploadPostVideo(postId, input) {
+    const file = input.files[0];
+    if (!file) return;
+    if (!/\.(mp4|mov)$/i.test(file.name)) {
+        showToast('Invalid file type. Please upload an MP4 or MOV video.', 'error');
+        input.value = '';
+        return;
+    }
+    if (file.size > 100 * 1024 * 1024) {
+        showToast('File too large. Uploads are limited to 100MB; paste a public URL for bigger videos.', 'error');
+        input.value = '';
+        return;
+    }
+    const body = new FormData();
+    body.append('video', file);
+    sendPostVideo(postId, body, 'Video uploaded and attached!').then((saved) => {
+        if (!saved) input.value = '';
+    });
+}
+
+function removePostVideo(postId) {
+    if (!confirm('Remove the video from this post?')) return;
+    const body = new FormData();
+    body.append('video_url', '');
+    sendPostVideo(postId, body, '');
+}
+
+function loadPostVideoLibrary(postId) {
+    const select = postVideoEls(postId).library;
+    if (!select || select.dataset.loaded) return;
+    const fill = (videos) => {
+        videos.forEach((v) => {
+            const option = document.createElement('option');
+            option.value = v.url;
+            option.textContent = v.filename || v.url;
+            select.appendChild(option);
+        });
+        select.dataset.loaded = '1';
+    };
+    if (cachedVideos) { fill(cachedVideos); return; }
+    fetch('/compose/list-images?type=video')
+        .then((response) => response.json())
+        .then((data) => {
+            cachedVideos = data.success ? data.images : [];
+            fill(cachedVideos);
+        })
+        .catch(() => {});
+}
+
+function pickPostVideoFromLibrary(postId, select) {
+    if (!select.value) return;
+    const body = new FormData();
+    body.append('video_url', select.value);
+    sendPostVideo(postId, body, 'Video attached!');
+    select.value = '';
+}
+
 function savePostEdit(postId) {
     const textarea = document.getElementById(`edit-textarea-${postId}`);
     const content = textarea.value.trim();

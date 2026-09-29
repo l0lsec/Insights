@@ -299,6 +299,10 @@ def init_db(db_path: str = DB_PATH) -> None:
         # when publishing Instagram feed photos (the API supports tags there only).
         if "ig_user_tags" not in standalone_columns:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN ig_user_tags TEXT")
+        # video_url is the post's one video, for every platform (Instagram sends
+        # it as a Reel). It is card-wide like image_url: the rows of a card share it.
+        if "video_url" not in standalone_columns:
+            conn.execute("ALTER TABLE standalone_posts ADD COLUMN video_url TEXT")
         # URL sources - stores extracted content from URLs for reuse
         conn.execute(
             """
@@ -2417,7 +2421,8 @@ def get_scheduled_post(scheduled_id: int, db_path: str = DB_PATH) -> Optional[sq
                    a.topic AS article_topic, a.content AS article_content,
                    a.episode_id,
                    st.content AS standalone_content, st.platform AS standalone_platform,
-                   st.image_url AS standalone_image_url
+                   st.image_url AS standalone_image_url,
+                   st.video_url AS standalone_video_url
             FROM scheduled_posts sp
             LEFT JOIN social_posts soc ON sp.social_post_id = soc.id
             LEFT JOIN articles a ON sp.article_id = a.id
@@ -2562,7 +2567,8 @@ def list_scheduled_posts(
                    soc.image_url AS social_image_url,
                    a.topic AS article_topic, a.content AS article_content,
                    st.content AS standalone_content, st.platform AS standalone_platform,
-                   st.image_url AS standalone_image_url
+                   st.image_url AS standalone_image_url,
+                   st.video_url AS standalone_video_url
             FROM scheduled_posts sp
             LEFT JOIN social_posts soc ON sp.social_post_id = soc.id
             LEFT JOIN articles a ON sp.article_id = a.id
@@ -2608,7 +2614,8 @@ def get_pending_scheduled_posts(db_path: str = DB_PATH) -> List[sqlite3.Row]:
                    a.topic AS article_topic, a.content AS article_content,
                    a.episode_id,
                    st.content AS standalone_content, st.platform AS standalone_platform,
-                   st.image_url AS standalone_image_url
+                   st.image_url AS standalone_image_url,
+                   st.video_url AS standalone_video_url
             FROM scheduled_posts sp
             LEFT JOIN social_posts soc ON sp.social_post_id = soc.id
             LEFT JOIN articles a ON sp.article_id = a.id
@@ -3364,6 +3371,7 @@ def add_standalone_post(
     brief_id: Optional[int] = None,
     brief_run_id: Optional[int] = None,
     account_id: Optional[int] = None,
+    video_url: Optional[str] = None,
 ) -> int:
     """Save a standalone post (not tied to an article) and return its id.
     
@@ -3373,6 +3381,8 @@ def add_standalone_post(
         platform: Target platform (e.g., 'linkedin', 'threads', 'twitter')
         content: The generated post content
         image_url: Optional URL of an image to attach to the post
+        video_url: Optional URL of a video to attach. A post with a video
+            publishes the video and ignores the image.
         repost: If True, marks this as an intentional duplicate that bypassed
             the import-time duplicate check so the same content can be posted
             again.
@@ -3390,10 +3400,10 @@ def add_standalone_post(
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
             """
-            INSERT INTO standalone_posts (source_type, source_content, platform, content, image_url, created_at, used, repost, brief_id, brief_run_id, account_id)
-            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+            INSERT INTO standalone_posts (source_type, source_content, platform, content, image_url, created_at, used, repost, brief_id, brief_run_id, account_id, video_url)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
             """,
-            (source_type, source_content, platform, content, image_url, created_at, 1 if repost else 0, brief_id, brief_run_id, account_id),
+            (source_type, source_content, platform, content, image_url, created_at, 1 if repost else 0, brief_id, brief_run_id, account_id, video_url),
         )
         conn.commit()
         return cur.lastrowid
@@ -3613,6 +3623,25 @@ def update_standalone_post_image(
         conn.execute(
             "UPDATE standalone_posts SET image_url = ? WHERE id = ?",
             (image_url, post_id),
+        )
+        conn.commit()
+
+
+def update_standalone_post_video(
+    post_id: int,
+    video_url: Optional[str],
+    db_path: str = DB_PATH,
+) -> None:
+    """Set (or with None, clear) the video of a standalone post.
+
+    Args:
+        post_id: The post ID
+        video_url: Public URL of the video, or None to remove it
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE standalone_posts SET video_url = ? WHERE id = ?",
+            (video_url, post_id),
         )
         conn.commit()
 

@@ -68,9 +68,10 @@ Catalogue a large media archive and sort it by **year** and **category** — bui
 
 #### Publishing & Scheduling
 - **LinkedIn Integration** - OAuth-based posting with rich link previews and image support
-- **Threads Integration** - OAuth-based posting with text and image support
-- **Facebook Integration** - OAuth-based posting to Facebook Pages with text and image support
-- **X/Twitter Integration** - OAuth 2.0 with PKCE for posting text and images (pay-per-use media uploads)
+- **Video Posts** - Attach one video to a Compose card and it publishes natively to every platform on the card: LinkedIn, X, Threads and Facebook as a video post, Instagram as a Reel. Works from Post now, the whole-card publish and the schedule queue. A video that can't be delivered fails the post with a reason instead of quietly sending the text or image alone. See [Posting videos](#posting-videos)
+- **Threads Integration** - OAuth-based posting with text, image and video support
+- **Facebook Integration** - OAuth-based posting to Facebook Pages with text, image and video support
+- **X/Twitter Integration** - OAuth 2.0 with PKCE for posting text, images and videos (pay-per-use media uploads)
 - **Instagram Integration** - OAuth-based publishing of feed posts, **carousels** (2–10 images/videos), **Reels**, and **Stories** (image or video). Requires a professional (Business/Creator) account
 - **Time Slot Management** - Configure recurring posting times by day of week and platform
 - **Auto-Queue** - Posts automatically slot into the next available time
@@ -588,7 +589,7 @@ Posts containing URLs automatically include rich link previews with title, descr
 4. Set `FACEBOOK_APP_ID`, `FACEBOOK_APP_SECRET`, and `FACEBOOK_REDIRECT_URI` in your `.env`
 5. Click **Connect Facebook** in the web UI and authorize the Page you want to post to
 
-Posts are published to the selected Facebook Page with text and optional image attachments.
+Posts are published to the selected Facebook Page with text and an optional image or video attachment.
 
 ### Posting to X/Twitter
 
@@ -596,11 +597,32 @@ Posts are published to the selected Facebook Page with text and optional image a
 
 1. Create a project and app at the [X Developer Portal](https://developer.x.com/)
 2. Enable **OAuth 2.0** with the **PKCE** type and set the callback URL to `http://localhost:5001/twitter/callback`
-3. Request at minimum the `tweet.read`, `tweet.write`, `users.read`, and `offline.access` scopes
+3. Request at minimum the `tweet.read`, `tweet.write`, `users.read`, `media.write`, and `offline.access` scopes (`media.write` is what image and video uploads need)
 4. Set `TWITTER_CLIENT_ID`, `TWITTER_CLIENT_SECRET`, and `TWITTER_REDIRECT_URI` in your `.env`
 5. Click **Connect X** in the web UI
 
 X/Twitter uses the v2 API with pay-per-use pricing. Text posts cost $0.01 each. Image uploads use the chunked media upload endpoint (max 5 MB per image).
+
+> The default scopes now include `media.write`, which X's v2 media upload endpoint requires for images and videos alike. A login connected before this was added has to be **connected again** once (Accounts → Connect on X; signing in as the same login updates its token in place); until then a video post fails with a message saying so.
+
+### Posting videos
+
+Every Compose card has a **🎬 Add Video** control under the image. Upload an MP4/MOV (up to 100 MB, needs Cloudinary), paste a public video URL, or pick one you uploaded before. The video is stored on every row of the card, so it follows the card when you tick another platform or use **Add Platform** in bulk.
+
+| Platform | How the video is sent | Documented limits |
+|----------|----------------------|-------------------|
+| LinkedIn | Videos API: 4 MB parts uploaded with ETags, finalized, then the post is created once the video is `AVAILABLE` | 3 s – 30 min, ≤ 500 MB, MP4 |
+| X | Chunked media upload (`tweet_video`, segments ≤ 5 MB) and a wait for processing | 140 s without Premium, ≤ 1 GB here |
+| Threads | `VIDEO` container, polled until `FINISHED`, then published | ≤ 5 min, ≤ 1 GB, MP4/MOV |
+| Facebook | Page `/videos` edge by `file_url`, caption as the description | ≤ 20 min, ≤ 1 GB |
+| Instagram | Published as a **Reel** (a format you chose on purpose — carousel, story — is kept) | 3 s – 15 min |
+
+- **The video replaces the image.** A card with a video posts the video; its image is not sent.
+- **No silent downgrade.** If a video can't be uploaded, processed or fetched, that target fails with the platform's reason. Image posts still fall back to text; video posts never do, because the copy was written to go with the video.
+- **Warnings when you attach.** Size and, for uploads, length are checked against each platform's limits and shown under the card (red = will be refused, amber = may be). Platform limits change, so the platform has the last word.
+- **LinkedIn and X download the video first** (they need the bytes), through the same SSRF-hardened fetch as the rest of the app and streamed to a temp file capped at 1 GB. Threads, Facebook and Instagram fetch the URL themselves, so it must be publicly reachable.
+- **Long videos take a while.** A video post can wait several minutes for the platform to process it, so "Post now" on a long clip is slow; queueing it avoids waiting in the browser.
+- Verify with `python scripts/check_video.py <section>` (see the file for the sections) and `python scripts/check_video_regressions.py`. They use fake platform clients, so they never post anywhere.
 
 ### Posting to Instagram
 
