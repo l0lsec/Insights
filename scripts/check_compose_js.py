@@ -2,6 +2,7 @@
 
     python scripts/check_compose_js.py duplicates   COMPOSE_JS_NO_DUPES_OK
     python scripts/check_compose_js.py refreshcard  REFRESH_CARD_OK
+    python scripts/check_compose_js.py totals       BULK_TOTALS_OK
 
 The page's inline scripts share one global scope, so two top-level declarations
 of the same function name are not an error: the later one silently replaces the
@@ -201,7 +202,96 @@ def section_refreshcard():
     print("REFRESH_CARD_OK")
 
 
-SECTIONS = {"duplicates": section_duplicates, "refreshcard": section_refreshcard}
+
+# The bulk run sums one reply per batch, in either direction, so the summing has
+# to be right for both shapes of reply and must never add up an identity field.
+TOTALS_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+const ctx = {};
+vm.createContext(ctx);
+vm.runInContext(fs.readFileSync(process.argv[2], 'utf8'), ctx);
+
+const add1 = { cards: 25, added: 30, already: 2, queued: 28, already_queued: 1, skipped_count: 2, needs_image: 3,
+  skipped: [{ target: 'Facebook', reason: 'No slot' }],
+  by_target: [{ platform: 'linkedin', account_id: 7, label: 'Studio', added: 25, already: 0, queued: 25, already_queued: 0, skipped: 0 },
+              { platform: 'facebook', account_id: null, label: 'Facebook', added: 5, already: 2, queued: 3, already_queued: 1, skipped: 2 }] };
+const add2 = { cards: 3, added: 3, already: 0, queued: 3, already_queued: 0, skipped_count: 0, needs_image: 0, skipped: [],
+  by_target: [{ platform: 'linkedin', account_id: 7, label: 'Studio', added: 3, already: 0, queued: 3, already_queued: 0, skipped: 0 }] };
+const rem1 = { cards: 25, removed: 20, absent: 5, unqueued: 4, skipped_count: 1, skipped: [{ target: 'X', code: 'queued', reason: 'Queued' }],
+  by_target: [{ platform: 'twitter', account_id: 3, label: 'X', removed: 20, absent: 5, skipped: 1 }] };
+const rem2 = { cards: 3, removed: 3, absent: 0, unqueued: 0, skipped_count: 0, skipped: [],
+  by_target: [{ platform: 'twitter', account_id: 3, label: 'X', removed: 3, absent: 0, skipped: 0 }] };
+
+const added = ctx.newBulkPlatformTotals();
+ctx.mergeBulkPlatformTotals(added, add1);
+ctx.mergeBulkPlatformTotals(added, add2);
+const removed = ctx.newBulkPlatformTotals();
+ctx.mergeBulkPlatformTotals(removed, rem1);
+ctx.mergeBulkPlatformTotals(removed, rem2);
+const fresh = ctx.newBulkPlatformTotals();
+const again = ctx.newBulkPlatformTotals();
+ctx.mergeBulkPlatformTotals(again, add2);
+console.log(JSON.stringify({ added, removed, fresh, again, sourceUntouched: add2.by_target[0].added }));
+"""
+
+
+def section_totals():
+    node = shutil.which("node")
+    check(node, "node is required for this gate and was not found on PATH")
+    source = "\n".join(rendered_scripts())
+    lifted = []
+    for name in ("newBulkPlatformTotals", "mergeBulkPlatformTotals"):
+        check(len(re.findall(rf"^function {name}\(", source, re.M)) == 1,
+              f"{name} is not declared exactly once")
+        match = re.search(rf"^function {name}\(.*?^\}}\n", source, re.M | re.S)
+        check(match, f"could not lift {name} out of the page")
+        lifted.append(match.group(0))
+
+    work = tempfile.mkdtemp(prefix="bulk_totals_")
+    try:
+        fn_path = os.path.join(work, "totals.js")
+        harness_path = os.path.join(work, "harness.js")
+        with open(fn_path, "w", encoding="utf-8") as handle:
+            handle.write("\n".join(lifted))
+        with open(harness_path, "w", encoding="utf-8") as handle:
+            handle.write(TOTALS_HARNESS)
+        run = subprocess.run([node, harness_path, fn_path], capture_output=True, text=True, timeout=60)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+    check(run.returncode == 0, f"the harness crashed:\n{run.stderr.strip()[:600]}")
+    out = json.loads(run.stdout.strip().splitlines()[-1])
+
+    added, removed = out["added"], out["removed"]
+    check((added["cards"], added["added"], added["already"], added["queued"], added["already_queued"],
+           added["skipped_count"], added["needs_image"]) == (28, 33, 2, 31, 1, 2, 3),
+          f"two add batches did not sum: {added}")
+    check(len(added["by_target"]) == 2 and len(added["skipped"]) == 1, f"add targets or skips wrong: {added}")
+    studio = next(t for t in added["by_target"] if t["platform"] == "linkedin")
+    check((studio["added"], studio["queued"]) == (28, 28) and studio["account_id"] == 7
+          and studio["label"] == "Studio",
+          f"a target's counts were not summed across batches, or its identity was: {studio}")
+    facebook = next(t for t in added["by_target"] if t["platform"] == "facebook")
+    check(facebook["account_id"] is None, f"a null account id was turned into a count: {facebook}")
+
+    check((removed["cards"], removed["removed"], removed["absent"], removed["unqueued"],
+           removed["skipped_count"]) == (28, 23, 5, 4, 1), f"two remove batches did not sum: {removed}")
+    x = removed["by_target"][0]
+    check((x["removed"], x["absent"], x["skipped"], x["account_id"]) == (23, 5, 1, 3),
+          f"a remove target was not summed correctly: {x}")
+    check("added" not in removed and "removed" not in added,
+          "a run picked up counts that belong to the other direction")
+
+    check(out["fresh"] == {"skipped": [], "by_target": []}, f"a fresh total is not empty: {out['fresh']}")
+    check(out["sourceUntouched"] == 3, "merging changed the server's reply instead of copying from it")
+    check(out["again"]["by_target"][0]["added"] == 3, "a merge into a fresh total did not copy the counts")
+
+    print("bulk totals sum across batches for both directions and never sum an identity field")
+    print("BULK_TOTALS_OK")
+
+
+SECTIONS = {"duplicates": section_duplicates, "refreshcard": section_refreshcard,
+            "totals": section_totals}
 
 if __name__ == "__main__":
     name = sys.argv[1] if len(sys.argv) > 1 else ""

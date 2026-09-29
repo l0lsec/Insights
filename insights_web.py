@@ -180,6 +180,7 @@ from database import (
     update_url_source_last_used,
     update_url_source_content,
     # Standalone post scheduling
+    get_pending_schedule_ids_for_standalone_posts,
     get_pending_schedules_for_standalone_posts,
     get_posted_info_for_standalone_posts,
     # Uploaded images library
@@ -7234,6 +7235,29 @@ def _target_display_name(platform, account_id):
         or platform_name(platform)
 
 
+def _bulk_platform_request():
+    """Read the body the bulk add and remove endpoints share.
+
+    A JSON object naming the cards (``post_ids`` or ``filters``) and the targets
+    to change. Returns ``(payload, targets, groups, error)``, where ``error`` is
+    a ready-to-return response.
+    """
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return None, None, None, (jsonify({"error": "Send a JSON body"}), 400)
+
+    targets, errors = _requested_targets('targets')
+    if errors:
+        return None, None, None, (jsonify({"error": errors[0]}), 400)
+    if not targets:
+        return None, None, None, (jsonify({"error": "Choose at least one platform"}), 400)
+
+    groups, error = _selected_post_groups(payload)
+    if error:
+        return None, None, None, error
+    return payload, targets, groups, None
+
+
 @app.route('/compose/posts/bulk-add-platform', methods=['POST'])
 def compose_bulk_add_platform():
     """Give every selected card the chosen posting targets, optionally queueing them.
@@ -7256,17 +7280,7 @@ def compose_bulk_add_platform():
     ``render`` adds a freshly drawn card for every card that changed, so the page
     can swap them in without a reload.
     """
-    payload = request.get_json(silent=True)
-    if not isinstance(payload, dict):
-        return jsonify({"error": "Send a JSON body"}), 400
-
-    targets, errors = _requested_targets('targets')
-    if errors:
-        return jsonify({"error": errors[0]}), 400
-    if not targets:
-        return jsonify({"error": "Choose at least one platform"}), 400
-
-    groups, error = _selected_post_groups(payload)
+    payload, targets, groups, error = _bulk_platform_request()
     if error:
         return error
 
@@ -7362,6 +7376,120 @@ def compose_bulk_add_platform():
         "skipped": skipped,
         "skipped_count": skipped_count,
         "needs_image": needs_image,
+        "by_target": by_target,
+    }
+    if render:
+        reply["results"] = results
+    return jsonify(reply)
+
+
+@app.route('/compose/posts/bulk-remove-platform', methods=['POST'])
+def compose_bulk_remove_platform():
+    """Take the chosen posting targets off every selected card.
+
+    Body: ``{"post_ids": [...] | "filters": {...}, "targets": ["threads",
+    "linkedin:<account id>", ...], "force": bool, "render": bool}``.
+
+    The bulk form of unticking a chip: each matching row is deleted, and a card
+    that never went to a target is left alone and counted. Three things are kept
+    rather than removed, and reported per row with a ``code``:
+
+      ``queued``     the row is in the queue. ``force`` takes it out of the queue
+                     and removes it, as confirming the single-chip prompt does.
+      ``published``  the row has been posted. ``force`` removes it anyway; the
+                     posting history stays, and it is not unpublished.
+      ``last``       removing would leave the card with no platform at all, which
+                     deletes the post and its copy. ``force`` does not override
+                     this: Delete Selected is the action for that.
+
+    A card is judged as a whole, so asking for every one of its platforms keeps
+    all of them rather than removing whichever came first. As with adding, each
+    card is its own write and running the same request again is a no-op.
+
+    ``render`` adds a freshly drawn card for every card that changed.
+    """
+    payload, targets, groups, error = _bulk_platform_request()
+    if error:
+        return error
+
+    force = _search_flag(payload.get('force'))
+    render = _search_flag(payload.get('render'))
+
+    row_ids = [row['id'] for group in groups for row in group['platforms'].values()]
+    pending = get_pending_schedule_ids_for_standalone_posts(row_ids)
+    posted = get_posted_info_for_standalone_posts(row_ids)
+
+    by_target = [
+        {'platform': t['platform'], 'account_id': t['account_id'],
+         'label': _target_display_name(t['platform'], t['account_id']),
+         'removed': 0, 'absent': 0, 'skipped': 0}
+        for t in targets
+    ]
+    skipped = []
+    skipped_count = 0
+    unqueued = 0
+    results = []
+
+    def keep(stats, row, code, reason):
+        nonlocal skipped_count
+        stats['skipped'] += 1
+        skipped_count += 1
+        if len(skipped) < BULK_SKIP_LIST_LIMIT:
+            skipped.append({'post_id': row['id'], 'platform': row['platform'],
+                            'target': stats['label'], 'code': code, 'reason': reason})
+
+    for group in groups:
+        original_ids = [row['id'] for row in group['platforms'].values()]
+        card_rows = _ordered_group_rows(group)
+
+        going = []
+        for target, stats in zip(targets, by_target):
+            row = _find_target_row(card_rows, target['platform'], target['account_id'])
+            if row is None:
+                stats['absent'] += 1
+                continue
+            # Published wins over queued: a row can be both if it was posted and
+            # then queued again, and the published part is the one that cannot
+            # be undone.
+            if not force and posted.get(row['id']):
+                keep(stats, row, 'published', 'Already published')
+            elif not force and pending.get(row['id']):
+                keep(stats, row, 'queued', 'Queued')
+            else:
+                going.append((stats, row))
+
+        if not going:
+            continue
+        if len(going) == len(card_rows):
+            for stats, row in going:
+                keep(stats, row, 'last', "The post's only platform")
+            continue
+
+        going_ids = [row['id'] for _stats, row in going]
+        schedule_ids = [sid for rid in going_ids for sid in pending.get(rid, [])]
+        # The queue entries go first: deleting a post under a pending entry
+        # leaves an entry that would publish nothing.
+        unqueued += delete_scheduled_posts_bulk(schedule_ids)
+        delete_standalone_posts_bulk(going_ids)
+        for stats, _row in going:
+            stats['removed'] += 1
+
+        if render:
+            left = [row['id'] for row in card_rows if row['id'] not in going_ids]
+            results.append({
+                'anchor_ids': original_ids,
+                'post_ids': left,
+                'html': _post_card_html(left, group.get('display_index')),
+            })
+
+    reply = {
+        "success": True,
+        "cards": len(groups),
+        "removed": sum(t['removed'] for t in by_target),
+        "absent": sum(t['absent'] for t in by_target),
+        "unqueued": unqueued,
+        "skipped": skipped,
+        "skipped_count": skipped_count,
         "by_target": by_target,
     }
     if render:

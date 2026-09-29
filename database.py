@@ -2495,6 +2495,33 @@ def get_pending_schedules_for_standalone_posts(standalone_post_ids: List[int], d
         return result
 
 
+def get_pending_schedule_ids_for_standalone_posts(standalone_post_ids: List[int], db_path: str = DB_PATH) -> dict:
+    """Map standalone_post_id -> [ids of its pending scheduled_posts entries].
+
+    The entries themselves, not just when they run, so a caller that deletes a
+    saved post can take its queue entries with it: deleting the post alone
+    leaves a pending entry pointing at nothing.
+    """
+    if not standalone_post_ids:
+        return {}
+
+    with sqlite3.connect(db_path) as conn:
+        placeholders = ",".join("?" for _ in standalone_post_ids)
+        cur = conn.execute(
+            f"""
+            SELECT standalone_post_id, id
+            FROM scheduled_posts
+            WHERE standalone_post_id IN ({placeholders})
+            AND status = 'pending'
+            """,
+            list(standalone_post_ids),
+        )
+        result = {}
+        for post_id, scheduled_id in cur.fetchall():
+            result.setdefault(post_id, []).append(scheduled_id)
+        return result
+
+
 def get_posted_info_for_standalone_posts(standalone_post_ids: List[int], db_path: str = DB_PATH) -> dict:
     """Get posted info for a list of standalone post IDs.
     
