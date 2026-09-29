@@ -35,16 +35,22 @@ GATES = [
      "the screens expose accounts and cross-posting, and are wired to them"),
     ("check_backcompat.py", "BACKCOMPAT_OK",
      "an existing single-account install migrates and keeps working"),
+    ("check_login_without_identity.py", "NO_IDENTITY_OK",
+     "a login with no identity never damages an account that has one"),
 ]
 
 TIMEOUT_SECONDS = 300
 
 
-def run_gate(filename, token):
-    """Run one gate; returns (passed, summary line, failure detail)."""
+def run_gate(filename, token, args=()):
+    """Run one gate; returns (passed, summary line, failure detail).
+
+    ``args`` selects a section for the scripts that hold several gates and pick
+    one by argument, each printing its own token.
+    """
     try:
         result = subprocess.run(
-            [sys.executable, os.path.join(HERE, filename)],
+            [sys.executable, os.path.join(HERE, filename), *args],
             capture_output=True, text=True, timeout=TIMEOUT_SECONDS,
             cwd=HERE,
         )

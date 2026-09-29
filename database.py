@@ -935,7 +935,26 @@ def _upsert_account_row(
         )
         return account_id
 
-    is_default = 0 if _default_account_id(conn, platform) else 1
+    holder = _default_account_id(conn, platform)
+    if holder is None:
+        is_default = 1
+    else:
+        holder_id = conn.execute(
+            "SELECT external_id FROM social_accounts WHERE id = ?", (holder,)
+        ).fetchone()[0]
+        # A placeholder cannot publish anything, so it must not hold the default
+        # against an account that can. Without this, connecting a real account
+        # after an unidentified one would leave bare-platform posts aimed at the
+        # one account that is guaranteed to fail.
+        is_default = 1 if (
+            str(holder_id or "").startswith("pending:")
+            and not external_id.startswith("pending:")
+        ) else 0
+        if is_default:
+            conn.execute(
+                "UPDATE social_accounts SET is_default = 0 WHERE platform = ?",
+                (platform,),
+            )
     cur = conn.execute(
         """
         INSERT INTO social_accounts
@@ -1749,17 +1768,37 @@ def _save_token(
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
         if not external_id:
-            # The platform did not hand back an id yet (LinkedIn without the
-            # profile scope). Keep one placeholder account per platform so the
-            # configure screen has something to fill in, rather than minting a
-            # fresh half-account on every retry.
-            resolved = _resolve_token_account(conn, platform, account_id)
-            if resolved:
-                target = resolved
+            # The platform did not hand back an id (LinkedIn without the profile
+            # scope, a Facebook login with no Page yet). There is nothing to
+            # match this login against, so it must not be matched against a
+            # real account: the previous fallback here was the platform's
+            # default account, which meant a second login with no identity
+            # overwrote the first account's token and blanked its member URN.
+            #
+            # It lands on a named account if the caller named one, otherwise on
+            # the platform's placeholder. There is one placeholder per platform,
+            # reused rather than minted afresh on every retry, so two logins
+            # that both arrive unidentified share it. That can only ever cost
+            # one unconfigured login another; a real account is never touched.
+            named = None
+            if account_id:
+                named = conn.execute(
+                    "SELECT id FROM social_accounts WHERE id = ? AND platform = ?",
+                    (int(account_id), platform),
+                ).fetchone()
+            if named:
+                target = named["id"]
             else:
+                placeholder = conn.execute(
+                    "SELECT external_id FROM social_accounts "
+                    "WHERE platform = ? AND external_id LIKE 'pending:%' "
+                    "AND status != 'removed' ORDER BY id LIMIT 1",
+                    (platform,),
+                ).fetchone()
                 target = _upsert_account_row(
                     conn, platform=platform,
-                    external_id=f"pending:{platform}",
+                    external_id=(placeholder["external_id"] if placeholder
+                                 else f"pending:{platform}"),
                     display_name=identity.get("display_name"),
                     handle=identity.get("handle"),
                     avatar_url=identity.get("avatar_url"),
@@ -1878,6 +1917,102 @@ def _delete_token(platform: str, account_id=None, db_path: str = DB_PATH) -> Non
         conn.commit()
 
 
+def _is_placeholder(conn: sqlite3.Connection, account_id: int) -> bool:
+    """True for an account that has a login but no identity yet."""
+    row = conn.execute(
+        "SELECT external_id FROM social_accounts WHERE id = ?", (account_id,)
+    ).fetchone()
+    return bool(row) and str(row[0] or "").startswith("pending:")
+
+
+def _identity_conflict(platform: str, account_id: int, external_id,
+                       db_path: str = DB_PATH) -> bool:
+    """True when giving this account that identity would collide with another.
+
+    A placeholder never conflicts: its identity is unknown, so learning it is
+    either a new account or a re-authorisation of one that already exists, and
+    ``_sync_account_identity`` merges the second case. A real account is
+    different. Moving it onto an identity another account already holds would
+    leave two accounts publishing as one login, so the configure screens refuse
+    that up front instead of half-applying it.
+    """
+    if not external_id:
+        return False
+    with sqlite3.connect(db_path) as conn:
+        if _is_placeholder(conn, account_id):
+            return False
+        other = conn.execute(
+            "SELECT id FROM social_accounts "
+            "WHERE platform = ? AND external_id = ? AND id != ?",
+            (platform, str(external_id), account_id),
+        ).fetchone()
+        return other is not None
+
+
+def account_id_for_token(platform: str, token_id: int,
+                         db_path: str = DB_PATH) -> Optional[int]:
+    """The account a saved token row belongs to.
+
+    The save functions return the token row id, but a redirect to a configure
+    screen has to name the account, and the two are not the same number. Without
+    this the screen falls back to the platform's default account, which is
+    exactly the wrong one when the login that just connected is a second.
+    """
+    table = _token_table(platform)
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            f"SELECT account_id FROM {table} WHERE id = ?", (token_id,)
+        ).fetchone()
+    return row[0] if row else None
+
+
+def identity_in_use(platform: str, external_id, account_id: int | None = None,
+                    db_path: str = DB_PATH) -> bool:
+    """True when saving this identity onto the account would collide.
+
+    The check the configure screens run before saving, so they can say why
+    instead of reporting a generic failure. ``account_id`` left out means the
+    platform's default account, like every other accessor here.
+    """
+    target = _token_account_id(platform, account_id, db_path=db_path)
+    return bool(target) and _identity_conflict(
+        platform, target, external_id, db_path=db_path)
+
+
+def _merge_placeholder(conn: sqlite3.Connection, platform: str,
+                       source_id: int, survivor_id: int, now: str) -> None:
+    """Fold a placeholder into the account it turned out to be.
+
+    This is the re-authorisation case. A login that returns no profile gets a
+    fresh placeholder every time it is re-authorised, and configuring it with
+    the member id the user already had lands on an account that exists. The
+    placeholder holds the newest credentials, so they replace the survivor's,
+    and everything that pointed at the placeholder is repointed rather than
+    orphaned.
+    """
+    table = _token_table(platform)
+    conn.execute(f"DELETE FROM {table} WHERE account_id = ?", (survivor_id,))
+    conn.execute(
+        f"UPDATE {table} SET account_id = ?, updated_at = ? WHERE account_id = ?",
+        (survivor_id, now, source_id),
+    )
+    for tbl in ("standalone_posts", "social_posts", "scheduled_posts"):
+        conn.execute(
+            f"UPDATE {tbl} SET account_id = ? WHERE account_id = ?",
+            (survivor_id, source_id),
+        )
+    conn.execute("DELETE FROM social_accounts WHERE id = ?", (source_id,))
+    has_default = conn.execute(
+        "SELECT 1 FROM social_accounts "
+        "WHERE platform = ? AND is_default = 1 AND status != 'removed'",
+        (platform,),
+    ).fetchone()
+    if not has_default:
+        conn.execute(
+            "UPDATE social_accounts SET is_default = 1 WHERE id = ?", (survivor_id,)
+        )
+
+
 def _sync_account_identity(
     platform: str,
     account_id: int,
@@ -1885,33 +2020,50 @@ def _sync_account_identity(
     display_name: str | None = None,
     handle: str | None = None,
     db_path: str = DB_PATH,
-) -> None:
+) -> int:
     """Push a hand-entered identity back onto the account record.
 
     The configure screens exist because some platforms will not hand back an id
     over OAuth. What the user types there has to reach the account row too, or
     the accounts list keeps showing "needs configuration" for a login that works.
+
+    Returns the id of the account the identity ended up on. That is
+    ``account_id`` unless it was a placeholder whose identity already belongs to
+    another account, in which case the placeholder is merged into that one.
     """
     now = datetime.utcnow().isoformat(timespec="seconds")
-    sets, params = ["updated_at = ?"], [now]
-    if external_id:
-        sets.insert(0, "external_id = ?")
-        params.insert(0, str(external_id))
-    for column, value in (("display_name", display_name), ("handle", handle)):
-        if value:
-            sets.insert(0, f"{column} = ?")
-            params.insert(0, value)
-    params.append(account_id)
     with sqlite3.connect(db_path) as conn:
-        try:
-            conn.execute(
-                f"UPDATE social_accounts SET {', '.join(sets)} WHERE id = ?", params
-            )
-            conn.commit()
-        except sqlite3.IntegrityError:
-            # That id already belongs to another connected account; leave the
-            # record alone rather than merging two logins into one row.
-            pass
+        target = account_id
+        if external_id:
+            other = conn.execute(
+                "SELECT id FROM social_accounts "
+                "WHERE platform = ? AND external_id = ? AND id != ?",
+                (platform, str(external_id), account_id),
+            ).fetchone()
+            if other and _is_placeholder(conn, account_id):
+                _merge_placeholder(conn, platform, account_id, other[0], now)
+                target = other[0]
+                external_id = None  # the survivor already holds it
+            elif other:
+                # A real account is never merged away. Callers are expected to
+                # have refused via _identity_conflict first, so reaching here
+                # means leaving the record exactly as it is.
+                external_id = None
+
+        sets, params = ["updated_at = ?"], [now]
+        if external_id:
+            sets.insert(0, "external_id = ?")
+            params.insert(0, str(external_id))
+        for column, value in (("display_name", display_name), ("handle", handle)):
+            if value:
+                sets.insert(0, f"{column} = ?")
+                params.insert(0, value)
+        params.append(target)
+        conn.execute(
+            f"UPDATE social_accounts SET {', '.join(sets)} WHERE id = ?", params
+        )
+        conn.commit()
+        return target
 
 
 def _token_account_id(platform: str, account_id=None, db_path: str = DB_PATH):
@@ -2003,6 +2155,8 @@ def update_linkedin_member_urn(
     if display_name:
         fields["display_name"] = display_name
     target = _token_account_id("linkedin", account_id, db_path=db_path)
+    if target and _identity_conflict("linkedin", target, member_id, db_path=db_path):
+        return False
     updated = _update_token("linkedin", fields, account_id=account_id, db_path=db_path)
     if updated and target:
         _sync_account_identity(
@@ -2091,6 +2245,8 @@ def update_threads_user_info(
     if display_name:
         fields["display_name"] = display_name
     target = _token_account_id("threads", account_id, db_path=db_path)
+    if target and _identity_conflict("threads", target, user_id, db_path=db_path):
+        return False
     updated = _update_token("threads", fields, account_id=account_id, db_path=db_path)
     if updated and target:
         _sync_account_identity(
@@ -2187,6 +2343,9 @@ def update_instagram_user_info(
         if value:
             fields[column] = value
     target = _token_account_id("instagram", account_id, db_path=db_path)
+    if target and _identity_conflict(
+            "instagram", target, ig_user_id or user_id, db_path=db_path):
+        return False
     updated = _update_token("instagram", fields, account_id=account_id, db_path=db_path)
     if updated and target:
         _sync_account_identity(
@@ -2277,6 +2436,8 @@ def update_facebook_page_selection(
     Returns True if a record was updated, False if no token exists.
     """
     target = _token_account_id("facebook", account_id, db_path=db_path)
+    if target and _identity_conflict("facebook", target, page_id, db_path=db_path):
+        return False
     updated = _update_token(
         "facebook",
         {"page_id": page_id, "page_name": page_name,

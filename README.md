@@ -159,6 +159,7 @@ Catalogue a media archive by year and category, browse it by either, review disc
 | `insights.py` | CLI entry point and core AI generation library (transcription, summaries, articles, social copy, vision, thumbnails) |
 | `insights_web.py` | Flask web application with all routes, background workers, and UI logic |
 | `social_publisher.py` | One publish path for every platform and account - resolves the target account, refreshes its token, calls the right client, and reports each target's outcome in the same shape |
+| `scripts/` | Completion gates and their runners. `run_all_gates.py` runs every gate; each `check_*.py` proves one claim about the app against a throwaway database |
 | `database.py` | SQLite database operations for feeds, episodes, articles, posts, schedules, sources, library, and more |
 | `content_agent.py` | Content brief orchestrator - researches sources and prepares draft posts and articles for review |
 | `content_library.py` | Content Library engine - archive scanning, event grouping, taxonomy learning, classification, and copy planning |
@@ -647,6 +648,29 @@ In the Command Center, each Instagram post has a **format selector**:
 - **Story** — a single image or video (no caption; Stories expire after 24h)
 
 Media is publicly hosted via Cloudinary (image/video upload) or a pasted public URL. Instagram has no text-only feed posts, so every post needs media. Videos must be MP4/MOV (H.264/AAC, ~90s) — Instagram rejects unsupported codecs/aspect ratios/durations, which the app surfaces as a readable error.
+
+## Completion Gates
+
+Every claim the app makes about itself that is worth protecting has a gate in
+`scripts/`: a script that proves it against a throwaway database and prints an
+OK token only if it held. One command runs all of them:
+
+```bash
+python scripts/run_all_gates.py
+```
+
+A gate passes only if it exits 0 **and** prints its token, so a check that
+quietly did nothing cannot read as a pass. The gates use faked platform clients,
+so a run needs no credentials, makes no network calls and cannot touch your real
+`insights.db`.
+
+The runner also checks the gates themselves: every `scripts/check_*.py` must be
+registered in `run_all_gates.py` (or listed in `NOT_GATES` with a reason), so a
+new gate cannot be added and then never run. To add one, write `check_<name>.py`,
+have it print a unique `<NAME>_OK` on success, and register it.
+
+The same command runs in CI on every push to `main` and every pull request
+(`.github/workflows/gates.yml`), so what passes there is what passes locally.
 
 ## Credits
 
