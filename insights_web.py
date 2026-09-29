@@ -7037,6 +7037,43 @@ def compose_render_post_card(post_id: int):
     })
 
 
+def _find_target_row(rows, platform, account_id):
+    """The row in ``rows`` that already is this (platform, account) target.
+
+    A row saved before it carried an account is drawn by its card as the
+    platform's default account (see _enrich_post_group), so it has to match here
+    the same way. Otherwise the chip would read as ticked while ticking it again
+    wrote a duplicate, and ticking it off would leave the row stranded.
+    """
+    for row in rows:
+        if row['platform'] != platform:
+            continue
+        row_account = (row['account_id'] if 'account_id' in row.keys() else None) \
+            or _default_account_for(platform)
+        if row_account == account_id:
+            return row
+    return None
+
+
+def _copy_post_to_target(post, platform, account_id):
+    """Save ``post``'s copy, image and brief as a new row for one target.
+
+    This is what "also post it there" means in the database: the row per
+    (platform, copy) is the only record that a card goes to that platform.
+    Returns the new row's id.
+    """
+    return add_standalone_post(
+        source_type=post['source_type'],
+        source_content=post['source_content'],
+        platform=platform,
+        content=post['content'],
+        image_url=post['image_url'],
+        brief_id=post['brief_id'] if 'brief_id' in post.keys() else None,
+        brief_run_id=post['brief_run_id'] if 'brief_run_id' in post.keys() else None,
+        account_id=account_id,
+    )
+
+
 @app.route('/compose/post/<int:post_id>/platform', methods=['POST'])
 def compose_toggle_post_platform(post_id: int):
     """Tick or untick one of a card's targets.
@@ -7082,18 +7119,7 @@ def compose_toggle_post_platform(post_id: int):
 
     rows = _card_rows(post, _requested_post_ids(post_id))
     display_index = request.form.get('display_index', type=int)
-    existing = next(
-        (row for row in rows if _row_target_key(row) == (platform, account_id)), None
-    )
-    if existing is None and not raw_account:
-        # An older row saved before it carried an account still counts as this
-        # platform's chip, or ticking it off would leave the row stranded.
-        existing = next(
-            (row for row in rows
-             if row['platform'] == platform
-             and (row['account_id'] if 'account_id' in row.keys() else None) is None),
-            None,
-        )
+    existing = _find_target_row(rows, platform, account_id)
 
     target_name = platform_name(platform)
     if account_id:
@@ -7105,16 +7131,7 @@ def compose_toggle_post_platform(post_id: int):
         if existing:
             return jsonify({"error": f"This post already goes to {target_name}"}), 400
 
-        new_id = add_standalone_post(
-            source_type=post['source_type'],
-            source_content=post['source_content'],
-            platform=platform,
-            content=post['content'],
-            image_url=post['image_url'],
-            brief_id=post['brief_id'] if 'brief_id' in post.keys() else None,
-            brief_run_id=post['brief_run_id'] if 'brief_run_id' in post.keys() else None,
-            account_id=account_id,
-        )
+        new_id = _copy_post_to_target(post, platform, account_id)
         ids = [row['id'] for row in rows] + [new_id]
         return jsonify({
             "success": True,
@@ -7162,6 +7179,194 @@ def compose_toggle_post_platform(post_id: int):
         "post_ids": ids,
         "html": _post_card_html(ids, display_index) if ids else '',
     })
+
+
+def _selected_post_groups(payload):
+    """Resolve a Compose bulk-action selection to the whole cards it names.
+
+    The card-level sibling of _selected_standalone_posts, for actions that treat
+    a card as one unit. Two payload shapes:
+      ``{"post_ids": [...]}``  any row of each ticked card. A list filtered to
+                               one platform only knows that platform's row id, so
+                               the card is found from whichever row it is given.
+      ``{"filters": {...}}``   "select all across every page", re-derived from the
+                               filter bar exactly as the list itself is.
+
+    Returns ``(groups, error)`` where ``error`` is a ready-to-return response.
+    """
+    filters = payload.get('filters')
+    if filters is not None:
+        if not isinstance(filters, dict):
+            return None, (jsonify({"error": "filters must be an object"}), 400)
+        groups, _ = _filtered_post_groups(filters)
+        return groups, None
+
+    raw_ids = payload.get('post_ids')
+    if not raw_ids:
+        return None, (jsonify({"error": "No posts selected"}), 400)
+    if not isinstance(raw_ids, list):
+        return None, (jsonify({"error": "post_ids must be a list"}), 400)
+    try:
+        wanted = {int(pid) for pid in raw_ids}
+    except (TypeError, ValueError):
+        return None, (jsonify({"error": "Invalid post IDs"}), 400)
+
+    groups = _group_standalone_posts(list_standalone_posts())
+    for position, group in enumerate(groups, start=1):
+        group['display_index'] = position
+    selected = [
+        group for group in groups
+        if any(row['id'] in wanted for row in group['platforms'].values())
+    ]
+    if not selected:
+        return None, (jsonify({"error": "The selected posts no longer exist"}), 400)
+    return selected, None
+
+
+# The most skipped targets one bulk request lists by name. The count is always
+# exact; the list only bounds the size of the reply.
+BULK_SKIP_LIST_LIMIT = 50
+
+
+def _target_display_name(platform, account_id):
+    """What to call a (platform, account) target in a message."""
+    return _row_account_label({'platform': platform, 'account_id': account_id}) \
+        or platform_name(platform)
+
+
+@app.route('/compose/posts/bulk-add-platform', methods=['POST'])
+def compose_bulk_add_platform():
+    """Give every selected card the chosen posting targets, optionally queueing them.
+
+    Body: ``{"post_ids": [...] | "filters": {...}, "targets": ["linkedin",
+    "linkedin:<account id>", ...], "queue": bool, "render": bool}``.
+
+    For each card and target this does what ticking that chip does one card at a
+    time: a card that already goes there is left alone, otherwise its copy, image
+    and brief are copied into a new row for that target. With ``queue`` every
+    target then takes its own next free slot, existing rows included, so the end
+    state is "these cards are queued for these targets". Rows that are used,
+    already queued or already published are never queued again.
+
+    Nothing here is all-or-nothing: each row is its own write, a target that
+    cannot be queued is reported rather than aborting the batch, and running the
+    same request again is a no-op, which is what makes a half-finished run safe
+    to repeat.
+
+    ``render`` adds a freshly drawn card for every card that changed, so the page
+    can swap them in without a reload.
+    """
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify({"error": "Send a JSON body"}), 400
+
+    targets, errors = _requested_targets('targets')
+    if errors:
+        return jsonify({"error": errors[0]}), 400
+    if not targets:
+        return jsonify({"error": "Choose at least one platform"}), 400
+
+    groups, error = _selected_post_groups(payload)
+    if error:
+        return error
+
+    queue = _search_flag(payload.get('queue'))
+    render = _search_flag(payload.get('render'))
+
+    row_ids = [row['id'] for group in groups for row in group['platforms'].values()]
+    pending = get_pending_schedules_for_standalone_posts(row_ids) if queue else {}
+    posted = get_posted_info_for_standalone_posts(row_ids) if queue else {}
+
+    by_target = [
+        {'platform': t['platform'], 'account_id': t['account_id'],
+         'label': _target_display_name(t['platform'], t['account_id']),
+         'added': 0, 'already': 0, 'queued': 0, 'already_queued': 0, 'skipped': 0}
+        for t in targets
+    ]
+    skipped = []
+    skipped_count = 0
+    added_instagram = []
+    no_slots = set()
+    results = []
+
+    for group in groups:
+        original_ids = [row['id'] for row in group['platforms'].values()]
+        card_rows = _ordered_group_rows(group)
+        head = group['head']
+        changed = False
+        landed = []
+
+        for target, stats in zip(targets, by_target):
+            row = _find_target_row(card_rows, target['platform'], target['account_id'])
+            is_new = row is None
+            if is_new:
+                row = get_standalone_post(
+                    _copy_post_to_target(head, target['platform'], target['account_id']))
+                card_rows.append(row)
+                stats['added'] += 1
+                changed = True
+                if target['platform'] == 'instagram':
+                    added_instagram.append(row['id'])
+            else:
+                stats['already'] += 1
+            landed.append((stats, row, is_new))
+
+        if queue:
+            for stats, row, is_new in landed:
+                reason = None
+                if not is_new:
+                    if pending.get(row['id']):
+                        stats['already_queued'] += 1
+                        continue
+                    if posted.get(row['id']):
+                        reason = "Already published"
+                    elif row['used']:
+                        reason = "Marked as used"
+                if reason is None and stats['account_id'] is None:
+                    reason = f"Connect {platform_name(row['platform'])} before queueing"
+                if reason is None:
+                    entry, skip = _queue_row(row, pending, card_rows, no_slots)
+                    if entry:
+                        stats['queued'] += 1
+                        changed = True
+                        continue
+                    reason = skip['error']
+
+                stats['skipped'] += 1
+                skipped_count += 1
+                if len(skipped) < BULK_SKIP_LIST_LIMIT:
+                    skipped.append({'post_id': row['id'], 'platform': row['platform'],
+                                    'target': stats['label'], 'reason': reason})
+
+        if render and changed:
+            ids = [row['id'] for row in card_rows]
+            results.append({
+                'anchor_ids': original_ids,
+                'post_ids': ids,
+                'html': _post_card_html(ids, group.get('display_index')),
+            })
+
+    # Read after queueing: Instagram may have found a stock image by then.
+    needs_image = sum(
+        1 for row_id in added_instagram
+        if not (get_standalone_post(row_id)['image_url'] or '').strip()
+    )
+
+    reply = {
+        "success": True,
+        "cards": len(groups),
+        "added": sum(t['added'] for t in by_target),
+        "already": sum(t['already'] for t in by_target),
+        "queued": sum(t['queued'] for t in by_target),
+        "already_queued": sum(t['already_queued'] for t in by_target),
+        "skipped": skipped,
+        "skipped_count": skipped_count,
+        "needs_image": needs_image,
+        "by_target": by_target,
+    }
+    if render:
+        reply["results"] = results
+    return jsonify(reply)
 
 
 @app.route('/compose/import', methods=['POST'])
@@ -9095,77 +9300,100 @@ def compose_post_to_instagram(post_id: int):
     return _compose_publish_one(post_id, 'instagram')
 
 
+def _queue_row(row, already, card_rows=None, no_slots=None):
+    """Queue one saved post row into its platform's next free slot.
+
+    Returns ``(entry, skip)`` with exactly one set. ``already`` maps row id to
+    its pending schedule, read once by the caller so a batch does not pay a
+    lookup per row. A skip carries the reason in ``error`` instead of raising,
+    so one target that cannot be queued (no free slot, Instagram with no usable
+    media) never stops the rest of a batch.
+
+    ``card_rows`` are the row's card. Instagram may auto-attach a stock image,
+    which is written to the Instagram row alone; copying it to the rest of the
+    card keeps (copy, image) matching, or the card would split in two.
+
+    ``no_slots`` is a set the caller can share across a batch: a platform with no
+    free slot is remembered there so the rest of the batch skips it at once.
+    """
+    if no_slots is None:
+        no_slots = set()
+    platform = row['platform']
+    target_name = _row_account_label(row) or platform_name(platform)
+
+    def skip(error):
+        return None, {"post_id": row['id'], "platform": platform,
+                      "target": target_name, "error": error}
+
+    if platform not in SCHEDULABLE_PLATFORMS:
+        return skip(f"{target_name} does not support scheduling yet")
+    if already.get(row['id']):
+        return skip(f"Already queued for {target_name}")
+
+    if platform == 'instagram':
+        image_url = row['image_url'] if 'image_url' in row.keys() else None
+        _, media_err = _ensure_instagram_media(
+            row['content'],
+            image_url,
+            row['ig_post_type'] if 'ig_post_type' in row.keys() else None,
+            _json_list_column(row, 'media_items'),
+            standalone_post_id=row['id'],
+        )
+        if media_err:
+            return skip(media_err)
+        attached = get_standalone_post(row['id'])['image_url']
+        if attached and attached != image_url:
+            for sibling in card_rows or []:
+                if sibling['id'] != row['id']:
+                    update_standalone_post_image(sibling['id'], attached)
+
+    slot = None if platform in no_slots else get_next_available_slot(platform)
+    if not slot:
+        no_slots.add(platform)
+        return skip(f"No available time slots for {target_name}")
+
+    scheduled_id = add_scheduled_post(
+        social_post_id=None,
+        article_id=None,
+        standalone_post_id=row['id'],
+        post_type='standalone',
+        platform=platform,
+        scheduled_for=slot,
+        status='pending',
+        account_id=row['account_id'] if 'account_id' in row.keys() else None,
+    )
+    try:
+        display = datetime.fromisoformat(slot).strftime("%A, %b %d at %I:%M %p")
+    except (ValueError, TypeError):
+        display = slot
+    return {
+        "post_id": row['id'],
+        "scheduled_id": scheduled_id,
+        "platform": platform,
+        "target": target_name,
+        "account_id": row['account_id'] if 'account_id' in row.keys() else None,
+        "scheduled_for": slot,
+        "scheduled_for_display": display,
+    }, None
+
+
 def _queue_whole_card(post):
     """Queue every target on a card, one slot each.
 
     Each target gets its own next free slot on its own platform, so a card aimed
     at two LinkedIn accounts and Threads takes three slots rather than three
-    posts landing at the same minute. A target that cannot be queued (no free
-    slot, Instagram with no usable media) is reported instead of stopping the
-    rest, so the caller knows exactly what is queued and what is not.
+    posts landing at the same minute. A target that cannot be queued is reported
+    instead of stopping the rest, so the caller knows exactly what is queued and
+    what is not.
     """
     rows = _card_rows(post, _requested_post_ids(post['id']))
     already = get_pending_schedules_for_standalone_posts([row['id'] for row in rows])
 
     queued, skipped = [], []
+    no_slots = set()
     for row in rows:
-        platform = row['platform']
-        target_name = _row_account_label(row) or platform_name(platform)
-
-        if platform not in SCHEDULABLE_PLATFORMS:
-            skipped.append({"post_id": row['id'], "platform": platform,
-                            "target": target_name,
-                            "error": f"{target_name} does not support scheduling yet"})
-            continue
-        if already.get(row['id']):
-            skipped.append({"post_id": row['id'], "platform": platform,
-                            "target": target_name,
-                            "error": f"Already queued for {target_name}"})
-            continue
-
-        if platform == 'instagram':
-            _, media_err = _ensure_instagram_media(
-                row['content'],
-                row['image_url'] if 'image_url' in row.keys() else None,
-                row['ig_post_type'] if 'ig_post_type' in row.keys() else None,
-                _json_list_column(row, 'media_items'),
-                standalone_post_id=row['id'],
-            )
-            if media_err:
-                skipped.append({"post_id": row['id'], "platform": platform,
-                                "target": target_name, "error": media_err})
-                continue
-
-        slot = get_next_available_slot(platform)
-        if not slot:
-            skipped.append({"post_id": row['id'], "platform": platform,
-                            "target": target_name,
-                            "error": f"No available time slots for {target_name}"})
-            continue
-
-        scheduled_id = add_scheduled_post(
-            social_post_id=None,
-            article_id=None,
-            standalone_post_id=row['id'],
-            post_type='standalone',
-            platform=platform,
-            scheduled_for=slot,
-            status='pending',
-            account_id=row['account_id'] if 'account_id' in row.keys() else None,
-        )
-        try:
-            display = datetime.fromisoformat(slot).strftime("%A, %b %d at %I:%M %p")
-        except (ValueError, TypeError):
-            display = slot
-        queued.append({
-            "post_id": row['id'],
-            "scheduled_id": scheduled_id,
-            "platform": platform,
-            "target": target_name,
-            "account_id": row['account_id'] if 'account_id' in row.keys() else None,
-            "scheduled_for": slot,
-            "scheduled_for_display": display,
-        })
+        entry, skip = _queue_row(row, already, rows, no_slots)
+        (queued if entry else skipped).append(entry or skip)
 
     if not queued:
         return jsonify({

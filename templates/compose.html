@@ -265,6 +265,9 @@
     @media (max-width: 576px) {
         /* Icons alone still identify the platform when space is tight. */
         .platform-chip .chip-name { display: none; }
+        /* Not in the bulk picker: two accounts on one platform share an icon, so
+           the name is the only thing telling them apart. */
+        #bulk-platform-targets .platform-chip .chip-name { display: inline; }
     }
     
     /* Show more/less button styles */
@@ -1090,6 +1093,10 @@
                 <button type="button" class="btn btn-sm btn-outline-primary d-none select-mode-btn" id="select-all-btn" onclick="selectAllPosts()">
                     ☑️ Select All
                 </button>
+                <button type="button" class="btn btn-sm btn-primary d-none" id="add-platform-selected-btn" onclick="showBulkPlatformModal()"
+                        title="Also post the selected posts to more platforms, and queue them">
+                    🌐 Add Platform (<span id="add-platform-count">0</span>)
+                </button>
                 <button type="button" class="btn btn-sm btn-success d-none" id="queue-selected-btn" onclick="queueSelectedPosts()">
                     ➕ Add to Queue (<span id="queue-selected-count">0</span>)
                 </button>
@@ -1515,6 +1522,61 @@
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
                 <button type="button" class="btn btn-primary" onclick="applyBulkImage()" id="apply-bulk-image-btn">
                     Apply to Selected Posts
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Bulk Add Platform Modal -->
+<div class="modal fade" id="bulkPlatformModal" tabindex="-1" data-bs-backdrop="static" data-bs-keyboard="false"
+     aria-labelledby="bulk-platform-title" aria-hidden="true">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="bulk-platform-title">🌐 Add a platform to <span id="bulk-platform-count">0</span> <span id="bulk-platform-noun">posts</span></h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close" id="bulk-platform-close"></button>
+            </div>
+            <div class="modal-body">
+                <div id="bulk-platform-form">
+                    <p class="text-muted small mb-2">
+                        Each selected post is also posted to the platforms you tick. Posts that already go there are left alone.
+                    </p>
+                    {# Same chips the cards and the composer draw, one per connected account. #}
+                    <div class="platform-chips mb-3" id="bulk-platform-targets" role="group" aria-label="Platforms to add">
+                        {% for target in PUBLISH_TARGETS %}
+                        {% set platform = target.platform %}
+                        {% set meta = PLATFORM_META[platform] %}
+                        {% set name = target.label if target.show_label else meta.label %}
+                        <span class="platform-chip" data-platform="{{ platform }}"
+                              data-account-id="{{ target.account_id or '' }}" data-label="{{ name }}"
+                              data-connected="{{ 'true' if target.account_id else 'false' }}">
+                            <button type="button" class="chip-toggle" onclick="toggleBulkPlatformTarget(this)" aria-pressed="false"
+                                    title="{{ name }}{% if not target.account_id %}, not connected yet{% endif %}">
+                                <span class="chip-box"></span>
+                                <span class="chip-icon">{{ meta.icon }}</span>
+                                <span class="chip-name">{{ name }}</span>
+                                {% if not target.account_id %}<span class="text-muted fw-normal">not connected</span>{% endif %}
+                            </button>
+                        </span>
+                        {% endfor %}
+                    </div>
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="checkbox" id="bulk-platform-queue" checked onchange="updateBulkPlatformSummary()">
+                        <label class="form-check-label" for="bulk-platform-queue">
+                            Also add them to the posting queue
+                            <span class="text-muted small d-block">Each one takes the next free time slot for its platform.</span>
+                        </label>
+                    </div>
+                    <div class="small mb-2" id="bulk-platform-summary" aria-live="polite"></div>
+                    <div class="alert alert-warning py-2 small mb-0 d-none" id="bulk-platform-warning" role="status"></div>
+                </div>
+                <div class="d-none" id="bulk-platform-result" aria-live="polite"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal" id="bulk-platform-cancel">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="applyBulkPlatform()" id="bulk-platform-apply-btn" disabled>
+                    Add
                 </button>
             </div>
         </div>
@@ -4857,6 +4919,7 @@ function toggleSelectMode() {
     const checkboxes = document.querySelectorAll('.post-select-checkbox');
     const toggleBtn = document.getElementById('toggle-select-mode');
     const deleteBtn = document.getElementById('delete-selected-btn');
+    const addPlatformBtn = document.getElementById('add-platform-selected-btn');
     const queueBtn = document.getElementById('queue-selected-btn');
     const unqueueBtn = document.getElementById('unqueue-selected-btn');
     const removeImageBtn = document.getElementById('remove-image-selected-btn');
@@ -4882,6 +4945,7 @@ function toggleSelectMode() {
         toggleBtn.classList.add('btn-outline-secondary');
         toggleBtn.innerHTML = '☑️ Select';
         deleteBtn.classList.add('d-none');
+        addPlatformBtn.classList.add('d-none');
         queueBtn.classList.add('d-none');
         unqueueBtn.classList.add('d-none');
         removeImageBtn.classList.add('d-none');
@@ -4945,6 +5009,7 @@ function updateSelectedCount() {
     const visibleCheckboxes = visiblePostCheckboxes();
 
     const deleteBtn = document.getElementById('delete-selected-btn');
+    const addPlatformBtn = document.getElementById('add-platform-selected-btn');
     const queueBtn = document.getElementById('queue-selected-btn');
     const unqueueBtn = document.getElementById('unqueue-selected-btn');
     const removeImageBtn = document.getElementById('remove-image-selected-btn');
@@ -4956,6 +5021,11 @@ function updateSelectedCount() {
     if (count > 0 && selectModeActive) {
         deleteBtn.classList.remove('d-none');
         markUsedBtn.classList.remove('d-none');
+
+        // Adding a platform works from the filters, so unlike the image actions
+        // it stays on for an across-pages selection.
+        addPlatformBtn.classList.remove('d-none');
+        document.getElementById('add-platform-count').textContent = count;
 
         // Image ops don't support the across-pages selection — they only act on
         // the posts actually rendered, so hide them while a scope is active.
@@ -5028,6 +5098,7 @@ function updateSelectedCount() {
         postNowBtn.classList.toggle('d-none', postableCount === 0);
     } else {
         deleteBtn.classList.add('d-none');
+        addPlatformBtn.classList.add('d-none');
         queueBtn.classList.add('d-none');
         unqueueBtn.classList.add('d-none');
         removeImageBtn.classList.add('d-none');
@@ -5536,6 +5607,316 @@ async function unqueueSelectedPosts() {
 
     toggleSelectMode();
 }
+
+// ============ Bulk: add a platform to the selected posts ============
+// Ticks the chosen platforms on every selected card, which is what ticking a chip
+// does one card at a time, and can queue each new target in the same go. The
+// server finds each card from any one of its row ids, so a selection made under
+// a platform filter (one id per card) still reaches the whole card.
+let bulkPlatformBusy = false;
+let bulkPlatformReloadOnClose = false;
+
+// Cards per request when the selected cards are on this page. Each request hands
+// back the redrawn cards, so batching keeps replies small and gives progress.
+const BULK_PLATFORM_BATCH = 25;
+
+function bulkPlatformCount() {
+    return selectAllScope ? selectAllScope.total : selectedCards().length;
+}
+
+function bulkPlatformChips() {
+    return Array.from(document.querySelectorAll('#bulk-platform-targets .platform-chip.is-on'));
+}
+
+// The targets ticked in the modal, as the server reads them: `platform` or
+// `platform:<account id>`.
+function bulkPlatformChosen() {
+    return bulkPlatformChips().map(chip =>
+        chip.dataset.accountId ? `${chip.dataset.platform}:${chip.dataset.accountId}` : chip.dataset.platform);
+}
+
+function showBulkPlatformModal() {
+    const count = bulkPlatformCount();
+    if (count === 0) {
+        alert('No posts selected');
+        return;
+    }
+
+    document.querySelectorAll('#bulk-platform-targets .platform-chip').forEach(chip => {
+        chip.classList.remove('is-on');
+        chip.querySelector('.chip-box').textContent = '';
+        chip.querySelector('.chip-toggle').setAttribute('aria-pressed', 'false');
+    });
+    document.getElementById('bulk-platform-queue').checked = true;
+    document.getElementById('bulk-platform-count').textContent = count;
+    document.getElementById('bulk-platform-noun').textContent = count === 1 ? 'post' : 'posts';
+    document.getElementById('bulk-platform-form').classList.remove('d-none');
+    document.getElementById('bulk-platform-result').classList.add('d-none');
+    document.getElementById('bulk-platform-cancel').textContent = 'Cancel';
+    document.getElementById('bulk-platform-apply-btn').classList.remove('d-none');
+    setBulkPlatformBusy(false);
+    bulkPlatformReloadOnClose = false;
+    updateBulkPlatformSummary();
+
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('bulkPlatformModal')).show();
+}
+
+function toggleBulkPlatformTarget(btn) {
+    if (bulkPlatformBusy) return;
+    const chip = btn.closest('.platform-chip');
+    if (!chip) return;
+    const on = chip.classList.toggle('is-on');
+    chip.querySelector('.chip-box').textContent = on ? '✓' : '';
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    updateBulkPlatformSummary();
+}
+
+function updateBulkPlatformSummary() {
+    const chips = bulkPlatformChips();
+    const queue = document.getElementById('bulk-platform-queue').checked;
+    const count = bulkPlatformCount();
+    const noun = count === 1 ? 'post' : 'posts';
+    const summary = document.getElementById('bulk-platform-summary');
+    const warning = document.getElementById('bulk-platform-warning');
+    const apply = document.getElementById('bulk-platform-apply-btn');
+
+    apply.textContent = queue ? 'Add & Queue' : 'Add';
+    apply.disabled = bulkPlatformBusy || chips.length === 0;
+
+    if (chips.length === 0) {
+        summary.textContent = 'Pick at least one platform.';
+    } else {
+        const names = chips.map(chip => chip.dataset.label).join(', ');
+        const scope = selectAllScope ? `all ${count} ${noun} across every page` : `${count} ${noun}`;
+        summary.textContent = `${names} → ${scope}` + (queue ? ', each queued for its next free slot.' : '.');
+    }
+
+    // Adding a post to a platform needs no login; posting it does, so say so
+    // before the queue step has to skip them.
+    const unconnected = chips.filter(chip => chip.dataset.connected === 'false');
+    if (queue && unconnected.length) {
+        warning.textContent = `${unconnected.map(chip => chip.dataset.label).join(', ')} ` +
+            `${unconnected.length === 1 ? 'is' : 'are'} not connected, so ` +
+            `${unconnected.length === 1 ? 'it' : 'they'} will be added but not queued.`;
+        warning.classList.remove('d-none');
+    } else {
+        warning.classList.add('d-none');
+    }
+}
+
+// While a request is out the selection and the modal are frozen, so nothing the
+// user clicks can disagree with what is being sent.
+function setBulkPlatformBusy(busy, progress) {
+    bulkPlatformBusy = busy;
+    const apply = document.getElementById('bulk-platform-apply-btn');
+    document.getElementById('bulk-platform-cancel').disabled = busy;
+    document.getElementById('bulk-platform-close').disabled = busy;
+    document.getElementById('bulk-platform-queue').disabled = busy;
+    if (busy) {
+        apply.disabled = true;
+        apply.textContent = progress ? `⏳ Adding… ${progress}` : '⏳ Adding…';
+    } else {
+        updateBulkPlatformSummary();
+    }
+}
+
+async function postBulkPlatform(body) {
+    const res = await fetch('/compose/posts/bulk-add-platform', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+    let data = {};
+    try {
+        data = await res.json();
+    } catch (e) {
+        // A non-JSON reply (a proxy error page) still has to surface as an error.
+    }
+    if (!res.ok || !data.success) {
+        throw new Error(data.error || `The server answered ${res.status}`);
+    }
+    return data;
+}
+
+function newBulkPlatformTotals() {
+    return { cards: 0, added: 0, already: 0, queued: 0, already_queued: 0,
+             skipped_count: 0, needs_image: 0, skipped: [], by_target: [] };
+}
+
+function mergeBulkPlatformTotals(totals, data) {
+    ['cards', 'added', 'already', 'queued', 'already_queued', 'skipped_count', 'needs_image']
+        .forEach(key => { totals[key] += data[key] || 0; });
+    totals.skipped.push(...(data.skipped || []));
+    (data.by_target || []).forEach(t => {
+        let mine = totals.by_target.find(x => x.platform === t.platform && x.account_id === t.account_id);
+        if (!mine) {
+            mine = Object.assign({}, t, { added: 0, already: 0, queued: 0, already_queued: 0, skipped: 0 });
+            totals.by_target.push(mine);
+        }
+        ['added', 'already', 'queued', 'already_queued', 'skipped']
+            .forEach(key => { mine[key] += t[key] || 0; });
+    });
+}
+
+// Swap in the redrawn cards. A card is found from any of the rows it had, since
+// adding Instagram changes which row the card is keyed by.
+function applyBulkPlatformCards(results) {
+    results.forEach(result => {
+        for (const id of result.anchor_ids || []) {
+            const card = document.querySelector(`.post-item[data-post-id="${id}"]`);
+            if (card) {
+                replaceCard(card, result.html);
+                break;
+            }
+        }
+    });
+}
+
+async function applyBulkPlatform() {
+    if (bulkPlatformBusy) return;
+    const targets = bulkPlatformChosen();
+    if (targets.length === 0) return;
+
+    const queue = document.getElementById('bulk-platform-queue').checked;
+    const scoped = !!selectAllScope;
+    const anchors = scoped ? [] : selectedCards()
+        .map(card => card.postItem && card.postItem.dataset.postId).filter(Boolean);
+    const total = scoped ? selectAllScope.total : anchors.length;
+    if (total === 0) return;
+
+    if (scoped) {
+        const names = bulkPlatformChips().map(chip => chip.dataset.label).join(', ');
+        if (!confirm(`Add ${names} to all ${total} ${scopeLabel(selectAllScope.filters, total)} ` +
+                     `across every page${queue ? ' and queue them' : ''}?`)) {
+            return;
+        }
+    }
+
+    const totals = newBulkPlatformTotals();
+    let failure = null;
+    setBulkPlatformBusy(true, scoped ? '' : `0 / ${total}`);
+    try {
+        if (scoped) {
+            // The server re-derives the cards from the filter bar, so the browser
+            // never ships (or goes stale on) every id.
+            mergeBulkPlatformTotals(totals, await postBulkPlatform({
+                filters: selectAllScope.filters, targets: targets, queue: queue,
+            }));
+        } else {
+            for (let i = 0; i < anchors.length; i += BULK_PLATFORM_BATCH) {
+                const data = await postBulkPlatform({
+                    post_ids: anchors.slice(i, i + BULK_PLATFORM_BATCH),
+                    targets: targets, queue: queue, render: true,
+                });
+                mergeBulkPlatformTotals(totals, data);
+                applyBulkPlatformCards(data.results || []);
+                setBulkPlatformBusy(true, `${Math.min(i + BULK_PLATFORM_BATCH, anchors.length)} / ${total}`);
+            }
+        }
+    } catch (e) {
+        failure = e.message || 'Something went wrong';
+    }
+    setBulkPlatformBusy(false);
+    renderBulkPlatformResult(totals, failure);
+
+    if (!failure) {
+        if (scoped) {
+            bulkPlatformReloadOnClose = true;
+        } else {
+            toggleSelectMode();
+        }
+    }
+    // The toast is only a nudge to read the modal, so it sticks to counts: a
+    // platform's name is the user's own text and toasts are set as HTML.
+    const summary = `${totals.cards} post${totals.cards !== 1 ? 's' : ''} updated \u00b7 ` +
+        `${totals.added} added` + (queue ? ` \u00b7 ${totals.queued} queued` : '');
+    if (failure) {
+        showToast('Stopped early. See the details.', 'error');
+    } else if (totals.skipped_count || totals.needs_image) {
+        showToast(`${summary}. Some need attention.`, 'warning');
+    } else if (totals.added + totals.queued === 0) {
+        showToast('Nothing to do: every post already had that.', 'info');
+    } else {
+        showToast(summary, 'success');
+    }
+}
+
+// The outcome, in the modal rather than a toast: a skipped queue slot or a
+// missing image is something the user has to act on, and a toast is gone in
+// three seconds. Text is set with textContent because account names are the
+// user's own.
+function renderBulkPlatformResult(totals, failure) {
+    const box = document.getElementById('bulk-platform-result');
+    box.replaceChildren();
+    const add = (text, cls) => {
+        const el = document.createElement('div');
+        el.className = cls;
+        el.textContent = text;
+        box.appendChild(el);
+    };
+    const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+    if (failure) {
+        add(`Stopped: ${failure}`, 'alert alert-danger py-2 small');
+        add('Posts handled before this point were updated. Running it again finishes the rest ' +
+            'and never adds anything twice.', 'small text-muted mb-3');
+    }
+
+    add(`${plural(totals.cards, 'post', 'posts')} processed.`, 'fw-semibold mb-2');
+    totals.by_target.forEach(t => {
+        const parts = [];
+        if (t.added) parts.push(`added to ${t.added}`);
+        if (t.already) parts.push(`already on ${t.already}`);
+        if (t.queued) parts.push(`queued ${t.queued}`);
+        if (t.already_queued) parts.push(`already queued ${t.already_queued}`);
+        add(`${PLATFORM_CHIP_ICONS[t.platform] || ''} ${t.label}: ${parts.join(', ') || 'nothing to do'}`, 'small mb-1');
+    });
+
+    if (totals.skipped_count) {
+        const groups = new Map();
+        totals.skipped.forEach(s => {
+            const key = `${s.target}: ${s.reason}`;
+            groups.set(key, (groups.get(key) || 0) + 1);
+        });
+        const listed = Array.from(groups.entries()).map(([key, n]) => (n > 1 ? `${key} (×${n})` : key));
+        const unlisted = totals.skipped_count - totals.skipped.length;
+        if (unlisted > 0) listed.push(`…and ${unlisted} more`);
+
+        const warn = document.createElement('div');
+        warn.className = 'alert alert-warning py-2 small mt-3 mb-0';
+        const head = document.createElement('div');
+        head.className = 'fw-semibold';
+        head.textContent = `${plural(totals.skipped_count, 'post was', 'posts were')} not queued:`;
+        warn.appendChild(head);
+        const list = document.createElement('ul');
+        list.className = 'mb-0 ps-3';
+        listed.forEach(text => {
+            const li = document.createElement('li');
+            li.textContent = text;
+            list.appendChild(li);
+        });
+        warn.appendChild(list);
+        box.appendChild(warn);
+    }
+    if (totals.needs_image) {
+        add(`${plural(totals.needs_image, 'Instagram post has', 'Instagram posts have')} no image yet. ` +
+            'Add one before they can publish.', 'alert alert-info py-2 small mt-3 mb-0');
+    }
+
+    document.getElementById('bulk-platform-form').classList.add('d-none');
+    box.classList.remove('d-none');
+    document.getElementById('bulk-platform-apply-btn').classList.add('d-none');
+    document.getElementById('bulk-platform-cancel').textContent = 'Done';
+}
+
+// An across-pages run changed posts that were never on this page, so the list is
+// reloaded once the user has read the result.
+document.getElementById('bulkPlatformModal').addEventListener('hidden.bs.modal', () => {
+    if (bulkPlatformReloadOnClose) {
+        bulkPlatformReloadOnClose = false;
+        location.reload();
+    }
+});
 
 // Bulk image operations
 let bulkAddImageModal = null;
