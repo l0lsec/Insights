@@ -4411,17 +4411,28 @@ function cardTargets(postItem) {
 
 // Redraw one card from the server, so queue and posted state come from the
 // database rather than being patched up in the browser.
-async function refreshCard(postItem) {
+//
+// `remainingIds` are the rows the card still has, for when a bulk delete under a
+// platform filter took some of them: the redraw asks for those alone, and an
+// empty list means nothing is left, so the card goes. Left out, the card is
+// redrawn from every row the page holds for it.
+async function refreshCard(postItem, remainingIds) {
     if (!postItem) return;
+    if (remainingIds && !remainingIds.length) {
+        postItem.remove();
+        adjustPostCountBadge(-1);
+        return;
+    }
+    const ids = remainingIds || cardPostIds(postItem, false);
+    // A surviving row is the only id known to still exist when rows were deleted.
+    const anchorId = remainingIds ? remainingIds[0] : postItem.dataset.postId;
     try {
         const body = new FormData();
-        body.append('post_ids', cardPostIds(postItem, false).join(','));
+        body.append('post_ids', ids.join(','));
         if (postItem.dataset.postIndex) body.append('display_index', postItem.dataset.postIndex);
-        const res = await fetch(`/compose/post/${postItem.dataset.postId}/card`, {
-            method: 'POST', body: body,
-        });
+        const res = await fetch(`/compose/post/${anchorId}/card`, { method: 'POST', body: body });
         const data = await res.json();
-        if (res.ok && data.html) replaceCard(postItem, data.html);
+        if (res.ok && data.success) replaceCard(postItem, data.html);
     } catch (e) {
         // A card that fails to redraw is stale, not broken; the next page load
         // fixes it, and throwing here would swallow the action that succeeded.
@@ -5207,25 +5218,6 @@ async function deleteSelectedPosts() {
             alert('Error: ' + (data.error || 'Failed to delete posts'));
         }
     });
-}
-
-// Re-render a card that lost some of its platforms, using any surviving row.
-async function refreshCard(postItem, remainingIds) {
-    if (!remainingIds.length) {
-        postItem.remove();
-        adjustPostCountBadge(-1);
-        return;
-    }
-    const body = new FormData();
-    body.append('post_ids', remainingIds.join(','));
-    if (postItem.dataset.postIndex) body.append('display_index', postItem.dataset.postIndex);
-    try {
-        const res = await fetch(`/compose/post/${remainingIds[0]}/card`, { method: 'POST', body: body });
-        const data = await res.json();
-        if (data.success) replaceCard(postItem, data.html);
-    } catch (e) {
-        // Leaving the stale card is better than blanking it; a reload fixes it.
-    }
 }
 
 async function markUsedSelectedPosts() {
