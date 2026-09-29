@@ -42,11 +42,15 @@ GATES = [
 TIMEOUT_SECONDS = 300
 
 
-def run_gate(filename, token):
-    """Run one gate; returns (passed, summary line, failure detail)."""
+def run_gate(filename, token, args=()):
+    """Run one gate; returns (passed, summary line, failure detail).
+
+    ``args`` selects a section for the scripts that hold several gates and pick
+    one by argument, each printing its own token.
+    """
     try:
         result = subprocess.run(
-            [sys.executable, os.path.join(HERE, filename)],
+            [sys.executable, os.path.join(HERE, filename), *args],
             capture_output=True, text=True, timeout=TIMEOUT_SECONDS,
             cwd=HERE,
         )
