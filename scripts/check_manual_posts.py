@@ -3,20 +3,24 @@
     python scripts/check_manual_posts.py route     MANUAL_POSTS_ROUTE_OK
     python scripts/check_manual_posts.py wiring    MANUAL_POSTS_WIRING_OK
     python scripts/check_manual_posts.py targets   MANUAL_POSTS_TARGETS_OK
+    python scripts/check_manual_posts.py video     MANUAL_POSTS_VIDEO_OK
     python scripts/check_manual_posts.py llm       LLM_ADAPTERS_OK
 
 ``route`` drives the real /compose/post/create endpoint with the same targets the
 composer sends and checks the rows it writes. ``wiring`` renders the real
 /compose page and checks the manual tab is first, is the default, hides what only
 a model needs, and is bound to that endpoint. ``targets`` runs the composer's
-target-building JavaScript under node. ``llm`` exercises both model adapters
+target-building JavaScript under node. ``video`` runs the tab's video handlers
+and Save under node against a stub page, then replays exactly what Save sent to
+the real route. ``llm`` exercises both model adapters
 against recording fakes: they are what let the call sites, written for GPT-4-era
 ``max_tokens``/``temperature``, keep working on GPT-6 and Claude 5.
 
-All four run on a throwaway database with fake clients, so none needs a key,
+All five run on a throwaway database with fake clients, so none needs a key,
 makes a network call, or touches a real insights.db.
 """
 
+import json
 import os
 import re
 import shutil
@@ -170,9 +174,26 @@ def section_wiring():
     # --- one declaration each, none shadowing an older one --------------------
     for name in ("applyGeneratorMode", "tickedPlatforms", "manualPostTargets",
                  "updateManualComposerCount", "saveManualPost", "createManualPost",
-                 "updateManualCharCount", "showAddPostForm"):
+                 "updateManualCharCount", "showAddPostForm", "manualVideoChoice",
+                 "refreshManualVideoUI", "onManualVideoFile", "onManualVideoUrl",
+                 "clearManualVideo"):
         found = len(re.findall(rf"function\s+{name}\s*\(", html))
         check(found == 1, f"{name}() is declared {found} times")
+
+    # --- the video control ------------------------------------------------------
+    pane = html[html.index('id="manual-content"'): html.index('id="freeform-content"')]
+    for needle in ('id="manual-video-file"', 'accept="video/mp4,video/quicktime',
+                   'onchange="onManualVideoFile(this)"', 'id="manual-video-url"',
+                   'oninput="onManualVideoUrl(this)"', 'onclick="clearManualVideo()"',
+                   'id="manual-video-note"', "Reel"):
+        check(needle in pane, f"the manual pane's video control is missing `{needle}`")
+    for token in ("formData.append('video'", "formData.append('video_url'", "video_warnings",
+                  "manualVideoChoice()"):
+        check(token in save_src, f"saveManualPost() never uses `{token}`")
+    # The in-list form's own ids must be untouched: its gate keys on them.
+    for needle in ('id="new-post-video-file"', 'id="new-post-video-url"',
+                   'onchange="onNewPostVideoFile(this)"'):
+        check(needle in html, f"the in-list composer lost `{needle}`")
 
     # --- the older in-list composer is still there ----------------------------
     check('id="add-post-btn"' in html or "new_post_composer" in html or "Write a New Post" in html,
@@ -225,6 +246,217 @@ def section_targets():
           f"the server refused targets the composer builds: {good.get_json()}")
     print(f"target building: {len(cases)} cases, and the server accepts what they produce")
     print("MANUAL_POSTS_TARGETS_OK")
+
+
+# ── video (JavaScript under node, then the real route) ───────────────────
+
+VIDEO_HARNESS = r"""
+// A stub page: just the elements the manual tab's video code reads and writes.
+const els = {};
+const make = (id) => els[id] = {
+  id, value: '', files: [], textContent: '', innerHTML: '', disabled: false,
+  classes: new Set(['d-none']),
+  classList: {
+    add: (c) => els[id].classes.add(c), remove: (c) => els[id].classes.delete(c),
+    contains: (c) => els[id].classes.has(c),
+    toggle: (c, on) => { (on === undefined ? !els[id].classes.has(c) : on) ? els[id].classes.add(c) : els[id].classes.delete(c); },
+  },
+  focus() {},
+};
+['manual-video-file', 'manual-video-url', 'manual-video-name', 'manual-video-clear',
+ 'manual-video-note', 'manual-input', 'manual-save-btn', 'final-image-url'].forEach(make);
+// A real file input drops its files when its value is set to ''.
+(() => {
+  const input = els['manual-video-file'];
+  let value = '';
+  Object.defineProperty(input, 'value', {
+    get: () => value,
+    set: (v) => { value = v; if (v === '') input.files = []; },
+  });
+})();
+const toasts = [], alerts = [], sent = [];
+const document = { getElementById: (id) => els[id] };
+const showToast = (m, t) => toasts.push([t, m]);
+const alert = (m) => alerts.push(m);
+const confirm = () => true;
+const platformCharLimits = { linkedin: 3000, threads: 500, twitter: 280, facebook: 5000, instagram: 2200 };
+const PLATFORM_LABELS = { linkedin: 'LinkedIn', threads: 'Threads', twitter: 'X', facebook: 'Facebook', instagram: 'Instagram' };
+const counts = [];
+const flush = () => new Promise((resolve) => setImmediate(resolve));
+let updateManualComposerCount = () => counts.push(1);
+let selectedAccountTargets = () => [];
+let tickedPlatforms = () => ['linkedin', 'threads'];
+let reloaded = 0;
+const location = { reload: () => { reloaded++; } };
+const setTimeout = (fn) => fn();
+let reply = { success: true, post_ids: [1, 2], video_warnings: [] };
+const fetch = (url, opts) => {
+  sent.push({ url, entries: Array.from(opts.body.entries()).map(([k, v]) => [k, v && v.name ? 'FILE:' + v.name : v]) });
+  return Promise.resolve({ json: () => Promise.resolve(reply) });
+};
+const file = (name, size) => { const f = new File(['x'], name); Object.defineProperty(f, 'size', { value: size }); return f; };
+const state = () => ({
+  fileName: els['manual-video-file'].files[0] ? els['manual-video-file'].files[0].name : null,
+  fileValue: els['manual-video-file'].value, url: els['manual-video-url'].value,
+  name: els['manual-video-name'].textContent,
+  clearHidden: els['manual-video-clear'].classes.has('d-none'),
+  noteHidden: els['manual-video-note'].classes.has('d-none'),
+});
+const setFile = (f) => { els['manual-video-file'].files = [f]; els['manual-video-file'].value = 'C:\\fake\\' + f.name; };
+const reset = () => {
+  ['manual-video-file', 'manual-video-url', 'final-image-url', 'manual-input'].forEach((id) => { els[id].value = ''; });
+  els['manual-video-file'].files = [];
+  toasts.length = 0; alerts.length = 0; sent.length = 0; counts.length = 0; reloaded = 0;
+  reply = { success: true, post_ids: [1, 2], video_warnings: [] };
+  els['manual-save-btn'].disabled = false;
+};
+"""
+
+
+def section_video():
+    node = shutil.which("node")
+    check(node, "node is required for this gate and was not found on PATH")
+    database, web, client, ids = rig()
+    html = client.get("/compose").get_data(as_text=True)
+
+    def body(name):
+        """Exactly one function's source, found by matching its braces."""
+        text = function_body(html, name)
+        start = text.index("{", text.index(")"))
+        depth = 0
+        for i in range(start, len(text)):
+            depth += {"{": 1, "}": -1}.get(text[i], 0)
+            if depth == 0:
+                return text[: i + 1]
+        check(False, f"{name}() has unbalanced braces")
+
+    source = "\n".join(body(n) for n in (
+        "manualVideoChoice", "refreshManualVideoUI", "onManualVideoFile", "onManualVideoUrl",
+        "clearManualVideo", "manualPostTargets", "saveManualPost"))
+    const = re.search(r"const MANUAL_VIDEO_MAX_BYTES = [^;]+;", html)
+    check(const, "the upload cap constant is gone")
+
+    script = VIDEO_HARNESS + const.group(0) + "\n" + source + r"""
+(async () => {
+  const out = {};
+  const MB = 1024 * 1024;
+
+  reset(); setFile(file('clip.avi', 1000)); onManualVideoFile(els['manual-video-file']);
+  out.badType = { ...state(), toasts: toasts.slice() };
+
+  reset(); setFile(file('clip.mp4', 101 * MB)); onManualVideoFile(els['manual-video-file']);
+  out.tooBig = { ...state(), toasts: toasts.slice() };
+
+  reset(); els['manual-video-url'].value = 'https://old.test/x.mp4';
+  setFile(file('clip.mp4', 5 * MB)); onManualVideoFile(els['manual-video-file']);
+  out.fileClearsUrl = state();
+
+  reset(); setFile(file('old.mp4', 1000));
+  els['manual-video-url'].value = 'https://cdn.test/y.mp4'; onManualVideoUrl(els['manual-video-url']);
+  out.urlClearsFile = state();
+
+  reset(); setFile(file('clip.mov', 1000)); onManualVideoFile(els['manual-video-file']);
+  clearManualVideo(); out.cleared = state();
+  out.recounted = counts.length;
+
+  // Save: a URL video with an image also chosen sends the video and NOT the image.
+  reset(); els['manual-input'].value = 'A post with a clip';
+  els['final-image-url'].value = 'https://img.test/a.jpg';
+  els['manual-video-url'].value = ' https://cdn.test/y.mp4 ';
+  saveManualPost(); await flush();
+  out.saveUrl = { sent: sent.slice(), reloaded };
+
+  // Save: an uploaded file goes as `video`, no video_url, no image.
+  reset(); els['manual-input'].value = 'A post with an upload';
+  els['final-image-url'].value = 'https://img.test/a.jpg';
+  setFile(file('clip.mp4', 1234));
+  saveManualPost(); const busy = els['manual-save-btn'].innerHTML;
+  await flush();
+  out.saveFile = { sent: sent.slice(), busy };
+
+  // Save: no video keeps sending the image, exactly as before.
+  reset(); els['manual-input'].value = 'A plain post';
+  els['final-image-url'].value = 'https://img.test/a.jpg';
+  saveManualPost(); await flush();
+  out.savePlain = sent.slice();
+
+  // Save: the platforms' warnings about the video are shown before the reload wipes them.
+  reset(); els['manual-input'].value = 'Short clip';
+  els['manual-video-url'].value = 'https://cdn.test/short.mp4';
+  reply = { success: true, post_ids: [1], video_warnings: [
+    { level: 'warning', message: 'LinkedIn wants at least 3 seconds' },
+    { level: 'error', message: 'Instagram cannot take this' }] };
+  saveManualPost(); await flush();
+  out.warnings = { alerts: alerts.slice(), reloaded };
+
+  console.log(JSON.stringify(out));
+})();
+"""
+    result = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    check(result.returncode == 0, f"node failed:\n{result.stderr.strip()[:800]}")
+    out = json.loads(result.stdout.strip().splitlines()[-1])
+
+    bad = out["badType"]
+    check(bad["fileValue"] == "" and bad["clearHidden"] and bad["toasts"]
+          and "MP4 or MOV" in bad["toasts"][0][1], f"an AVI should be refused and cleared: {bad}")
+    big = out["tooBig"]
+    check(big["fileValue"] == "" and big["clearHidden"] and "100MB" in big["toasts"][0][1],
+          f"a file over 100MB should be refused and cleared: {big}")
+    fc = out["fileClearsUrl"]
+    check(fc["fileName"] == "clip.mp4" and fc["url"] == "" and "5.0 MB" in fc["name"]
+          and not fc["clearHidden"] and not fc["noteHidden"],
+          f"choosing a file should clear the URL and show the file: {fc}")
+    uc = out["urlClearsFile"]
+    check(uc["fileValue"] == "" and uc["url"] == "https://cdn.test/y.mp4" and not uc["noteHidden"],
+          f"typing a URL should clear the file: {uc}")
+    cl = out["cleared"]
+    check(cl["fileValue"] == "" and cl["url"] == "" and cl["clearHidden"] and cl["noteHidden"],
+          f"Remove should empty the control: {cl}")
+    check(out["recounted"] == 2, "the character/Instagram hint is not refreshed as the video changes")
+
+    url_send = out["saveUrl"]["sent"]
+    check(len(url_send) == 1 and url_send[0]["url"] == "/compose/post/create", f"Save did not post to the route: {url_send}")
+    fields = url_send[0]["entries"]
+    check(["video_url", "https://cdn.test/y.mp4"] in fields, f"the URL was not sent trimmed: {fields}")
+    check(not any(k in ("image_url", "video") for k, _ in fields),
+          f"a video post must not also send an image or a file: {fields}")
+    check(["targets", "linkedin"] in fields and ["targets", "threads"] in fields
+          and ["content", "A post with a clip"] in fields, f"targets/content missing: {fields}")
+    check(out["saveUrl"]["reloaded"] == 1, "the page should reload after a successful save")
+
+    file_send = out["saveFile"]["sent"][0]["entries"]
+    check(["video", "FILE:clip.mp4"] in file_send and not any(k in ("video_url", "image_url") for k, _ in file_send),
+          f"an uploaded video should go as `video` alone: {file_send}")
+    check("Uploading video" in out["saveFile"]["busy"], "the button should say the video is uploading")
+    plain = out["savePlain"][0]["entries"]
+    check(["image_url", "https://img.test/a.jpg"] in plain and not any(k.startswith("video") for k, _ in plain),
+          f"a post without a video must still send its image: {plain}")
+    w = out["warnings"]
+    check(len(w["alerts"]) == 1 and "3 seconds" in w["alerts"][0] and "⛔" in w["alerts"][0]
+          and "⚠️" in w["alerts"][0], f"video warnings must be shown before the reload: {w}")
+
+    # --- replay what Save sent against the real route ---------------------------
+    web.video_media.head_size = lambda url: 5 * 1024 * 1024   # no network
+    created = []
+    web._maybe_attach_link_image = lambda *a, **k: created.append(a)
+    replay = {}
+    for k, v in fields:
+        replay.setdefault(k, []).append(v)
+    replay["content"] = "Replayed manual video post"
+    replay["video_url"] = "http://93.184.216.34/clip.mp4"   # a literal public IP: no DNS
+    response = client.post("/compose/post/create", data=replay, content_type="multipart/form-data")
+    body_json = response.get_json()
+    check(response.status_code == 200 and body_json.get("success"), f"the route refused what Save sends: {body_json}")
+    rows = [dict(r) for r in database.list_standalone_posts(db_path=database.DB_PATH)
+            if r["content"] == "Replayed manual video post"]
+    check(len(rows) == 2 and all(r["video_url"] == "http://93.184.216.34/clip.mp4" and not r["image_url"]
+                                 and r["source_type"] == "manual" for r in rows),
+          f"every ticked account's row should carry the video and no image: {rows}")
+    check(len(web._group_standalone_posts(database.list_standalone_posts(db_path=database.DB_PATH))) == 1,
+          "the video post should be one card")
+    check(not created, "a post with a video must not go looking for a link image")
+    print("video: the tab validates, excludes file/URL, sends the video instead of the image, and the route takes it")
+    print("MANUAL_POSTS_VIDEO_OK")
 
 
 # ── llm ──────────────────────────────────────────────────────────────────
@@ -391,7 +623,7 @@ def section_llm():
 
 
 SECTIONS = {"route": section_route, "wiring": section_wiring,
-            "targets": section_targets, "llm": section_llm}
+            "targets": section_targets, "video": section_video, "llm": section_llm}
 
 if __name__ == "__main__":
     name = sys.argv[1] if len(sys.argv) > 1 else ""

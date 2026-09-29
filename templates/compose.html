@@ -619,6 +619,28 @@
                               oninput="updateManualComposerCount()"></textarea>
                     <div class="small mt-2 d-flex flex-wrap gap-2 align-items-center" id="manual-charcount" aria-live="polite"></div>
                 </div>
+                {# An optional video, saved on every ticked account's post. Upload a
+                   file or paste a public URL, not both: choosing one clears the
+                   other. Same rules as the "Write a New Post" form under the list. #}
+                <div class="mb-2" id="manual-video">
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
+                        <label class="btn btn-sm btn-outline-secondary mb-0" title="Upload a video (MP4/MOV, up to 100MB)">
+                            🎬 Add Video
+                            <input type="file" class="d-none" id="manual-video-file"
+                                   accept="video/mp4,video/quicktime,.mp4,.mov"
+                                   onchange="onManualVideoFile(this)">
+                        </label>
+                        <input type="url" class="form-control form-control-sm" style="max-width: 340px;"
+                               id="manual-video-url" placeholder="…or paste a public video URL"
+                               oninput="onManualVideoUrl(this)">
+                        <span class="small text-muted text-truncate" style="max-width: 220px;" id="manual-video-name"></span>
+                        <button type="button" class="btn btn-sm btn-outline-danger d-none" id="manual-video-clear"
+                                onclick="clearManualVideo()" title="Remove the video">✕</button>
+                    </div>
+                    <div class="small text-muted mt-1 d-none" id="manual-video-note">
+                        🎬 The video posts instead of any image; Instagram sends it as a Reel.
+                    </div>
+                </div>
             </div>
 
             <!-- Freeform Tab -->
@@ -2212,6 +2234,57 @@ function manualPostTargets() {
     return accounts.concat(tickedPlatforms().filter(p => !withAccount.has(p)));
 }
 
+// The manual tab's optional video: a file to upload or a URL, never both. Saving
+// sends whichever is set with the post, so a video that can't be used stops the
+// post from being created at all instead of leaving a card without it. A post
+// with a video publishes the video and ignores any image, so an image is not
+// sent alongside one.
+const MANUAL_VIDEO_MAX_BYTES = 100 * 1024 * 1024;
+
+function manualVideoChoice() {
+    return {
+        file: document.getElementById('manual-video-file').files[0] || null,
+        url: document.getElementById('manual-video-url').value.trim(),
+    };
+}
+
+function refreshManualVideoUI() {
+    const { file, url } = manualVideoChoice();
+    const has = !!(file || url);
+    document.getElementById('manual-video-name').textContent =
+        file ? `${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB)` : '';
+    document.getElementById('manual-video-clear').classList.toggle('d-none', !has);
+    document.getElementById('manual-video-note').classList.toggle('d-none', !has);
+    updateManualComposerCount();
+}
+
+function onManualVideoFile(input) {
+    const file = input.files[0];
+    if (file) {
+        if (!/\.(mp4|mov)$/i.test(file.name)) {
+            showToast('Invalid file type. Please choose an MP4 or MOV video.', 'error');
+            input.value = '';
+        } else if (file.size > MANUAL_VIDEO_MAX_BYTES) {
+            showToast('File too large. Uploads are limited to 100MB; paste a public URL for bigger videos.', 'error');
+            input.value = '';
+        } else {
+            document.getElementById('manual-video-url').value = '';
+        }
+    }
+    refreshManualVideoUI();
+}
+
+function onManualVideoUrl(input) {
+    if (input.value.trim()) document.getElementById('manual-video-file').value = '';
+    refreshManualVideoUI();
+}
+
+function clearManualVideo() {
+    document.getElementById('manual-video-file').value = '';
+    document.getElementById('manual-video-url').value = '';
+    refreshManualVideoUI();
+}
+
 function updateManualComposerCount() {
     const input = document.getElementById('manual-input');
     const out = document.getElementById('manual-charcount');
@@ -2238,8 +2311,9 @@ function updateManualComposerCount() {
         out.appendChild(chip(`${PLATFORM_LABELS[p] || p} ${length} / ${limit}`,
             over ? 'badge bg-danger' : 'badge bg-light text-dark border'));
     });
-    if (platforms.includes('instagram')) {
-        out.appendChild(chip('Instagram needs an image to publish', 'text-muted'));
+    const { file: videoFile, url: videoUrl } = manualVideoChoice();
+    if (platforms.includes('instagram') && !videoFile && !videoUrl) {
+        out.appendChild(chip('Instagram needs an image or video to publish', 'text-muted'));
     }
 }
 
@@ -2266,12 +2340,16 @@ function saveManualPost() {
     const formData = new FormData();
     targets.forEach(t => formData.append('targets', t));
     formData.append('content', content);
+    const { file: videoFile, url: videoUrl } = manualVideoChoice();
     const imageUrl = document.getElementById('final-image-url').value.trim();
-    if (imageUrl) formData.append('image_url', imageUrl);
+    if (videoFile) formData.append('video', videoFile);
+    else if (videoUrl) formData.append('video_url', videoUrl);
+    else if (imageUrl) formData.append('image_url', imageUrl);
 
     const btn = document.getElementById('manual-save-btn');
     const original = btn.innerHTML;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Saving...';
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> ' +
+        (videoFile ? 'Uploading video...' : 'Saving...');
     btn.disabled = true;
 
     fetch('{{ url_for("compose_create_post") }}', { method: 'POST', body: formData })
@@ -2279,6 +2357,10 @@ function saveManualPost() {
         .then(data => {
             if (!data.success) throw new Error(data.error || 'Failed to save post');
             const n = (data.post_ids || []).length;
+            // The reload below wipes a toast, so what the platforms will make of
+            // the video is said up front, the way the form under the list does.
+            const problems = (data.video_warnings || []).map(w => (w.level === 'error' ? '⛔ ' : '⚠️ ') + w.message);
+            if (problems.length) alert('Post saved. Heads up about the video:\n\n' + problems.join('\n'));
             showToast(n > 1 ? `Post saved for ${n} accounts! Refreshing...` : 'Post saved! Refreshing...', 'success');
             (data.warnings || []).forEach(w => showToast(w, 'info'));
             setTimeout(() => location.reload(), 900);
