@@ -461,11 +461,36 @@ def section_video():
 
 # ── llm ──────────────────────────────────────────────────────────────────
 
+def _sdk_http_library(distribution):
+    """The HTTP library an installed SDK is built on, imported.
+
+    openai 3 and anthropic 1 moved from httpx to httpx2, and an SDK's error types
+    expect a response from its own library. Importing "httpx" by name therefore
+    fails outright where only httpx2 is installed, and where both are it builds
+    the fake response from a library the SDK is not using, so the gate would pass
+    while testing something unrepresentative. The SDK's declared requirements say
+    which one it uses.
+    """
+    import importlib
+    import re
+    from importlib.metadata import requires
+    # Optional extras do not count: openai 2 lists httpx2 under an extra it never
+    # installs by default, while requiring httpx outright.
+    declared = {re.match(r"[A-Za-z0-9_.-]+", r).group(0).lower().replace("_", "-")
+                for r in (requires(distribution) or [])
+                if not re.search(r"extra\s*==", r)}
+    name = "httpx2" if "httpx2" in declared else "httpx"
+    check("httpx" in declared or "httpx2" in declared,
+          f"{distribution} declares neither httpx nor httpx2, so this gate does not know "
+          f"which HTTP library to build its fake response from: {sorted(declared)}")
+    return importlib.import_module(name)
+
+
 def section_llm():
-    import httpx
     import openai
     import insights
     import usage_meter
+    httpx = _sdk_http_library("openai")
 
     # --- defaults and dropdown ------------------------------------------------
     check(insights.MODEL_CHOICES["openai"][0] == "gpt-6.1-sol", "OpenAI list should lead with gpt-6.1-sol")
