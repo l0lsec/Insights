@@ -39,18 +39,22 @@ GET = {
 }
 
 
-def save_without_identity(platform, token):
-    """Save a login exactly as its callback would when the platform says nothing."""
+def save_without_identity(platform, token, new_login=False):
+    """Save a login exactly as its callback would when the platform says nothing.
+
+    ``new_login`` is what the callback passes when the run was started from the
+    accounts screen, where every connect button means "add a login".
+    """
     if platform == "linkedin":
-        database.save_linkedin_token(token, FUTURE, "", "", "LinkedIn User (needs configuration)", "", db_path=P)
+        database.save_linkedin_token(token, FUTURE, "", "", "LinkedIn User (needs configuration)", "", new_login=new_login, db_path=P)
     elif platform == "threads":
-        database.save_threads_token(token, FUTURE, "", "", db_path=P)
+        database.save_threads_token(token, FUTURE, "", "", new_login=new_login, db_path=P)
     elif platform == "twitter":
-        database.save_twitter_token(token, "refresh", FUTURE, "", "", db_path=P)
+        database.save_twitter_token(token, "refresh", FUTURE, "", "", new_login=new_login, db_path=P)
     elif platform == "facebook":
-        database.save_facebook_token(token, FUTURE, "", page_id=None, db_path=P)
+        database.save_facebook_token(token, FUTURE, "", page_id=None, new_login=new_login, db_path=P)
     elif platform == "instagram":
-        database.save_instagram_token(token, FUTURE, "", "", db_path=P)
+        database.save_instagram_token(token, FUTURE, "", "", new_login=new_login, db_path=P)
 
 
 # What the configure screen calls to give a placeholder its identity, and the
@@ -165,6 +169,40 @@ for platform in PLATFORMS:
     check(dict(get(ph, db_path=P)) == dict(before),
           f"{platform}: a refused change still altered the account's token")
 
+# --- two logins added on purpose never share a placeholder -----------------
+# Sharing is a fallback for callers that cannot say whether a login is new. The
+# accounts screen can: every connect button there adds one. Two unidentified
+# logins added from it must each survive, or the second silently destroys the
+# first while the user is looking at a page that says "Connect another".
+directory, database, web, publisher, client = isolated_app()
+P = database.DB_PATH
+for platform in PLATFORMS:
+    get = GET[platform]
+    real = connect(database, platform, f"{platform}-1", "First")
+    real_token = f"token-{platform}-{platform}-1"
+
+    save_without_identity(platform, "token-A", new_login=True)
+    save_without_identity(platform, "token-B", new_login=True)
+    pending = placeholders(platform)
+    check(len(pending) == 2,
+          f"{platform}: two logins added on purpose share {len(pending)} placeholder(s)")
+    tokens = sorted(get(a["id"], db_path=P)["access_token"] for a in pending)
+    check(tokens == ["token-A", "token-B"],
+          f"{platform}: adding a second unidentified login destroyed the first: {tokens}")
+    check(get(real, db_path=P)["access_token"] == real_token,
+          f"{platform}: an added login reached the real account")
+
+    # A caller that cannot say still gets the shared placeholder, and only ever
+    # spends one of them. The real account and the other placeholder survive.
+    save_without_identity(platform, "token-C")
+    check(len(placeholders(platform)) == 2,
+          f"{platform}: a login of unknown intent multiplied placeholders")
+    after = sorted(get(a["id"], db_path=P)["access_token"] for a in placeholders(platform))
+    check(after in (["token-A", "token-C"], ["token-B", "token-C"]),
+          f"{platform}: a login of unknown intent did not reuse exactly one placeholder: {after}")
+    check(get(real, db_path=P)["access_token"] == real_token,
+          f"{platform}: a login of unknown intent reached the real account")
+
 # --- a placeholder never holds the default against a real account ---------
 directory, database, web, publisher, client = isolated_app()
 P = database.DB_PATH
@@ -191,6 +229,12 @@ class FakeLinkedIn:
 
     def __init__(self, info):
         self.info = info
+
+    def is_configured(self):
+        return True
+
+    def get_authorization_url(self, state=None):
+        return "https://linkedin.example/authorize", "S"
 
     def exchange_code_for_token(self, code):
         return {"access_token": f"tok-{code}", "expires_in": 5184000}
@@ -241,6 +285,49 @@ check(refused.status_code == 200 and b"already belongs to another" in refused.da
       "a Member ID clash was not explained to the user")
 check(database.get_social_account(placeholder_id, db_path=P)["external_id"] == "m-second",
       "a refused Member ID clash still changed the account")
+
+# The accounts page's Connect button starts an OAuth run whose intent is "add a
+# login". That has to survive the trip through the platform and back, so this
+# goes through the real /auth route rather than setting the session by hand.
+def linkedin_via_auth(info, code, from_accounts):
+    web.get_linkedin_client = lambda: FakeLinkedIn(info)
+    started = client.get("/linkedin/auth" + ("?return=accounts" if from_accounts else ""))
+    check(started.status_code == 302, f"/linkedin/auth did not redirect ({started.status_code})")
+    return client.get(f"/linkedin/callback?code={code}&state=S")
+
+
+before = len(placeholders("linkedin"))
+first_add = linkedin_via_auth(None, "added1", from_accounts=True)
+second_add = linkedin_via_auth(None, "added2", from_accounts=True)
+check(len(placeholders("linkedin")) == before + 2,
+      f"two logins added from the accounts screen produced "
+      f"{len(placeholders('linkedin')) - before} new placeholder(s), expected 2")
+added = {database.get_linkedin_token(a["id"], db_path=P)["access_token"]: a["id"]
+         for a in placeholders("linkedin")}
+check("tok-added1" in added and "tok-added2" in added,
+      f"the first added login was overwritten by the second: {sorted(added)}")
+check(f"account_id={added['tok-added1']}" in first_add.headers["Location"]
+      and f"account_id={added['tok-added2']}" in second_add.headers["Location"],
+      "each added login was not sent to configure its own account")
+
+# A run that did not start from the accounts screen keeps the old behaviour.
+count = len(placeholders("linkedin"))
+linkedin_via_auth(None, "legacy", from_accounts=False)
+check(len(placeholders("linkedin")) == count,
+      "a run not started from the accounts screen minted a placeholder of its own")
+check(database.get_social_account(first_account["id"], db_path=P)["external_id"] == "m-first",
+      "a legacy run damaged the first account")
+
+# The intent is read once. A later run that never touched the accounts screen
+# must not inherit it from an earlier one.
+linkedin_via_auth(None, "added3", from_accounts=True)
+count = len(placeholders("linkedin"))
+web.get_linkedin_client = lambda: FakeLinkedIn(None)
+with client.session_transaction() as session:
+    session["linkedin_oauth_state"] = "S"
+client.get("/linkedin/callback?code=stale&state=S")
+check(len(placeholders("linkedin")) == count,
+      "a callback inherited the add-a-login intent from an earlier, finished run")
 
 # The accounts page offers a way to fix a login that still needs configuring.
 linkedin_callback(None, "three")
@@ -311,6 +398,88 @@ check(database.get_facebook_token(first_fb["id"], db_path=P)["page_id"] == "page
       "choosing a Page for the new login rewrote the first account's Page")
 check(database.get_social_account(new_account["id"], db_path=P)["external_id"] == "page-b",
       "the new login's account did not move to the Page that was chosen")
+
+# ---------------------------------------------------------------------------
+# Section 3: the add-a-login intent reaches the save through every callback
+# ---------------------------------------------------------------------------
+# LinkedIn was driven above. The other four callbacks each had the same argument
+# added by hand, so each is driven here through its real /auth and /callback
+# routes, which is the only thing that notices one of them losing it.
+
+class FakeOAuth:
+    """Stands in for the Threads, Instagram, X and Facebook clients.
+
+    They differ in which methods their callbacks call but all return plain
+    dicts, and every reply here is the platform saying nothing about who logged
+    in: no profile, no Pages.
+    """
+
+    def __init__(self, three=False):
+        self.three = three
+
+    def is_configured(self):
+        return True
+
+    def get_authorization_url(self, state=None):
+        # X also returns the PKCE verifier its callback needs back.
+        return ("https://oauth.example/authorize", "S", "verifier") if self.three \
+            else ("https://oauth.example/authorize", "S")
+
+    def exchange_code_for_token(self, code, verifier=None):
+        return {"access_token": f"short-{code}", "refresh_token": "refresh",
+                "expires_in": 7200}
+
+    def get_long_lived_token(self, token):
+        return {"access_token": token.replace("short", "long"), "expires_in": 5184000}
+
+    def get_user_profile(self, token):
+        return None
+
+    def get_user_info(self, token):
+        return None
+
+    def get_user_pages(self, token):
+        return []
+
+    def get_user_groups(self, token):
+        return []
+
+
+directory, database, web, publisher, client = isolated_app()
+P = database.DB_PATH
+
+for platform, factory, three in (
+    ("threads", "get_threads_client", False),
+    ("instagram", "get_instagram_client", False),
+    ("twitter", "get_twitter_client", True),
+    ("facebook", "get_facebook_client", False),
+):
+    setattr(web, factory, lambda three=three: FakeOAuth(three=three))
+
+    def via_auth(code, from_accounts, platform=platform):
+        started = client.get(f"/{platform}/auth" + ("?return=accounts" if from_accounts else ""))
+        check(started.status_code == 302,
+              f"/{platform}/auth did not redirect ({started.status_code})")
+        return client.get(f"/{platform}/callback?code={code}&state=S")
+
+    real = connect(database, platform, f"{platform}-1", "First")
+    real_token = f"token-{platform}-{platform}-1"
+
+    via_auth("a1", from_accounts=True)
+    via_auth("a2", from_accounts=True)
+    pending = placeholders(platform)
+    check(len(pending) == 2,
+          f"{platform}: two logins added from the accounts screen produced "
+          f"{len(pending)} placeholder(s), so the callback dropped the intent")
+    tokens = sorted(GET[platform](a["id"], db_path=P)["access_token"] for a in pending)
+    check(tokens[0].endswith("a1") and tokens[1].endswith("a2"),
+          f"{platform}: adding a second unidentified login destroyed the first: {tokens}")
+    check(GET[platform](real, db_path=P)["access_token"] == real_token,
+          f"{platform}: an added login reached the real account")
+
+    via_auth("legacy", from_accounts=False)
+    check(len(placeholders(platform)) == 2,
+          f"{platform}: a run not started from the accounts screen minted a placeholder")
 
 print("login without identity: an unidentified login never damages an identified "
       "account on any platform, and the callbacks send the user to the right account")

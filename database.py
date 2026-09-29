@@ -7,6 +7,7 @@ web interface. Each function wraps a query so callers don't need to know SQL.
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from typing import Dict, Iterable, Optional, List
 from datetime import datetime
@@ -1753,6 +1754,7 @@ def _save_token(
     fields: dict,
     identity: dict,
     account_id=None,
+    new_login: bool = False,
     db_path: str = DB_PATH,
 ) -> int:
     """Store a token against the account it belongs to; returns the token row id.
@@ -1761,6 +1763,11 @@ def _save_token(
     fields. A login already connected is refreshed in place; a login that is new
     to this platform gets its own account, which is how a second LinkedIn stops
     overwriting the first.
+
+    ``new_login`` says the caller knows this is a login being added rather than
+    one being refreshed. It only matters when the platform returned no identity:
+    there is then nothing to tell two logins apart by, so without it they share
+    one placeholder, and with it each gets a placeholder of its own.
     """
     now = datetime.utcnow().isoformat(timespec="seconds")
     table = _token_table(platform)
@@ -1775,11 +1782,13 @@ def _save_token(
             # default account, which meant a second login with no identity
             # overwrote the first account's token and blanked its member URN.
             #
-            # It lands on a named account if the caller named one, otherwise on
-            # the platform's placeholder. There is one placeholder per platform,
-            # reused rather than minted afresh on every retry, so two logins
-            # that both arrive unidentified share it. That can only ever cost
-            # one unconfigured login another; a real account is never touched.
+            # It lands on a named account if the caller named one. Failing that,
+            # a login the caller knows is being added (``new_login``) gets a
+            # placeholder of its own, so two of them cannot overwrite each other.
+            # Only when the caller cannot say does it fall back to the platform's
+            # shared placeholder, reused rather than minted afresh on every
+            # retry. That fallback can cost one unconfigured login another; it
+            # can never touch a real account.
             named = None
             if account_id:
                 named = conn.execute(
@@ -1788,6 +1797,15 @@ def _save_token(
                 ).fetchone()
             if named:
                 target = named["id"]
+            elif new_login:
+                target = _upsert_account_row(
+                    conn, platform=platform,
+                    external_id=f"pending:{platform}:{secrets.token_hex(4)}",
+                    display_name=identity.get("display_name"),
+                    handle=identity.get("handle"),
+                    avatar_url=identity.get("avatar_url"),
+                    now=now,
+                )
             else:
                 placeholder = conn.execute(
                     "SELECT external_id FROM social_accounts "
@@ -2085,6 +2103,7 @@ def save_linkedin_token(
     email: str | None = None,
     refresh_token: str | None = None,
     account_id: int | None = None,
+    new_login: bool = False,
     db_path: str = DB_PATH,
 ) -> int:
     """Save or update LinkedIn OAuth tokens. Returns the token record id."""
@@ -2105,6 +2124,7 @@ def save_linkedin_token(
             "handle": email,
         },
         account_id=account_id,
+        new_login=new_login,
         db_path=db_path,
     )
 
@@ -2177,6 +2197,7 @@ def save_threads_token(
     display_name: str | None = None,
     profile_picture_url: str | None = None,
     account_id: int | None = None,
+    new_login: bool = False,
     db_path: str = DB_PATH,
 ) -> int:
     """Save or update Threads OAuth tokens. Returns the token record id."""
@@ -2197,6 +2218,7 @@ def save_threads_token(
             "avatar_url": profile_picture_url,
         },
         account_id=account_id,
+        new_login=new_login,
         db_path=db_path,
     )
 
@@ -2269,6 +2291,7 @@ def save_instagram_token(
     profile_picture_url: str | None = None,
     account_type: str | None = None,
     account_id: int | None = None,
+    new_login: bool = False,
     db_path: str = DB_PATH,
 ) -> int:
     """Save or update Instagram OAuth tokens. Returns the token record id."""
@@ -2292,6 +2315,7 @@ def save_instagram_token(
             "avatar_url": profile_picture_url,
         },
         account_id=account_id,
+        new_login=new_login,
         db_path=db_path,
     )
 
@@ -2368,6 +2392,7 @@ def save_facebook_token(
     page_access_token: str | None = None,
     group_ids: str | None = None,
     account_id: int | None = None,
+    new_login: bool = False,
     db_path: str = DB_PATH,
 ) -> int:
     """Save or update Facebook OAuth tokens. Returns the token record id."""
@@ -2391,6 +2416,7 @@ def save_facebook_token(
             "handle": page_name,
         },
         account_id=account_id,
+        new_login=new_login,
         db_path=db_path,
     )
 
@@ -2478,6 +2504,7 @@ def save_twitter_token(
     username: str,
     display_name: str | None = None,
     account_id: int | None = None,
+    new_login: bool = False,
     db_path: str = DB_PATH,
 ) -> int:
     """Save or update Twitter OAuth tokens. Returns the token record id."""
@@ -2497,6 +2524,7 @@ def save_twitter_token(
             "handle": username,
         },
         account_id=account_id,
+        new_login=new_login,
         db_path=db_path,
     )
 

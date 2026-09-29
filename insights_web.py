@@ -3277,8 +3277,21 @@ def _platform_accounts_json(platform):
 
 
 def _remember_oauth_return():
-    """Note that this OAuth run started from the accounts screen."""
-    session['oauth_return'] = 'accounts' if request.args.get('return') == 'accounts' else None
+    """Note that this OAuth run started from the accounts screen.
+
+    Starting from there also says something about intent: the accounts screen's
+    Connect and Connect another buttons always mean "add a login". The callback
+    needs that when the platform returns no identity, because a login it cannot
+    identify would otherwise share a placeholder with any other unidentified one.
+    """
+    from_accounts = request.args.get('return') == 'accounts'
+    session['oauth_return'] = 'accounts' if from_accounts else None
+    session['oauth_new_login'] = from_accounts
+
+
+def _oauth_new_login():
+    """True when this OAuth run was started to add another login. Read once."""
+    return bool(session.pop('oauth_new_login', False))
 
 
 def _oauth_return_redirect(fallback_url):
@@ -3553,6 +3566,7 @@ def linkedin_callback():
         
         # Save token (with or without profile info)
         token_row = save_linkedin_token(
+            new_login=_oauth_new_login(),
             access_token=access_token,
             expires_at=expires_at,
             member_id=member_id,
@@ -3818,6 +3832,7 @@ def threads_callback():
         
         # Save token
         save_threads_token(
+            new_login=_oauth_new_login(),
             access_token=access_token,
             expires_at=expires_at,
             user_id=user_id,
@@ -4066,6 +4081,7 @@ def instagram_callback():
 
         # Save token
         save_instagram_token(
+            new_login=_oauth_new_login(),
             access_token=access_token,
             expires_at=expires_at,
             user_id=user_id,
@@ -4279,6 +4295,7 @@ def facebook_callback():
         group_ids = ','.join(g['id'] for g in groups) if groups else None
 
         token_row = save_facebook_token(
+            new_login=_oauth_new_login(),
             access_token=access_token,
             expires_at=expires_at,
             user_id=user_id,
@@ -4518,6 +4535,7 @@ def twitter_callback():
             display_name = 'X User'
 
         save_twitter_token(
+            new_login=_oauth_new_login(),
             access_token=access_token,
             refresh_token=refresh_token,
             expires_at=expires_at,
