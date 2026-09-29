@@ -3860,11 +3860,19 @@ async function queueAllFromCard(btn) {
             method: 'POST', body: body,
         });
         const data = await res.json();
-        if (!res.ok && !data.queued) throw new Error(data.error || 'Could not queue');
+        // A reply carrying a `queued` list is the queue answering, even when the
+        // list is empty. Anything else is the request itself failing.
+        if (!res.ok && !Array.isArray(data.queued)) throw new Error(data.error || 'Could not queue');
         if ((data.skipped || []).length) {
             alert(data.skipped.map(s => `${s.target}: ${s.error}`).join('\n'));
         }
-        showToast(data.message || 'Queued', data.success && !data.partial ? 'success' : 'warning');
+        if (!(data.queued || []).length) {
+            // Nothing went in. Saying "Queued" here, as this once did, is the one
+            // thing this button must never do: the user would stop looking.
+            showToast(data.error || 'Nothing was queued', 'error');
+        } else {
+            showToast(data.message || 'Queued', data.success && !data.partial ? 'success' : 'warning');
+        }
         await refreshCard(postItem);
     } catch (e) {
         showToast('Could not queue: ' + e.message, 'error');

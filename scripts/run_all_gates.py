@@ -153,11 +153,27 @@ MANUAL_POST_GATES = [
      ("llm",)),
 ]
 
+# The accounts and cross-posting JavaScript, run under node rather than read. The
+# markup gate in ACCOUNT_GATES only proves the controls exist; these prove what
+# they send and what they tell the user, including on every failure path.
+ACCOUNT_JS_GATES = [
+    ("check_accounts_js.py", "COMPOSE_ACCOUNTS_JS_OK",
+     "the Compose cross-posting controls send the right account and report each target honestly",
+     ("compose",)),
+    ("check_accounts_js.py", "ACCOUNTS_PAGE_JS_OK",
+     "the accounts page's default, rename and disconnect controls behave, including on failure",
+     ("accounts",)),
+    ("check_accounts_js.py", "ACCOUNTS_JS_SYNTAX_OK",
+     "every inline script on the accounts page parses",
+     ("syntax",)),
+]
+
 # check_*.py files that are deliberately not gates, with the reason. Empty is the
 # healthy state: a script that is not a gate should not carry the check_ prefix.
 NOT_GATES = {}
 
-ALL_GATES = ACCOUNT_GATES + LIBRARY_GATES + COMPOSE_GATES + VIDEO_GATES + MANUAL_POST_GATES
+ALL_GATES = (ACCOUNT_GATES + ACCOUNT_JS_GATES + LIBRARY_GATES + COMPOSE_GATES
+             + VIDEO_GATES + MANUAL_POST_GATES)
 
 
 def _unpack(entry):
