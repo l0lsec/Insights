@@ -1,0 +1,146 @@
+{# A one-line summary of which platforms are connected, with the full status
+   cards folded away behind it.
+
+   The pages used to open with five tall cards ("Not Connected" ×5 for anyone
+   who only posts to one or two platforms) and pushed the actual work below the
+   fold. Those cards still exist, unchanged, inside the collapse: each page's
+   own JS keeps writing to #<platform>-status-badge / #<platform>-status-content
+   exactly as before. This strip only *reads* those badges (a MutationObserver
+   mirrors each badge's text into its chip), so there is no second copy of the
+   status logic to keep in step.
+
+   Usage:
+       {% from 'partials/connection_strip.html' import connection_strip %}
+       {% call connection_strip() %} ...the row of five cards... {% endcall %} #}
+{% from 'partials/post_item.html' import PLATFORM_META, PLATFORM_ORDER %}
+
+{% macro connection_strip() %}
+<style>
+    .conn { background: var(--surface, #fff); border: 1px solid var(--line, #E7E4F0); border-radius: 12px;
+            padding: .6rem .9rem; margin-bottom: 1.25rem; box-shadow: var(--shadow-sm, none); }
+    .conn-bar { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem .9rem; }
+    .conn-head { display: flex; flex-direction: column; line-height: 1.2; min-width: 7.5rem; }
+    .conn-title { font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; font-weight: 600; color: var(--muted, #6B6680); }
+    .conn-summary { font-size: .9rem; font-weight: 600; }
+    .conn-chips { display: flex; flex-wrap: wrap; gap: .4rem; list-style: none; margin: 0; padding: 0; flex: 1 1 auto; }
+    .conn-chip { display: inline-flex; align-items: center; gap: .45rem; padding: .28rem .8rem .28rem .6rem;
+                 background: #fff; border: 1px solid var(--line-strong, #D4CFE3); border-radius: 999px;
+                 font-size: .84rem; color: inherit; cursor: pointer; transition: border-color .15s, background-color .15s; }
+    .conn-chip:hover { border-color: var(--brand-400, #A78BFA); background: var(--brand-50, #F5F3FF); }
+    .conn-name { font-weight: 600; }
+    .conn-state { color: var(--muted, #6B6680); }
+    /* "Not connected" / "Checking" say nothing the hollow dot and the summary
+       don't already; keep them for screen readers (aria-label) and save the width. */
+    .conn-chip[data-state="off"] .conn-state,
+    .conn-chip[data-state="checking"] .conn-state { display: none; }
+    .conn-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; background: #B6B0C6; }
+    .conn-chip[data-state="connected"] .conn-dot { background: #16A34A; box-shadow: 0 0 0 3px rgba(22, 163, 74, .18); }
+    .conn-chip[data-state="connected"] .conn-state { color: #15803D; }
+    .conn-chip[data-state="off"] .conn-dot { background: transparent; border: 2px solid #B6B0C6; }
+    .conn-chip[data-state="warn"] { border-color: #F59E0B; background: #FFFBEB; }
+    .conn-chip[data-state="warn"] .conn-dot { background: #F59E0B; }
+    .conn-chip[data-state="warn"] .conn-state { color: #B45309; }
+    .conn-chip[data-state="error"] { border-color: #EF4444; background: #FEF2F2; }
+    .conn-chip[data-state="error"] .conn-dot { background: #EF4444; }
+    .conn-chip[data-state="error"] .conn-state { color: #B91C1C; }
+    .conn-chip[data-state="checking"] .conn-dot { animation: conn-pulse 1s ease-in-out infinite; }
+    @keyframes conn-pulse { 50% { opacity: .35; } }
+    .conn-manage { margin-left: auto; white-space: nowrap; }
+    .conn-manage::after { content: ''; display: inline-block; margin-left: .45rem; width: .45rem; height: .45rem;
+                          border-right: 2px solid currentColor; border-bottom: 2px solid currentColor;
+                          transform: translateY(-2px) rotate(45deg); transition: transform .15s; }
+    .conn-manage[aria-expanded="true"]::after { transform: translateY(1px) rotate(225deg); }
+    .conn-manage.needs-attention { border-color: #F59E0B; color: #B45309; }
+    .conn-manage.needs-attention:hover { background: #FFFBEB; color: #B45309; }
+    .conn-details { padding-top: .9rem; }
+    .conn-details > .row { margin-bottom: 0 !important; }
+    .conn-flash { animation: conn-flash 1.2s ease-out; }
+    @keyframes conn-flash { 0% { box-shadow: 0 0 0 3px rgba(124, 58, 237, .55); } 100% { box-shadow: 0 0 0 3px rgba(124, 58, 237, 0); } }
+</style>
+
+<section class="conn" id="connStrip" aria-label="Connected accounts">
+    <div class="conn-bar">
+        <div class="conn-head">
+            <span class="conn-title">Accounts</span>
+            <span class="conn-summary" id="connSummary">Checking…</span>
+        </div>
+        <ul class="conn-chips">
+            {% for key in PLATFORM_ORDER %}
+            <li>
+                <button type="button" class="conn-chip" data-platform="{{ key }}" data-state="checking"
+                        data-label="{{ PLATFORM_META[key].label }}"
+                        aria-controls="connDetails" aria-label="{{ PLATFORM_META[key].label }}: checking. Show details">
+                    <span class="conn-dot" aria-hidden="true"></span>
+                    <span class="conn-name">{{ PLATFORM_META[key].label }}</span>
+                    <span class="conn-state">Checking…</span>
+                </button>
+            </li>
+            {% endfor %}
+        </ul>
+        <button type="button" class="btn btn-sm btn-outline-secondary conn-manage" id="connManage"
+                data-bs-toggle="collapse" data-bs-target="#connDetails" aria-expanded="false" aria-controls="connDetails">Manage</button>
+    </div>
+    <div class="collapse conn-details" id="connDetails">
+        {{ caller() }}
+    </div>
+</section>
+
+<script>
+(function () {
+    var order = {{ PLATFORM_ORDER|tojson }};
+    var details = document.getElementById('connDetails');
+    var summary = document.getElementById('connSummary');
+    var manage = document.getElementById('connManage');
+    // What each page's status JS writes to a badge -> [chip state, chip label].
+    var STATE = {
+        'checking...': ['checking', 'Checking…'],
+        'connected': ['connected', 'Connected'],
+        'needs setup': ['warn', 'Needs setup'],
+        'not connected': ['off', 'Not connected'],
+        'not configured': ['off', 'Not configured'],
+        'error': ['error', 'Error']
+    };
+
+    function sync() {
+        var connected = 0, attention = 0, pending = 0;
+        order.forEach(function (key) {
+            var badge = document.getElementById(key + '-status-badge');
+            var chip = document.querySelector('.conn-chip[data-platform="' + key + '"]');
+            if (!badge || !chip) return;
+            var raw = (badge.textContent || '').trim();
+            var s = STATE[raw.toLowerCase()] || ['off', raw];
+            chip.dataset.state = s[0];
+            chip.querySelector('.conn-state').textContent = s[1];
+            chip.setAttribute('aria-label', chip.dataset.label + ': ' + s[1] + '. Show details');
+            if (s[0] === 'connected') connected++;
+            if (s[0] === 'warn' || s[0] === 'error') attention++;
+            if (s[0] === 'checking') pending++;
+        });
+        summary.textContent = pending ? 'Checking…' : connected + ' of ' + order.length + ' connected';
+        manage.classList.toggle('needs-attention', attention > 0);
+    }
+
+    order.forEach(function (key) {
+        var badge = document.getElementById(key + '-status-badge');
+        if (badge) new MutationObserver(sync).observe(badge, { childList: true, characterData: true, subtree: true });
+    });
+    sync();
+
+    // A chip opens the details and takes you to that platform's card.
+    document.querySelectorAll('.conn-chip').forEach(function (chip) {
+        chip.addEventListener('click', function () {
+            var badge = document.getElementById(chip.dataset.platform + '-status-badge');
+            var card = badge && badge.closest('.card');
+            var reveal = function () {
+                if (!card) return;
+                card.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+                card.classList.remove('conn-flash'); void card.offsetWidth; card.classList.add('conn-flash');
+            };
+            if (details.classList.contains('show')) return reveal();
+            details.addEventListener('shown.bs.collapse', reveal, { once: true });
+            bootstrap.Collapse.getOrCreateInstance(details).show();
+        });
+    });
+})();
+</script>
+{% endmacro %}

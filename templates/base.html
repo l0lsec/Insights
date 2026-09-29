@@ -2,6 +2,8 @@
 <html lang="en">
 <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#0F0A1F">
     <title>{% block title %}Insights{% endblock %}</title>
     <link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
     <link
@@ -10,201 +12,553 @@
         integrity="sha384-9ndCyUaIbzAi2FUVXJi0CjmCapSmO7SnpJef0486qhLnuZ2cdeRhO02iuK6FUUVM"
         crossorigin="anonymous"
     >
+    {# Bootstrap's JS loads once, here. Pages used to add their own copy, and two
+       copies register every data-bs-toggle handler twice, so a dropdown would
+       open and immediately close again. It has to be in <head> (not the end of
+       <body>) because page scripts in the content area call bootstrap.Modal / bootstrap.Tab
+       while the page is still parsing. #}
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     <style>
-        body { margin: 2em; }
-        .processed { color: green; }
-        pre { white-space: pre-wrap; }
-        .tile-container {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 1em;
-            margin-top: 1em;
+        /* ---------- Design tokens ---------- */
+        :root {
+            --ink-900: #0F0A1F;
+            --ink-800: #1a1033;
+            --ink-700: #2a2040;
+            --panel:   #1a1428;
+            --panel-line: #2d2640;
+
+            --brand-700: #5B21B6;
+            --brand-600: #6D28D9;
+            --brand-500: #7C3AED;
+            --brand-400: #A78BFA;
+            --brand-300: #C4B5FD;
+            --brand-100: #EDE9FE;
+            --brand-50:  #F5F3FF;
+
+            --canvas:      #F6F5FA;
+            --surface:     #ffffff;
+            --line:        #E7E4F0;
+            --line-strong: #D4CFE3;
+            --text:        #1F1B2E;
+            --muted:       #6B6680;
+
+            --radius:    10px;
+            --radius-lg: 14px;
+            --shadow-sm: 0 1px 2px rgba(31, 27, 46, .05), 0 1px 3px rgba(31, 27, 46, .06);
+            --shadow-md: 0 4px 14px rgba(31, 27, 46, .08);
+
+            /* Point Bootstrap at the palette so every page inherits it. */
+            --bs-primary: var(--brand-500);
+            --bs-primary-rgb: 124, 58, 237;
+            --bs-body-color: var(--text);
+            --bs-secondary-color: var(--muted);
+            --bs-border-color: var(--line);
+            --bs-link-color: var(--brand-600);
+            --bs-link-color-rgb: 109, 40, 217;
+            --bs-link-hover-color: var(--brand-700);
+            --bs-link-hover-color-rgb: 91, 33, 182;
+            --bs-border-radius: 8px;
+            --bs-border-radius-lg: var(--radius-lg);
+            --bs-focus-ring-color: rgba(124, 58, 237, .28);
         }
-        .tile {
-            border: 1px solid #ccc;
-            background-color: #fafafa;
-            padding: 1em;
-            border-radius: 4px;
-            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-            flex: 1 1 45%;
+
+        /* ---------- Page ---------- */
+        body {
+            margin: 0;
+            background: var(--canvas);
+            color: var(--text);
+            -webkit-font-smoothing: antialiased;
         }
-        .tile h2 {
-            margin-top: 0;
+        .app-main { padding: 1.75rem 0 4rem; }
+        .skip-link {
+            position: absolute; left: .75rem; top: -3rem; z-index: 3000;
+            background: var(--brand-500); color: #fff; padding: .5rem .9rem;
+            border-radius: 8px; text-decoration: none; font-weight: 600;
+            transition: top .15s ease;
         }
-        #loadingOverlay {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: rgba(255, 255, 255, 0.7);
-            z-index: 1000;
+        .skip-link:focus { top: .75rem; color: #fff; }
+        :focus-visible { outline: 2px solid var(--brand-500); outline-offset: 2px; }
+        .form-control:focus, .form-select:focus {
+            border-color: var(--brand-400);
+            box-shadow: 0 0 0 .2rem rgba(124, 58, 237, .18);
         }
-        .description-cell {
-            white-space: normal;
-            max-width: 400px;
-        }
-        /* Markdown content styling */
-        .summary-content h1, .summary-content h2, .summary-content h3 {
-            font-size: 1.1rem;
-            font-weight: bold;
-            margin-top: 1rem;
-            margin-bottom: 0.5rem;
-        }
-        .summary-content p {
-            margin-bottom: 0.75rem;
-        }
-        .summary-content ul, .summary-content ol {
-            margin-bottom: 0.75rem;
-            padding-left: 1.5rem;
-        }
-        .summary-content strong {
-            font-weight: 600;
-        }
-        .summary-content code {
-            background: #e9ecef;
-            padding: 0.1rem 0.3rem;
-            border-radius: 3px;
-            font-size: 0.9em;
-        }
-        /* Filter bar styling */
-        .filter-bar {
-            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
-            border-radius: 8px;
-            padding: 1rem;
+
+        /* ---------- Page header ---------- */
+        .page-head {
+            display: flex; flex-wrap: wrap; align-items: flex-end;
+            justify-content: space-between; gap: .75rem 1.5rem;
             margin-bottom: 1.5rem;
-            border: 1px solid #dee2e6;
+        }
+        .page-title {
+            font-size: clamp(1.5rem, 1.2rem + 1vw, 2rem);
+            font-weight: 700; letter-spacing: -.02em;
+            line-height: 1.2; margin: 0;
+        }
+        .page-subtitle { color: var(--muted); margin: .35rem 0 0; max-width: 62ch; }
+        .page-actions { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+        .page-actions:empty { display: none; }
+
+        /* ---------- Navigation ---------- */
+        .app-nav {
+            position: sticky; top: 0; z-index: 1050;
+            background: linear-gradient(135deg, var(--ink-900) 0%, var(--ink-800) 100%);
+            border-bottom: 1px solid rgba(167, 139, 250, .16);
+            padding: .4rem 0;
+        }
+        .app-nav .navbar-brand {
+            display: flex; align-items: center; gap: .5rem;
+            padding: 0; margin-right: 1.25rem;
+        }
+        .app-nav .brand-word {
+            font-weight: 700; letter-spacing: -.01em;
+            background: linear-gradient(135deg, #C4B5FD, #8B5CF6);
+            -webkit-background-clip: text; background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .app-nav .nav-link {
+            color: #C9C2DE; font-weight: 500; font-size: .93rem;
+            padding: .5rem .8rem; border-radius: 8px;
+            transition: background-color .15s ease, color .15s ease;
+        }
+        .app-nav .nav-link:hover,
+        .app-nav .nav-link:focus-visible,
+        .app-nav .nav-link.show { color: #fff; background: rgba(167, 139, 250, .14); }
+        .app-nav .nav-link.is-active { color: #fff; background: rgba(139, 92, 246, .30); }
+        .app-nav .dropdown-toggle::after { margin-left: .4em; vertical-align: .2em; opacity: .7; }
+        .app-nav .dropdown-menu {
+            background: var(--panel); border: 1px solid var(--panel-line);
+            border-radius: 12px; padding: .4rem; min-width: 17rem;
+            box-shadow: 0 16px 40px rgba(0, 0, 0, .35);
+            margin-top: .55rem;
+        }
+        .app-nav .dropdown-item {
+            border-radius: 8px; padding: .5rem .7rem; color: #E8E4F0;
+            display: flex; flex-direction: column; gap: .05rem; white-space: normal;
+        }
+        .app-nav .dropdown-item small { color: #9b92b0; font-size: .78rem; }
+        .app-nav .dropdown-item:hover,
+        .app-nav .dropdown-item:focus { background: rgba(167, 139, 250, .14); color: #fff; }
+        .app-nav .dropdown-item.is-active { background: rgba(139, 92, 246, .30); color: #fff; }
+        .app-nav .dropdown-item.is-active small { color: #C9C2DE; }
+        .app-nav .dropdown-divider { border-color: var(--panel-line); margin: .35rem .2rem; }
+        .app-nav .navbar-toggler { border-color: rgba(167, 139, 250, .3); padding: .3rem .55rem; }
+        .app-nav .navbar-toggler:focus { box-shadow: 0 0 0 .2rem rgba(167, 139, 250, .35); }
+
+        .nav-jump {
+            display: inline-flex; align-items: center; gap: .6rem;
+            background: rgba(255, 255, 255, .06);
+            border: 1px solid rgba(167, 139, 250, .22);
+            color: #A79FBD; border-radius: 8px;
+            padding: .38rem .7rem; font-size: .86rem; line-height: 1.2;
+            transition: border-color .15s ease, color .15s ease;
+        }
+        .nav-jump:hover { border-color: rgba(167, 139, 250, .5); color: #fff; }
+        .nav-jump kbd {
+            background: rgba(255, 255, 255, .1); color: #C9C2DE;
+            border-radius: 5px; padding: .05rem .4rem; font-size: .75rem;
+            font-family: inherit;
+        }
+        .user-btn {
+            display: inline-flex; align-items: center; gap: .55rem;
+            color: #E8E4F0; padding: .25rem .5rem .25rem .3rem !important;
+        }
+        .avatar {
+            width: 28px; height: 28px; border-radius: 50%;
+            background: linear-gradient(135deg, #8B5CF6, #6D28D9);
+            color: #fff; font-weight: 700; font-size: .8rem;
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        @media (max-width: 991.98px) {
+            .app-nav .navbar-collapse { padding: .6rem 0 .4rem; }
+            .app-nav .dropdown-menu { box-shadow: none; margin-top: .25rem; }
+            .nav-jump { width: 100%; margin-bottom: .4rem; }
+            .nav-jump kbd { display: none; }   /* no keyboard on a phone */
+        }
+
+        /* ---------- Jump palette (Ctrl/Cmd+K) ---------- */
+        .palette-backdrop {
+            position: fixed; inset: 0; z-index: 2100;
+            background: rgba(15, 10, 31, .55);
+            -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+            display: flex; justify-content: center; align-items: flex-start;
+            padding: 12vh 1rem 1rem;
+        }
+        .palette-backdrop[hidden] { display: none; }
+        .palette {
+            width: min(560px, 100%); background: var(--panel);
+            border: 1px solid var(--panel-line); border-radius: 14px;
+            box-shadow: 0 24px 70px rgba(0, 0, 0, .5); overflow: hidden; color: #E8E4F0;
+        }
+        .palette input {
+            width: 100%; background: transparent; border: 0;
+            border-bottom: 1px solid var(--panel-line);
+            color: #fff; padding: 1rem 1.1rem; font-size: 1.05rem; outline: 0;
+        }
+        .palette input::placeholder { color: #8a819e; }
+        .palette ul { list-style: none; margin: 0; padding: .4rem; max-height: 50vh; overflow-y: auto; }
+        .palette li a {
+            display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+            padding: .55rem .7rem; border-radius: 8px; color: #E8E4F0; text-decoration: none;
+        }
+        .palette li a small { color: #8a819e; }
+        .palette li[aria-selected="true"] a { background: rgba(139, 92, 246, .32); color: #fff; }
+        .palette .palette-empty { padding: 1rem 1.1rem; color: #8a819e; }
+        .palette-foot {
+            border-top: 1px solid var(--panel-line); padding: .5rem 1rem;
+            font-size: .75rem; color: #8a819e; display: flex; gap: 1rem;
+        }
+
+        /* ---------- Components (skin over Bootstrap) ---------- */
+        .btn { font-weight: 500; border-radius: 8px; }
+        .btn-primary {
+            --bs-btn-bg: var(--brand-500); --bs-btn-border-color: var(--brand-500);
+            --bs-btn-hover-bg: var(--brand-600); --bs-btn-hover-border-color: var(--brand-600);
+            --bs-btn-active-bg: var(--brand-700); --bs-btn-active-border-color: var(--brand-700);
+            --bs-btn-disabled-bg: var(--brand-500); --bs-btn-disabled-border-color: var(--brand-500);
+            --bs-btn-focus-shadow-rgb: 124, 58, 237;
+        }
+        .btn-outline-primary {
+            --bs-btn-color: var(--brand-600); --bs-btn-border-color: var(--brand-500);
+            --bs-btn-hover-bg: var(--brand-500); --bs-btn-hover-border-color: var(--brand-500);
+            --bs-btn-active-bg: var(--brand-600); --bs-btn-active-border-color: var(--brand-600);
+            --bs-btn-disabled-color: var(--brand-500); --bs-btn-disabled-border-color: var(--brand-500);
+            --bs-btn-focus-shadow-rgb: 124, 58, 237;
+        }
+        .form-check-input:checked { background-color: var(--brand-500); border-color: var(--brand-500); }
+        .form-check-input:focus { border-color: var(--brand-400); box-shadow: 0 0 0 .2rem rgba(124, 58, 237, .18); }
+        .nav-pills { --bs-nav-pills-link-active-bg: var(--brand-500); }
+        .progress { --bs-progress-bar-bg: var(--brand-500); }
+        .dropdown-menu { --bs-dropdown-link-active-bg: var(--brand-500); }
+        .pagination { --bs-pagination-active-bg: var(--brand-500); --bs-pagination-active-border-color: var(--brand-500); --bs-pagination-color: var(--brand-600); }
+
+        .card { border-color: var(--line); border-radius: var(--radius-lg); box-shadow: var(--shadow-sm); }
+        .card-header:first-child { border-radius: calc(var(--radius-lg) - 1px) calc(var(--radius-lg) - 1px) 0 0; }
+        .alert { border-radius: var(--radius); }
+        .modal-content { border-radius: var(--radius-lg); border: 0; box-shadow: 0 20px 60px rgba(31, 27, 46, .25); }
+        .breadcrumb { font-size: .875rem; --bs-breadcrumb-divider-color: var(--muted); }
+        .breadcrumb a { text-decoration: none; }
+
+        .table { --bs-table-hover-bg: var(--brand-50); }
+        .table > thead > tr > th {
+            font-size: .72rem; text-transform: uppercase; letter-spacing: .05em;
+            color: var(--muted); font-weight: 600; white-space: nowrap;
+            background: var(--surface); border-bottom: 1px solid var(--line-strong);
+        }
+        .table-responsive { border-radius: var(--radius); }
+
+        /* Filter bars: a quiet card instead of a grey gradient slab. */
+        .filter-bar {
+            background: var(--surface); border: 1px solid var(--line);
+            border-radius: var(--radius-lg); padding: 1rem;
+            margin-bottom: 1.5rem; box-shadow: var(--shadow-sm);
         }
         .filter-bar .form-label {
-            font-size: 0.75rem;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: #6c757d;
-            margin-bottom: 0.25rem;
-            font-weight: 600;
+            font-size: .72rem; text-transform: uppercase; letter-spacing: .05em;
+            color: var(--muted); margin-bottom: .25rem; font-weight: 600;
         }
-        .filter-bar .form-control,
-        .filter-bar .form-select {
-            font-size: 0.875rem;
+        .filter-bar .form-control, .filter-bar .form-select { font-size: .875rem; }
+        .filter-bar .btn-secondary {
+            --bs-btn-bg: var(--brand-500); --bs-btn-border-color: var(--brand-500);
+            --bs-btn-hover-bg: var(--brand-600); --bs-btn-hover-border-color: var(--brand-600);
+            --bs-btn-active-bg: var(--brand-700); --bs-btn-active-border-color: var(--brand-700);
         }
+
+        .tile-container { display: flex; flex-wrap: wrap; gap: 1em; margin-top: 1em; }
+        .tile {
+            border: 1px solid var(--line); background: var(--surface);
+            padding: 1em; border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-sm); flex: 1 1 45%;
+        }
+        .tile h2 { margin-top: 0; }
+        .processed { color: green; }
+        pre { white-space: pre-wrap; }
+        .description-cell { white-space: normal; max-width: 400px; }
+        .results-count { font-size: .875rem; color: var(--muted); }
+
         /* Sortable column headers */
-        .sortable {
-            cursor: pointer;
-            user-select: none;
-            white-space: nowrap;
-        }
-        .sortable:hover {
-            background-color: rgba(0,0,0,0.05);
-        }
-        .sortable::after {
-            content: ' ↕';
-            opacity: 0.3;
-            font-size: 0.75em;
-        }
-        .sortable.asc::after {
-            content: ' ↑';
-            opacity: 1;
-        }
-        .sortable.desc::after {
-            content: ' ↓';
-            opacity: 1;
-        }
+        .sortable { cursor: pointer; user-select: none; white-space: nowrap; }
+        .sortable:hover { background-color: rgba(124, 58, 237, .06); }
+        .sortable::after { content: ' ↕'; opacity: .3; font-size: .75em; }
+        .sortable.asc::after { content: ' ↑'; opacity: 1; }
+        .sortable.desc::after { content: ' ↓'; opacity: 1; }
+
         /* Type badges */
-        .badge-audio {
-            background: linear-gradient(135deg, #6f42c1, #5a32a3);
+        .badge-audio { background: linear-gradient(135deg, #6f42c1, #5a32a3); }
+        .badge-text { background: linear-gradient(135deg, #0d6efd, #0a58ca); }
+        .badge-unknown { background: #6c757d; }
+
+        /* Markdown content */
+        .summary-content h1, .summary-content h2, .summary-content h3 {
+            font-size: 1.1rem; font-weight: bold; margin-top: 1rem; margin-bottom: .5rem;
         }
-        .badge-text {
-            background: linear-gradient(135deg, #0d6efd, #0a58ca);
+        .summary-content p { margin-bottom: .75rem; }
+        .summary-content ul, .summary-content ol { margin-bottom: .75rem; padding-left: 1.5rem; }
+        .summary-content strong { font-weight: 600; }
+        .summary-content code { background: #e9ecef; padding: .1rem .3rem; border-radius: 3px; font-size: .9em; }
+
+        /* Full-page "Processing..." overlay */
+        #loadingOverlay {
+            position: fixed; inset: 0; z-index: 2200;
+            display: flex; align-items: center; justify-content: center;
+            background: rgba(246, 245, 250, .78);
+            -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px);
         }
-        .badge-unknown {
-            background: #6c757d;
-        }
-        /* Results count */
-        .results-count {
-            font-size: 0.875rem;
-            color: #6c757d;
-        }
-        /* Navbar link hover effects */
-        .navbar-dark .nav-link:hover {
-            color: #FBBF24 !important;
-            transition: color 0.2s ease;
-        }
-        .navbar-brand span {
-            transition: opacity 0.2s ease;
-        }
-        .navbar-brand:hover span {
-            opacity: 0.85;
+        #loadingOverlay.d-none { display: none !important; }
+        #loadingOverlay .spinner-border { color: var(--brand-500) !important; }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after { transition: none !important; animation-duration: .01ms !important; scroll-behavior: auto !important; }
         }
     </style>
 </head>
 <body>
-    <nav class="navbar navbar-expand-lg navbar-dark mb-4 sticky-top" style="background: linear-gradient(135deg, #0F0A1F 0%, #1a1033 100%); z-index: 1050;">
-        <div class="container-fluid">
-            <a class="navbar-brand d-flex align-items-center" href="{{ url_for('index') }}">
-                <img src="{{ url_for('static', filename='logo.svg') }}" alt="Insights" height="36" class="me-2">
-                <span style="font-weight: 600; background: linear-gradient(135deg, #A78BFA, #7C3AED); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">Insights</span>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    {# ---- Navigation ----------------------------------------------------
+       One table drives the bar, the dropdowns, the active state and the
+       Ctrl/Cmd+K palette, so a page added here shows up in all four.
+       `prefixes` are matched against the request path; `exact` is for "/",
+       which would otherwise match everything. #}
+    {% set p = request.path %}
+    {% set NAV = [
+        {'label': 'Compose', 'href': url_for('compose_page'), 'prefixes': ['/compose', '/posts']},
+        {'label': 'Create', 'items': [
+            {'label': 'Content Agent', 'desc': 'Briefs that research and draft for you', 'href': url_for('briefs_page'), 'prefixes': ['/briefs']},
+            {'label': 'Articles', 'desc': 'Long-form drafts and their social posts', 'href': url_for('view_articles'), 'prefixes': ['/article', '/generate_article', '/social']},
+            {'label': 'Thumbnails', 'desc': 'Generate video thumbnails', 'href': url_for('thumbnails_page'), 'prefixes': ['/thumbnails']},
+        ]},
+        {'label': 'Sources', 'items': [
+            {'label': 'Feeds', 'desc': 'Podcasts, RSS and YouTube', 'href': url_for('index'), 'exact': ['/'], 'prefixes': ['/feed', '/process', '/enqueue']},
+            {'label': 'Saved URLs', 'desc': 'Pages kept for generating posts', 'href': url_for('sources_page'), 'prefixes': ['/sources']},
+            {'label': 'Content Library', 'desc': 'Sort a media archive by year and category', 'href': url_for('library_page'), 'prefixes': ['/library']},
+            {'label': 'Processing status', 'desc': 'Episode transcripts and summaries', 'href': url_for('status_page'), 'prefixes': ['/status', '/episode']},
+            {'label': 'JIRA tickets', 'desc': 'Action items turned into tickets', 'href': url_for('view_tickets'), 'prefixes': ['/tickets', '/create_jira', '/update_ticket']},
+        ]},
+        {'label': 'Schedule', 'href': url_for('schedule_list'), 'prefixes': ['/schedule']},
+    ] %}
+    {% set ACCOUNT_NAV = [
+        {'label': 'Accounts', 'desc': 'Connect and manage platforms', 'href': url_for('accounts_page'), 'prefixes': ['/accounts', '/linkedin', '/threads', '/facebook', '/twitter', '/instagram']},
+        {'label': 'Activity log', 'desc': 'What changed, and when', 'href': url_for('activity_page'), 'prefixes': ['/activity']},
+        {'label': 'Usage & cost', 'desc': 'AI spend and token use', 'href': url_for('usage_page'), 'prefixes': ['/usage']},
+    ] %}
+    {% macro on(item) -%}
+        {%- for pre in item.get('exact', []) %}{% if p == pre %}1{% endif %}{% endfor -%}
+        {%- for pre in item.get('prefixes', []) %}{% if p.startswith(pre) %}1{% endif %}{% endfor -%}
+    {%- endmacro %}
+
+    <nav class="navbar navbar-expand-lg app-nav" data-bs-theme="dark" aria-label="Main">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('index') }}">
+                <img src="{{ url_for('static', filename='logo.svg') }}" alt="" height="32" width="32">
+                <span class="brand-word">Insights</span>
             </a>
-            <div class="navbar-nav ms-auto align-items-lg-center">
-                <a class="nav-link" href="{{ url_for('index') }}" style="color: #A78BFA;">Feeds</a>
-                <a class="nav-link" href="{{ url_for('compose_page') }}" style="color: #e94560;">Compose</a>
-                <a class="nav-link" href="{{ url_for('briefs_page') }}" style="color: #7c5cff;">🤖 Agent</a>
-                <a class="nav-link" href="{{ url_for('sources_page') }}" style="color: #A78BFA;">Sources</a>
-                <a class="nav-link" href="{{ url_for('library_page') }}" style="color: #7c5cff;">📚 Library</a>
-                <a class="nav-link" href="{{ url_for('status_page') }}" style="color: #A78BFA;">Status</a>
-                <a class="nav-link" href="{{ url_for('view_tickets') }}" style="color: #A78BFA;">Tickets</a>
-                <a class="nav-link" href="{{ url_for('view_articles') }}" style="color: #A78BFA;">Articles</a>
-                <a class="nav-link" href="{{ url_for('schedule_list') }}" style="color: #A78BFA;">Schedule</a>
-                <a class="nav-link" href="{{ url_for('accounts_page') }}" style="color: #A78BFA;">Accounts</a>
-                <a class="nav-link" href="{{ url_for('thumbnails_page') }}" style="color: #e94560;">Thumbnails</a>
-                <a class="nav-link" href="{{ url_for('activity_page') }}" style="color: #A78BFA;">Activity</a>
-                <a class="nav-link" href="{{ url_for('usage_page') }}" style="color: #A78BFA;">Usage</a>
-                {% if current_user %}
-                <span class="nav-link" style="color: #9b92b0; cursor: default;">
-                    <span style="opacity: 0.6;">·</span>
-                    {{ current_user['username'] }}
-                </span>
-                <form method="post" action="{{ url_for('logout') }}" class="d-inline m-0 p-0">
-                    <button type="submit" class="btn btn-link nav-link p-0 ms-2"
-                            style="color: #A78BFA; text-decoration: none; border: 0; background: transparent;">
-                        Logout
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#mainNav"
+                    aria-controls="mainNav" aria-expanded="false" aria-label="Toggle navigation">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="mainNav">
+                <ul class="navbar-nav me-auto gap-lg-1">
+                    {% for item in NAV %}
+                        {% if item.get('items') %}
+                            {% set group_on = namespace(v=false) %}
+                            {% for sub in item['items'] %}{% if on(sub)|trim %}{% set group_on.v = true %}{% endif %}{% endfor %}
+                            <li class="nav-item dropdown">
+                                <a class="nav-link dropdown-toggle{% if group_on.v %} is-active{% endif %}" href="#" role="button"
+                                   data-bs-toggle="dropdown" aria-expanded="false">{{ item.label }}</a>
+                                <ul class="dropdown-menu">
+                                    {% for sub in item['items'] %}
+                                    <li><a class="dropdown-item{% if on(sub)|trim %} is-active{% endif %}" href="{{ sub.href }}"
+                                           data-palette-group="{{ item.label }}"{% if on(sub)|trim %} aria-current="page"{% endif %}>
+                                        {{ sub.label }}<small>{{ sub.desc }}</small></a></li>
+                                    {% endfor %}
+                                </ul>
+                            </li>
+                        {% else %}
+                            <li class="nav-item">
+                                <a class="nav-link{% if on(item)|trim %} is-active{% endif %}" href="{{ item.href }}"
+                                   {% if on(item)|trim %}aria-current="page"{% endif %}>{{ item.label }}</a>
+                            </li>
+                        {% endif %}
+                    {% endfor %}
+                </ul>
+
+                <div class="d-flex flex-column flex-lg-row align-items-stretch align-items-lg-center gap-2">
+                    <button type="button" class="nav-jump" id="paletteBtn" aria-haspopup="dialog" aria-controls="palette">
+                        <span>Jump to…</span><kbd id="paletteKey">Ctrl K</kbd>
                     </button>
-                </form>
-                {% endif %}
+                    {% if current_user %}
+                    <div class="dropdown">
+                        <a class="nav-link user-btn dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown"
+                           aria-expanded="false" aria-label="Account menu for {{ current_user['username'] }}">
+                            <span class="avatar" aria-hidden="true">{{ current_user['username'][:1]|upper }}</span>
+                            <span class="d-lg-none">{{ current_user['username'] }}</span>
+                        </a>
+                        <ul class="dropdown-menu dropdown-menu-lg-end">
+                            <li class="px-3 py-2 small" style="color:#9b92b0;">Signed in as <strong style="color:#E8E4F0;">{{ current_user['username'] }}</strong></li>
+                            <li><hr class="dropdown-divider"></li>
+                            {% for sub in ACCOUNT_NAV %}
+                            <li><a class="dropdown-item{% if on(sub)|trim %} is-active{% endif %}" href="{{ sub.href }}"
+                                   data-palette-group="Account"{% if on(sub)|trim %} aria-current="page"{% endif %}>
+                                {{ sub.label }}<small>{{ sub.desc }}</small></a></li>
+                            {% endfor %}
+                            <li><hr class="dropdown-divider"></li>
+                            <li>
+                                <form method="post" action="{{ url_for('logout') }}" class="m-0">
+                                    <button type="submit" class="dropdown-item">Sign out</button>
+                                </form>
+                            </li>
+                        </ul>
+                    </div>
+                    {% endif %}
+                </div>
             </div>
         </div>
     </nav>
-    <div id="loadingOverlay" class="d-none">
-        <div class="spinner-border text-primary" role="status"></div>
+
+    <div id="paletteBackdrop" class="palette-backdrop" hidden>
+        <div class="palette" id="palette" role="dialog" aria-modal="true" aria-label="Jump to a page">
+            <input id="paletteInput" type="text" role="combobox" aria-expanded="true" aria-controls="paletteList"
+                   aria-autocomplete="list" placeholder="Jump to a page…" autocomplete="off" spellcheck="false">
+            <ul id="paletteList" role="listbox"></ul>
+            <div class="palette-foot"><span>↑↓ to move</span><span>↵ to open</span><span>Esc to close</span></div>
+        </div>
+    </div>
+
+    <div id="loadingOverlay" class="d-none" role="status" aria-live="polite">
+        <div class="spinner-border" aria-hidden="true"></div>
         <span class="ms-2">Processing...</span>
     </div>
-    <div class="container">
-        <h1 class="mb-4">{% block header %}Insights{% endblock %}</h1>
-        {% block content %}{% endblock %}
-    </div>
+
+    <main id="main" class="app-main">
+        <div class="container">
+            <header class="page-head">
+                <div>
+                    <h1 class="page-title">{% block header %}Insights{% endblock %}</h1>
+                    {% block subtitle %}{% endblock %}
+                </div>
+                <div class="page-actions">{% block page_actions %}{% endblock %}</div>
+            </header>
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
     <script>
     document.addEventListener('DOMContentLoaded', function () {
-        // Show loading overlay on form submit (not click)
+        var overlay = document.getElementById('loadingOverlay');
+        // Show loading overlay on form submit / link click
         document.querySelectorAll('form[data-processing]').forEach(function (form) {
-            form.addEventListener('submit', function () {
-                document.getElementById('loadingOverlay').classList.remove('d-none');
-            });
+            form.addEventListener('submit', function () { overlay.classList.remove('d-none'); });
         });
-        // Show loading overlay on link click
         document.querySelectorAll('a[data-processing]').forEach(function (link) {
-            link.addEventListener('click', function () {
-                document.getElementById('loadingOverlay').classList.remove('d-none');
-            });
+            link.addEventListener('click', function () { overlay.classList.remove('d-none'); });
+        });
+        // Coming back with the browser's Back button restores the page from the
+        // back/forward cache with the overlay still up; drop it.
+        window.addEventListener('pageshow', function (e) {
+            if (e.persisted) overlay.classList.add('d-none');
         });
         // Render markdown in elements with data-markdown attribute
         document.querySelectorAll('[data-markdown]').forEach(function (el) {
-            var raw = el.textContent;
-            el.innerHTML = marked.parse(raw);
+            el.innerHTML = marked.parse(el.textContent);
         });
     });
+
+    /* Jump palette: built from the links already in the nav, so it can't drift. */
+    (function () {
+        var backdrop = document.getElementById('paletteBackdrop');
+        var input = document.getElementById('paletteInput');
+        var list = document.getElementById('paletteList');
+        var btn = document.getElementById('paletteBtn');
+        if (!backdrop || !input || !list || !btn) return;
+
+        var isMac = /Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent);
+        document.getElementById('paletteKey').textContent = isMac ? '⌘ K' : 'Ctrl K';
+
+        var entries = [];
+        document.querySelectorAll('.app-nav a[href]').forEach(function (a) {
+            var href = a.getAttribute('href');
+            if (!href || href === '#' || a.classList.contains('navbar-brand')) return;
+            var group = a.getAttribute('data-palette-group') || '';
+            var label = a.classList.contains('dropdown-item') ? a.firstChild.textContent.trim() : a.textContent.trim();
+            entries.push({ label: label, group: group, href: href });
+        });
+
+        var shown = [], active = 0, returnFocus = null;
+
+        function render() {
+            var q = input.value.trim().toLowerCase();
+            shown = entries.filter(function (e) {
+                return !q || (e.label + ' ' + e.group).toLowerCase().indexOf(q) !== -1;
+            }).sort(function (a, b) {
+                var as = a.label.toLowerCase().indexOf(q) === 0 ? 0 : 1;
+                var bs = b.label.toLowerCase().indexOf(q) === 0 ? 0 : 1;
+                return q ? as - bs : 0;
+            });
+            active = Math.min(active, Math.max(shown.length - 1, 0));
+            list.innerHTML = '';
+            if (!shown.length) {
+                var empty = document.createElement('li');
+                empty.className = 'palette-empty';
+                empty.textContent = 'No pages match “' + input.value + '”';
+                list.appendChild(empty);
+                input.removeAttribute('aria-activedescendant');
+                return;
+            }
+            shown.forEach(function (e, i) {
+                var li = document.createElement('li');
+                li.id = 'palette-opt-' + i;
+                li.setAttribute('role', 'option');
+                li.setAttribute('aria-selected', i === active ? 'true' : 'false');
+                var a = document.createElement('a');
+                a.href = e.href;
+                var name = document.createElement('span'); name.textContent = e.label;
+                var grp = document.createElement('small'); grp.textContent = e.group;
+                a.appendChild(name); a.appendChild(grp);
+                li.appendChild(a);
+                li.addEventListener('mousemove', function () { setActive(i); });
+                list.appendChild(li);
+            });
+            input.setAttribute('aria-activedescendant', 'palette-opt-' + active);
+        }
+        function setActive(i) {
+            var opts = list.querySelectorAll('[role=option]');
+            if (!opts.length) return;
+            active = (i + opts.length) % opts.length;
+            opts.forEach(function (o, n) { o.setAttribute('aria-selected', n === active ? 'true' : 'false'); });
+            input.setAttribute('aria-activedescendant', 'palette-opt-' + active);
+            opts[active].scrollIntoView({ block: 'nearest' });
+        }
+        function open() {
+            returnFocus = document.activeElement;
+            backdrop.hidden = false;
+            input.value = ''; active = 0; render(); input.focus();
+        }
+        function close() {
+            backdrop.hidden = true;
+            if (returnFocus && returnFocus.focus) returnFocus.focus();
+        }
+
+        btn.addEventListener('click', open);
+        backdrop.addEventListener('mousedown', function (e) { if (e.target === backdrop) close(); });
+        input.addEventListener('input', function () { active = 0; render(); });
+        input.addEventListener('keydown', function (e) {
+            if (e.key === 'ArrowDown') { e.preventDefault(); setActive(active + 1); }
+            else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(active - 1); }
+            else if (e.key === 'Enter') { e.preventDefault(); if (shown[active]) window.location.href = shown[active].href; }
+            else if (e.key === 'Escape') { e.preventDefault(); close(); }
+            else if (e.key === 'Tab') { e.preventDefault(); }
+        });
+        document.addEventListener('keydown', function (e) {
+            // Cmd+K on macOS, Ctrl+K elsewhere. Ctrl+K on a Mac is the emacs
+            // "kill line" binding in text fields, so it is left alone there.
+            var chord = isMac ? e.metaKey : e.ctrlKey;
+            if (chord && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k') {
+                e.preventDefault();
+                backdrop.hidden ? open() : close();
+            }
+        });
+    })();
     </script>
 </body>
 </html>

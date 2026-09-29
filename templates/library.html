@@ -1,12 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Content Library | Insights{% endblock %}
-{% block header %}📚 Content Library{% endblock %}
-{% block content %}
-<p class="lead text-muted mb-4">
+{% block header %}Content Library{% endblock %}
+{% block subtitle %}<p class="page-subtitle">
     Catalogue a media archive and sort it by <strong>year</strong> and <strong>category</strong>.
     The scan reads only file metadata, so it never downloads anything. Categories are learned
     from a folder you have already sorted by hand, and nothing is copied until you approve it.
-</p>
+</p>{% endblock %}
+{% block content %}
 
 <!-- ── Environment ──────────────────────────────────────────────────────── -->
 <div class="row g-3 mb-4">

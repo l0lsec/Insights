@@ -486,6 +486,29 @@ def _inject_current_user():
     return {"current_user": current_user()}
 
 
+@app.template_filter("md_preview")
+def _md_preview(text, length=200):
+    """A plain-text teaser of a markdown body, for list cards.
+
+    The cards used to slice the raw markdown, so a preview read
+    "# Title Intro text ## Section 1. First point ...". This drops the syntax
+    and cuts on a word boundary instead of mid-word.
+    """
+    if not text:
+        return ""
+    t = re.sub(r"```.*?```", " ", text, flags=re.S)                 # fenced code
+    t = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", t)                     # images
+    t = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", t)                  # links -> their label
+    t = re.sub(r"^\s{0,3}(?:#{1,6}|>|[-*+]|\d+\.)\s+", "", t, flags=re.M)  # heading/quote/list markers
+    t = re.sub(r"<[^>]+>", " ", t)                                  # inline html
+    t = t.replace("`", "")
+    t = re.sub(r"(?<!\w)[*_~]+|[*_~]+(?!\w)", "", t)                # emphasis; keeps snake_case
+    t = re.sub(r"\s+", " ", t).strip()
+    if len(t) <= length:
+        return t
+    return t[:length].rsplit(" ", 1)[0].rstrip(",.;:-") + "…"
+
+
 def _target_from_view_args(view_args: dict | None) -> str | None:
     """Best-effort: turn {'episode_id': 42} into 'episode:42' for the log."""
     if not view_args:
@@ -3548,7 +3571,7 @@ def linkedin_configure():
     account_id = request.args.get('account_id', type=int)
     token = get_linkedin_token(account_id)
     if not token:
-        return redirect(url_for('view_schedule') + '?error=not_connected')
+        return redirect(url_for('schedule_list') + '?error=not_connected')
     
     if request.method == 'POST':
         member_id = request.form.get('member_id', '').strip()
@@ -3571,7 +3594,7 @@ def linkedin_configure():
         
         if success:
             app.logger.info("LinkedIn member ID configured manually: %s", member_id)
-            return redirect(url_for('view_schedule') + '?linkedin=configured')
+            return redirect(url_for('schedule_list') + '?linkedin=configured')
         else:
             return render_template(
                 'linkedin_configure.html',

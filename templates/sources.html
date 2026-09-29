@@ -1,6 +1,8 @@
 {% extends "base.html" %}
 {% block title %}Saved Sources | Insights{% endblock %}
 {% block header %}Saved Sources{% endblock %}
+{% block subtitle %}<p class="page-subtitle">Pages you've saved, ready to turn into posts.</p>{% endblock %}
+{% block page_actions %}<button type="button" class="btn btn-primary" onclick="showAddUrlModal()">+ Add URL</button>{% endblock %}
 {% block content %}
 <style>
     /* Fix long URLs overflowing in modal */
@@ -101,44 +103,7 @@
         color: #6c757d;
         margin-bottom: 1.5rem;
     }
-    .page-header {
-        background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
-        color: white;
-        padding: 2rem;
-        border-radius: 12px;
-        margin-bottom: 2rem;
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
-    }
-    .page-header h2 {
-        margin: 0;
-        font-weight: 700;
-        background: linear-gradient(135deg, #e94560 0%, #ff6b6b 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-    }
-    .page-header p {
-        margin: 0.5rem 0 0 0;
-        opacity: 0.8;
-    }
 </style>
-
-<nav aria-label="breadcrumb" class="mb-3">
-    <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Home</a></li>
-        <li class="breadcrumb-item active" aria-current="page">Sources</li>
-    </ol>
-</nav>
-
-<div class="page-header d-flex justify-content-between align-items-center">
-    <div>
-        <h2>📚 Saved URL Sources</h2>
-        <p>Content extracted from URLs, saved for generating more posts</p>
-    </div>
-    <button type="button" class="btn btn-light btn-lg" onclick="showAddUrlModal()">
-        ➕ Add URL
-    </button>
-</div>
 
 {% if sources %}
 <div class="d-flex justify-content-between align-items-center mb-3">
@@ -373,7 +338,6 @@
     </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
 let deleteSourceId = null;
 let currentSourceId = null;

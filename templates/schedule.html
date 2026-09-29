@@ -1,7 +1,9 @@
 {% extends "base.html" %}
 {% block title %}Scheduled Posts | Insights{% endblock %}
 {% block header %}Scheduled Posts{% endblock %}
+{% block subtitle %}<p class="page-subtitle">Your publishing queue, posting time slots and per-platform limits.</p>{% endblock %}
 {% block content %}
+{% from 'partials/connection_strip.html' import connection_strip %}
 <style>
 /* Drag-and-drop styling */
 .sortable-ghost {
@@ -55,14 +57,8 @@ th[onclick]:hover {
     white-space: nowrap;
 }
 </style>
-<nav aria-label="breadcrumb" class="mb-3">
-    <ol class="breadcrumb">
-        <li class="breadcrumb-item"><a href="{{ url_for('index') }}">Home</a></li>
-        <li class="breadcrumb-item active" aria-current="page">Scheduled Posts</li>
-    </ol>
-</nav>
-
-<!-- Social Connections -->
+<!-- Social Connections: summary strip, full cards fold away behind it -->
+{% call connection_strip() %}
 <div class="row mb-4">
     <!-- LinkedIn Connection Status -->
     <div class="col-md mb-3 mb-md-0">
@@ -154,6 +150,7 @@ th[onclick]:hover {
         </div>
     </div>
 </div>
+{% endcall %}
 
 <!-- Token Renewal Banner -->
 <div id="token-renewal-banner" class="d-none"></div>
@@ -925,7 +922,6 @@ th[onclick]:hover {
     </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
 <script>
 // Image lightbox function

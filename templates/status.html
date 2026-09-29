@@ -1,15 +1,15 @@
 {% extends "base.html" %}
-{% block title %}Processing Status{% endblock %}
+{% block title %}Processing status | Insights{% endblock %}
 {% block header %}Processing Status{% endblock %}
 {% block content %}
 <!-- Filter Bar -->
 <div class="filter-bar">
     <form method="get" class="row g-3 align-items-end">
-        <div class="col-md-3">
+        <div class="col-12 col-xl-3">
             <label class="form-label">Search</label>
             <input type="text" class="form-control" name="q" value="{{ search_query }}" placeholder="Search episodes...">
         </div>
-        <div class="col-md-2">
+        <div class="col-6 col-md-4 col-xl">
             <label class="form-label">Status</label>
             <select name="status" class="form-select">
                 <option value="">All Statuses</option>
@@ -19,7 +19,7 @@
                 <option value="error" {% if filter_status == 'error' %}selected{% endif %}>❌ Error</option>
             </select>
         </div>
-        <div class="col-md-2">
+        <div class="col-6 col-md-4 col-xl">
             <label class="form-label">Feed</label>
             <select name="feed" class="form-select">
                 <option value="">All Feeds</option>
@@ -28,30 +28,30 @@
                 {% endfor %}
             </select>
         </div>
-        <div class="col-md-1">
+        <div class="col-6 col-md-4 col-xl">
             <label class="form-label">Type</label>
             <select name="type" class="form-select">
                 <option value="">All</option>
-                <option value="audio" {% if filter_type == 'audio' %}selected{% endif %}>🎙️</option>
-                <option value="text" {% if filter_type == 'text' %}selected{% endif %}>📄</option>
+                <option value="audio" {% if filter_type == 'audio' %}selected{% endif %}>🎙️ Audio</option>
+                <option value="text" {% if filter_type == 'text' %}selected{% endif %}>📄 Text</option>
             </select>
         </div>
-        <div class="col-md-2">
+        <div class="col-6 col-md-4 col-xl">
             <label class="form-label">Sort By</label>
             <select name="sort" class="form-select">
                 <option value="released" {% if sort == 'released' %}selected{% endif %}>Release Date</option>
                 <option value="processed" {% if sort == 'processed' %}selected{% endif %}>Processed Date</option>
             </select>
         </div>
-        <div class="col-md-1">
+        <div class="col-6 col-md-4 col-xl">
             <label class="form-label">Order</label>
             <select name="order" class="form-select">
-                <option value="desc" {% if sort_order == 'desc' %}selected{% endif %}>↓</option>
-                <option value="asc" {% if sort_order == 'asc' %}selected{% endif %}>↑</option>
+                <option value="desc" {% if sort_order == 'desc' %}selected{% endif %}>↓ Newest</option>
+                <option value="asc" {% if sort_order == 'asc' %}selected{% endif %}>↑ Oldest</option>
             </select>
         </div>
-        <div class="col-md-1">
-            <button type="submit" class="btn btn-secondary w-100">Go</button>
+        <div class="col-6 col-md-4 col-xl-auto">
+            <button type="submit" class="btn btn-secondary w-100 px-4">Apply</button>
         </div>
     </form>
 </div>
