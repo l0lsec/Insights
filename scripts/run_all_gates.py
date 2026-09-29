@@ -132,11 +132,29 @@ VIDEO_GATES = [
      ("newpost",)),
 ]
 
+# Writing a post by hand, and the model adapters behind generation. One script,
+# one gate per claim, picked by argument. They use fake clients and no keys, and
+# the wiring gates read the rendered Compose page, one under node.
+MANUAL_POST_GATES = [
+    ("check_manual_posts.py", "MANUAL_POSTS_ROUTE_OK",
+     "a hand-written post writes one row per ticked account, shows as one card, and refusals write nothing",
+     ("route",)),
+    ("check_manual_posts.py", "MANUAL_POSTS_WIRING_OK",
+     "the Write Manually tab is first and default, hides the model controls, and is bound to its endpoint",
+     ("wiring",)),
+    ("check_manual_posts.py", "MANUAL_POSTS_TARGETS_OK",
+     "the composer builds the accounts and platforms the server expects, under node",
+     ("targets",)),
+    ("check_manual_posts.py", "LLM_ADAPTERS_OK",
+     "GPT-6 and Claude 5 requests are translated, older models pass through, and prices resolve",
+     ("llm",)),
+]
+
 # check_*.py files that are deliberately not gates, with the reason. Empty is the
 # healthy state: a script that is not a gate should not carry the check_ prefix.
 NOT_GATES = {}
 
-ALL_GATES = ACCOUNT_GATES + LIBRARY_GATES + COMPOSE_GATES + VIDEO_GATES
+ALL_GATES = ACCOUNT_GATES + LIBRARY_GATES + COMPOSE_GATES + VIDEO_GATES + MANUAL_POST_GATES
 
 
 def _unpack(entry):
