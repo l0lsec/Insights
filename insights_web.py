@@ -125,6 +125,8 @@ from database import (
     get_social_account,
     set_default_social_account,
     set_social_account_label,
+    identity_in_use,
+    account_id_for_token,
     delete_social_account,
     resolve_account_id,
     count_social_accounts,
@@ -3192,6 +3194,15 @@ def _account_needs_attention(platform, summary):
     """
     if summary['status'] == 'expired':
         return 'Token expired, reconnect to keep posting'
+    if str(summary.get('external_id') or '').startswith('pending:'):
+        # The platform returned no identity for this login. It is connected but
+        # cannot be told apart from a second login until that is filled in.
+        return {
+            'linkedin': 'Needs its Member ID configured before it can post',
+            'facebook': 'Needs a Page selected before it can post',
+            'threads': 'Needs its User ID configured before it can post',
+            'instagram': 'Needs its User ID configured before it can post',
+        }.get(platform, 'The platform returned no profile, reconnect this account')
     token = None
     if platform == 'linkedin':
         token = get_linkedin_token(summary['id'])
@@ -3225,6 +3236,14 @@ def _accounts_payload():
         accounts = grouped.get(platform, [])
         for summary in accounts:
             summary['needs_attention'] = _account_needs_attention(platform, summary)
+            # Only the platforms with a configure screen can be fixed in place.
+            # The link names the account, because those screens act on the
+            # default account when they are not told which one.
+            summary['configure_url'] = (
+                url_for(f'{platform}_configure', account_id=summary['id'])
+                if summary['needs_attention'] and platform in
+                ('linkedin', 'facebook', 'threads', 'instagram') else None
+            )
         platforms.append({
             'platform': platform,
             'name': platform_name(platform),
@@ -3524,7 +3543,7 @@ def linkedin_callback():
             email = ''
         
         # Save token (with or without profile info)
-        save_linkedin_token(
+        token_row = save_linkedin_token(
             access_token=access_token,
             expires_at=expires_at,
             member_id=member_id,
@@ -3538,7 +3557,13 @@ def linkedin_callback():
         
         # If we couldn't get profile info, redirect to configuration page
         if not user_urn:
-            return redirect(url_for('linkedin_configure') + '?new=1')
+            # Name the account that just connected. Left out, the configure
+            # screen acts on the platform's default account, so with a second
+            # login it would write this person's Member ID onto the first one.
+            return redirect(url_for(
+                'linkedin_configure', new=1,
+                account_id=account_id_for_token('linkedin', token_row),
+            ))
         
         # Redirect to articles page with success message
         return _oauth_return_redirect(url_for('view_articles') + '?linkedin=connected')
@@ -3585,6 +3610,16 @@ def linkedin_configure():
                 is_new=request.args.get('new') == '1',
             )
         
+        # A real account cannot be moved onto another account's Member ID, so
+        # say so rather than reporting a generic failure.
+        if identity_in_use('linkedin', member_id, account_id=account_id):
+            return render_template(
+                'linkedin_configure.html',
+                token=token,
+                error="That Member ID already belongs to another connected LinkedIn account.",
+                is_new=request.args.get('new') == '1',
+            )
+
         # Update the token with the manual member ID
         success = update_linkedin_member_urn(
             member_id=member_id,
@@ -3820,6 +3855,13 @@ def threads_configure():
                 'threads_configure.html',
                 token=token,
                 error="User ID is required",
+            )
+
+        if identity_in_use('threads', user_id, account_id=account_id):
+            return render_template(
+                'threads_configure.html',
+                token=token,
+                error="That User ID already belongs to another connected Threads account.",
             )
 
         success = update_threads_user_info(
@@ -4066,6 +4108,13 @@ def instagram_configure():
                 error="User ID is required",
             )
 
+        if identity_in_use('instagram', ig_user_id or user_id, account_id=account_id):
+            return render_template(
+                'instagram_configure.html',
+                token=token,
+                error="That Instagram account is already connected.",
+            )
+
         success = update_instagram_user_info(
             user_id=user_id,
             username=username or None,
@@ -4220,7 +4269,7 @@ def facebook_callback():
         groups = client.get_user_groups(access_token)
         group_ids = ','.join(g['id'] for g in groups) if groups else None
 
-        save_facebook_token(
+        token_row = save_facebook_token(
             access_token=access_token,
             expires_at=expires_at,
             user_id=user_id,
@@ -4234,7 +4283,10 @@ def facebook_callback():
         app.logger.info("Facebook connected for user: %s", user_name)
 
         if pages and len(pages) > 1:
-            return redirect(url_for('facebook_configure') + '?new=1')
+            return redirect(url_for(
+                'facebook_configure', new=1,
+                account_id=account_id_for_token('facebook', token_row),
+            ))
 
         return _oauth_return_redirect(url_for('schedule_list') + '?facebook=connected')
 
@@ -4259,6 +4311,7 @@ def facebook_configure():
     # single account rather than the platform.
     account_id = request.args.get('account_id', type=int)
     token = get_facebook_token(account_id)
+    error = None
 
     if request.method == 'POST':
         if not token:
@@ -4267,23 +4320,27 @@ def facebook_configure():
         page_id = request.form.get('page_id', '').strip()
         group_ids = request.form.get('group_ids', '').strip()
 
-        if page_id:
-            client = get_facebook_client()
-            pages = client.get_user_pages(token['access_token'])
-            selected = next((p for p in pages if p['id'] == page_id), None)
-            if selected:
-                update_facebook_page_selection(
-                    page_id=selected['id'],
-                    page_name=selected['name'],
-                    page_access_token=selected['access_token'],
-                    account_id=account_id,
-                )
+        if page_id and identity_in_use('facebook', page_id, account_id=account_id):
+            # Two accounts on one Page would publish the same post twice.
+            error = "That Page is already connected as another Facebook account."
+        else:
+            if page_id:
+                client = get_facebook_client()
+                pages = client.get_user_pages(token['access_token'])
+                selected = next((p for p in pages if p['id'] == page_id), None)
+                if selected:
+                    update_facebook_page_selection(
+                        page_id=selected['id'],
+                        page_name=selected['name'],
+                        page_access_token=selected['access_token'],
+                        account_id=account_id,
+                    )
 
-        if group_ids is not None:
-            update_facebook_group_ids(group_ids, account_id=account_id)
+            if group_ids is not None:
+                update_facebook_group_ids(group_ids, account_id=account_id)
 
-        app.logger.info("Facebook page/group selection updated")
-        return redirect(url_for('schedule_list') + '?facebook=configured')
+            app.logger.info("Facebook page/group selection updated")
+            return redirect(url_for('schedule_list') + '?facebook=configured')
 
     pages = []
     groups = []
@@ -4297,6 +4354,7 @@ def facebook_configure():
         token=token,
         pages=pages,
         groups=groups,
+        error=error,
         is_new=request.args.get('new') == '1',
     )
 

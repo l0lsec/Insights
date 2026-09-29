@@ -133,7 +133,12 @@
                 {% if account.handle %}{{ account.handle }}{% else %}{{ account.display_name or account.external_id }}{% endif %}
             </div>
             {% if account.needs_attention %}
-            <div class="account-warn">⚠ {{ account.needs_attention }}</div>
+            <div class="account-warn">
+                ⚠ {{ account.needs_attention }}
+                {% if account.configure_url %}
+                <a href="{{ account.configure_url }}" class="account-configure-link">Configure</a>
+                {% endif %}
+            </div>
             {% endif %}
         </div>
         <div class="account-actions">

@@ -35,6 +35,8 @@ GATES = [
      "the screens expose accounts and cross-posting, and are wired to them"),
     ("check_backcompat.py", "BACKCOMPAT_OK",
      "an existing single-account install migrates and keeps working"),
+    ("check_login_without_identity.py", "NO_IDENTITY_OK",
+     "a login with no identity never damages an account that has one"),
 ]
 
 TIMEOUT_SECONDS = 300
