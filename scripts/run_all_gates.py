@@ -74,11 +74,60 @@ COMPOSE_GATES = [
      ("refreshcard",)),
 ]
 
+# Video posting. One script holds a gate per claim and picks one by argument,
+# each printing its own token. They use fake platform clients and a real local
+# HTTP server, so nothing posts anywhere. Two of them need ffmpeg/ffprobe to
+# make and read a real MP4, so CI installs it.
+VIDEO_GATES = [
+    ("check_video.py", "VIDEO_SCHEMA_OK",
+     "a video persists on a saved post, upgrades an old database, and groups cards",
+     ("schema",)),
+    ("check_video.py", "VIDEO_ROUTER_OK",
+     "the shared publisher hands a video to each platform's video method",
+     ("router",)),
+    ("check_video.py", "VIDEO_LINKEDIN_OK",
+     "LinkedIn gets the exact bytes in ordered parts and never degrades to a text post",
+     ("linkedin",)),
+    ("check_video.py", "VIDEO_TWITTER_OK",
+     "X gets the exact bytes in segments and asks for a reconnect without media.write",
+     ("twitter",)),
+    ("check_video.py", "VIDEO_THREADS_OK",
+     "Threads waits for FINISHED before publishing a video; the image path is unchanged",
+     ("threads",)),
+    ("check_video.py", "VIDEO_FACEBOOK_OK",
+     "Facebook posts a video by file_url and a video beats an image",
+     ("facebook",)),
+    ("check_video.py", "VIDEO_INSTAGRAM_OK",
+     "an Instagram card with a video publishes as a Reel and needs no image",
+     ("instagram",)),
+    ("check_video.py", "VIDEO_ROUTES_OK",
+     "the video route attaches, replaces and clears across a whole card and refuses unsafe URLs",
+     ("routes",)),
+    ("check_video.py", "VIDEO_FANOUT_OK",
+     "post-now, post-to-all and the schedule queue each deliver the video",
+     ("fanout",)),
+    ("check_video.py", "VIDEO_COPY_OK",
+     "ticking a platform and bulk Add Platform copy the video and keep one card",
+     ("copy",)),
+    ("check_video.py", "VIDEO_COMPAT_OK",
+     "a real MP4 is probed and each platform's limits hold at the boundary",
+     ("compat",)),
+    ("check_video.py", "VIDEO_DOWNLOAD_OK",
+     "the downloader streams within its cap and refuses unsafe URLs at every hop",
+     ("download",)),
+    ("check_video.py", "VIDEO_UI_OK",
+     "the Compose card and schedule page show video, and the page functions run",
+     ("ui",)),
+    ("check_video.py", "VIDEO_NEWPOST_OK",
+     "a new post takes a video, refuses an unusable one before creating anything",
+     ("newpost",)),
+]
+
 # check_*.py files that are deliberately not gates, with the reason. Empty is the
 # healthy state: a script that is not a gate should not carry the check_ prefix.
 NOT_GATES = {}
 
-ALL_GATES = ACCOUNT_GATES + LIBRARY_GATES + COMPOSE_GATES
+ALL_GATES = ACCOUNT_GATES + LIBRARY_GATES + COMPOSE_GATES + VIDEO_GATES
 
 
 def _unpack(entry):

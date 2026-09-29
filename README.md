@@ -608,7 +608,7 @@ X/Twitter uses the v2 API with pay-per-use pricing. Text posts cost $0.01 each. 
 
 ### Posting videos
 
-Every Compose card has a **🎬 Add Video** control under the image. Upload an MP4/MOV (up to 100 MB, needs Cloudinary), paste a public video URL, or pick one you uploaded before. The video is stored on every row of the card, so it follows the card when you tick another platform or use **Add Platform** in bulk.
+Every Compose card has a **🎬 Add Video** control under the image, and the **Write a New Post** box has the same control (a file or a URL) that attaches the video to every account you tick. Upload an MP4/MOV (up to 100 MB, needs Cloudinary), paste a public video URL, or pick one you uploaded before. The video is stored on every row of the card, so it follows the card when you tick another platform or use **Add Platform** in bulk.
 
 | Platform | How the video is sent | Documented limits |
 |----------|----------------------|-------------------|
@@ -623,7 +623,7 @@ Every Compose card has a **🎬 Add Video** control under the image. Upload an M
 - **Warnings when you attach.** Size and, for uploads, length are checked against each platform's limits and shown under the card (red = will be refused, amber = may be). Platform limits change, so the platform has the last word.
 - **LinkedIn and X download the video first** (they need the bytes), through the same SSRF-hardened fetch as the rest of the app and streamed to a temp file capped at 1 GB. Threads, Facebook and Instagram fetch the URL themselves, so it must be publicly reachable.
 - **Long videos take a while.** A video post can wait several minutes for the platform to process it, so "Post now" on a long clip is slow; queueing it avoids waiting in the browser.
-- Verify with `python scripts/check_video.py <section>` (see the file for the sections) and `python scripts/check_video_regressions.py`. They use fake platform clients, so they never post anywhere.
+- Verify with `python scripts/check_video.py <section>` (see the file for the sections) and `python scripts/run_video_regressions.py`. They use fake platform clients, so they never post anywhere.
 
 ### Posting to Instagram
 

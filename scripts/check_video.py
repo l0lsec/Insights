@@ -16,6 +16,7 @@ claim against the real code and prints its own token only at the end:
     python scripts/check_video.py compat     VIDEO_COMPAT_OK
     python scripts/check_video.py download   VIDEO_DOWNLOAD_OK
     python scripts/check_video.py ui         VIDEO_UI_OK
+    python scripts/check_video.py newpost    VIDEO_NEWPOST_OK
 
 The client sections drive the real platform clients against a fake HTTP layer
 that records every request, then compare a hash of the bytes the "platform"
@@ -1238,11 +1239,12 @@ SECTIONS = {
 }
 
 if __name__ == "__main__":
-    if len(sys.argv) > 1 and sys.argv[1] == "ui":
-        from check_video_ui import section_ui
-        SECTIONS["ui"] = section_ui
+    # The two page-level sections live in a helper module of their own.
+    from _video_ui_gate import section_ui, section_newpost
+    SECTIONS["ui"] = section_ui
+    SECTIONS["newpost"] = section_newpost
     name = sys.argv[1] if len(sys.argv) > 1 else ""
     if name not in SECTIONS:
-        print(f"usage: check_video.py {'|'.join(list(SECTIONS) + ['ui'])}")
+        print(f"usage: check_video.py {'|'.join(SECTIONS)}")
         sys.exit(2)
     SECTIONS[name]()

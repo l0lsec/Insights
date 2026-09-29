@@ -44,6 +44,13 @@ jobs:
         with:
           node-version: "22"
 
+      # The video gates make a real MP4 with ffmpeg and read it back with
+      # ffprobe, so both have to be there rather than assumed from the image.
+      - name: Install ffmpeg
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
       - name: Install dependencies
         run: |
           # mlx-whisper only installs on Apple Silicon and nothing the gates

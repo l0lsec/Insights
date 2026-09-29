@@ -6857,6 +6857,10 @@ def compose_create_post():
     row per ticked target, which is exactly the set of rows the resulting card
     is a view over. Ticking two LinkedIn accounts and Threads writes three rows
     and posts the same copy to all three.
+
+    An optional ``video`` file or ``video_url`` is attached to every one of
+    those rows; ``video_warnings`` in the reply says what each platform will
+    make of it.
     """
     targets, target_errors = _requested_targets('targets')
     if not targets:
@@ -6879,6 +6883,13 @@ def compose_create_post():
     if not content:
         return jsonify({"error": "Content is required"}), 400
 
+    # Last, so a request that was going to be refused anyway never uploads a
+    # video; and before any row is written, so a video that cannot be used
+    # leaves no half-made post behind.
+    video_url, video_report, error = _requested_video()
+    if error:
+        return error
+
     post_ids = [
         add_standalone_post(
             source_type='manual',
@@ -6886,14 +6897,16 @@ def compose_create_post():
             platform=target['platform'],
             content=content,
             image_url=image_url,
+            video_url=video_url,
             account_id=target['account_id'],
         )
         for target in targets
     ]
 
-    if not image_url:
+    if not image_url and not video_url:
         # One fetch for the card, applied to every target's row, since rows with
-        # different images would stop being one card.
+        # different images would stop being one card. A card with a video posts
+        # the video, so there is no image worth fetching for it.
         _maybe_attach_link_image(post_ids[0], content, sibling_ids=post_ids[1:])
 
     return jsonify({
@@ -6903,11 +6916,13 @@ def compose_create_post():
             "platform": targets[0]['platform'],
             "content": content,
             "image_url": image_url,
+            "video_url": video_url,
         },
         "post_ids": post_ids,
         "platforms": [t['platform'] for t in targets],
         "targets": targets,
         "warnings": target_errors,
+        "video_warnings": video_report.get('warnings', []),
     })
 
 
@@ -7696,6 +7711,40 @@ def compose_update_post_image(post_id: int):
     })
 
 
+def _requested_video():
+    """The video a request carries, checked and ready to attach.
+
+    Reads an uploaded ``video`` file (put on Cloudinary) or a ``video_url``; an
+    empty ``video_url`` and no file means no video. Returns
+    ``(video_url, report, error_response)``: exactly one of ``error_response``
+    (a ready-to-return ``(json, status)``) or the first two is meaningful.
+    ``report`` is what the composer needs to judge the video: its size, its
+    duration when known, and the per-platform ``warnings``.
+    """
+    uploaded = request.files.get('video')
+    if uploaded is not None and uploaded.filename:
+        payload, error, status = _store_uploaded_video(uploaded)
+        if error:
+            return None, {}, (jsonify({"error": error}), status)
+        return payload['video_url'], {
+            key: payload[key] for key in ('size_bytes', 'duration', 'warnings')
+        }, None
+
+    video_url = request.form.get('video_url', '').strip() or None
+    if not video_url:
+        return None, {}, None
+    try:
+        video_url = video_media.check_url(video_url)
+    except video_media.VideoError as exc:
+        return None, {}, (jsonify({"error": str(exc)}), 400)
+    size = video_media.head_size(video_url)
+    return video_url, {
+        'size_bytes': size,
+        'duration': None,
+        'warnings': video_media.check_compat(size_bytes=size),
+    }, None
+
+
 @app.route('/compose/post/<int:post_id>/video', methods=['POST'])
 def compose_update_post_video(post_id: int):
     """Attach, replace or clear a standalone post's video.
@@ -7710,27 +7759,9 @@ def compose_update_post_video(post_id: int):
     if not post:
         return jsonify({"error": "Post not found"}), 404
 
-    report = {}
-    uploaded = request.files.get('video')
-    if uploaded is not None and uploaded.filename:
-        payload, error, status = _store_uploaded_video(uploaded)
-        if error:
-            return jsonify({"error": error}), status
-        video_url = payload['video_url']
-        report = {key: payload[key] for key in ('size_bytes', 'duration', 'warnings')}
-    else:
-        video_url = request.form.get('video_url', '').strip() or None
-        if video_url:
-            try:
-                video_url = video_media.check_url(video_url)
-            except video_media.VideoError as exc:
-                return jsonify({"error": str(exc)}), 400
-            size = video_media.head_size(video_url)
-            report = {
-                'size_bytes': size,
-                'duration': None,
-                'warnings': video_media.check_compat(size_bytes=size),
-            }
+    video_url, report, error = _requested_video()
+    if error:
+        return error
 
     return jsonify({
         "success": True,

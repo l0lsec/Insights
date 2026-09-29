@@ -6,7 +6,7 @@ Compose page's script) and passes only if every one of them prints its own
 success token. A suite that exits 0 without printing its token counts as a
 failure, which is what stops a silently skipped check from reading as a pass.
 
-    python scripts/check_video_regressions.py
+    python scripts/run_video_regressions.py
 
 Each suite runs on its own throwaway database with fake platform clients, so
 this makes no network calls and cannot touch a real insights.db or account.

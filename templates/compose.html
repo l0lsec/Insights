@@ -1052,7 +1052,7 @@
             <span class="platform-chip {% if on %}is-on{% endif %}"
                   data-platform="{{ platform }}" data-account-id="{{ target.account_id or '' }}">
                 <button type="button" class="chip-toggle" onclick="toggleNewPostPlatform(this)"
-                        title="{{ name }}{% if platform == 'instagram' %}, needs an image before it can publish{% endif %}">
+                        title="{{ name }}{% if platform == 'instagram' %}, needs an image or video before it can publish{% endif %}">
                     <span class="chip-box">{% if on %}✓{% endif %}</span>
                     <span class="chip-icon">{{ meta.icon }}</span>
                     {% if platform != 'twitter' or target.show_label %}<span class="chip-name">{{ name }}</span>{% endif %}
@@ -1062,6 +1062,27 @@
         </div>
         <textarea class="form-control mb-2" id="add-post-textarea" rows="4"
                   placeholder="Write your post here..." oninput="updateManualCharCount()"></textarea>
+        {# An optional video, saved on every ticked account's post. Upload a file
+           or paste a public URL, not both: choosing one clears the other. #}
+        <div class="mb-2" id="new-post-video">
+            <div class="d-flex align-items-center gap-2 flex-wrap">
+                <label class="btn btn-sm btn-outline-secondary mb-0" title="Upload a video (MP4/MOV, up to 100MB)">
+                    🎬 Add Video
+                    <input type="file" class="d-none" id="new-post-video-file"
+                           accept="video/mp4,video/quicktime,.mp4,.mov"
+                           onchange="onNewPostVideoFile(this)">
+                </label>
+                <input type="url" class="form-control form-control-sm" style="max-width: 340px;"
+                       id="new-post-video-url" placeholder="…or paste a public video URL"
+                       oninput="onNewPostVideoUrl(this)">
+                <span class="small text-muted text-truncate" style="max-width: 220px;" id="new-post-video-name"></span>
+                <button type="button" class="btn btn-sm btn-outline-danger d-none" id="new-post-video-clear"
+                        onclick="clearNewPostVideo()" title="Remove the video">✕</button>
+            </div>
+            <div class="small text-muted mt-1 d-none" id="new-post-video-note">
+                🎬 The video posts instead of an image; Instagram sends it as a Reel.
+            </div>
+        </div>
         <div class="d-flex justify-content-between align-items-center">
             <small class="text-muted" id="add-post-charcount"></small>
             <div class="d-flex gap-2">
@@ -7499,8 +7520,48 @@ function showAddPostForm() {
     document.getElementById('add-post-form').classList.remove('d-none');
     const textarea = document.getElementById('add-post-textarea');
     textarea.value = '';
+    clearNewPostVideo();
     textarea.focus();
     updateManualCharCount();
+}
+
+// The new post's optional video: a file to upload or a URL, never both. Saving
+// sends whichever is set with the post, so a video that can't be used stops the
+// post from being created at all instead of leaving a card without it.
+function refreshNewPostVideoUI() {
+    const file = document.getElementById('new-post-video-file').files[0];
+    const url = document.getElementById('new-post-video-url').value.trim();
+    const has = !!(file || url);
+    document.getElementById('new-post-video-name').textContent =
+        file ? `${file.name} (${(file.size / (1024 * 1024)).toFixed(1)} MB)` : '';
+    document.getElementById('new-post-video-clear').classList.toggle('d-none', !has);
+    document.getElementById('new-post-video-note').classList.toggle('d-none', !has);
+}
+
+function onNewPostVideoFile(input) {
+    const file = input.files[0];
+    if (!file) { refreshNewPostVideoUI(); return; }
+    if (!/\.(mp4|mov)$/i.test(file.name)) {
+        showToast('Invalid file type. Please choose an MP4 or MOV video.', 'error');
+        input.value = '';
+    } else if (file.size > 100 * 1024 * 1024) {
+        showToast('File too large. Uploads are limited to 100MB; paste a public URL for bigger videos.', 'error');
+        input.value = '';
+    } else {
+        document.getElementById('new-post-video-url').value = '';
+    }
+    refreshNewPostVideoUI();
+}
+
+function onNewPostVideoUrl(input) {
+    if (input.value.trim()) document.getElementById('new-post-video-file').value = '';
+    refreshNewPostVideoUI();
+}
+
+function clearNewPostVideo() {
+    document.getElementById('new-post-video-file').value = '';
+    document.getElementById('new-post-video-url').value = '';
+    refreshNewPostVideoUI();
 }
 
 function hideAddPostForm() {
@@ -7554,9 +7615,15 @@ function createManualPost() {
     targets.forEach(t => formData.append('targets', t));
     formData.append('content', content);
 
+    const videoFile = document.getElementById('new-post-video-file').files[0];
+    const videoUrl = document.getElementById('new-post-video-url').value.trim();
+    if (videoFile) formData.append('video', videoFile);
+    else if (videoUrl) formData.append('video_url', videoUrl);
+
     const saveBtn = textarea.closest('.add-post-area').querySelector('.btn-success');
     const originalText = saveBtn.innerHTML;
-    saveBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Saving...';
+    saveBtn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> ' +
+        (videoFile ? 'Uploading video...' : 'Saving...');
     saveBtn.disabled = true;
 
     fetch('{{ url_for("compose_create_post") }}', {
@@ -7566,6 +7633,10 @@ function createManualPost() {
     .then(response => response.json())
     .then(data => {
         if (data.success) {
+            // The page reloads to show the new card, which would wipe a toast,
+            // so what the platforms will make of the video is said up front.
+            const problems = (data.video_warnings || []).map(w => (w.level === 'error' ? '⛔ ' : '⚠️ ') + w.message);
+            if (problems.length) alert('Post saved. Heads up about the video:\n\n' + problems.join('\n'));
             location.reload();
         } else {
             alert('Error: ' + (data.error || 'Failed to create post'));
