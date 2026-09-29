@@ -8,6 +8,7 @@ venv/
 *.txt
 .DS_Store
 *.md
+!CLAUDE.md
 uploads/
 downloads/
 *.log
