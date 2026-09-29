@@ -83,6 +83,13 @@
     .platform-checkbox-box[data-platform="facebook"] { --platform-color: #1877F2; --platform-bg: #1877F2; }
     .platform-checkbox-box[data-platform="instagram"] { --platform-color: #E4405F; --platform-bg: #E4405F; }
     
+    /* The generator card serves two jobs. The manual tab hides what only a model
+       needs (provider, count, tone, instructions, Generate) and shows Save. */
+    #generator-body .manual-only { display: none; }
+    #generator-body.mode-manual .manual-only { display: grid; }
+    #generator-body .manual-only .btn { width: 100%; }
+    #generator-body.mode-manual .ai-only { display: none !important; }
+
     /* Tone selector */
     .tone-option {
         padding: 0.5rem 1rem;
@@ -520,13 +527,18 @@
 <!-- Generator Card -->
 <div class="card mb-4" style="border-radius: 12px; overflow: hidden;">
     <div class="card-header" style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white;">
-        <strong>✨ Generate New Posts</strong>
+        <strong>✨ Create Posts</strong>
     </div>
     <div class="card-body position-relative" id="generator-body">
         <!-- Source Type Tabs -->
         <ul class="nav nav-pills nav-pills-custom mb-4" id="sourceTypeTabs" role="tablist">
             <li class="nav-item me-2" role="presentation">
-                <button class="nav-link {% if not selected_source %}active{% endif %}" id="freeform-tab" data-bs-toggle="pill" data-bs-target="#freeform-content" type="button" role="tab">
+                <button class="nav-link {% if not selected_source %}active{% endif %}" id="manual-tab" data-bs-toggle="pill" data-bs-target="#manual-content" type="button" role="tab">
+                    ✍️ Write Manually
+                </button>
+            </li>
+            <li class="nav-item me-2" role="presentation">
+                <button class="nav-link" id="freeform-tab" data-bs-toggle="pill" data-bs-target="#freeform-content" type="button" role="tab">
                     💡 Freeform Prompt
                 </button>
             </li>
@@ -564,7 +576,7 @@
         </ul>
 
         <!-- Shared AI Provider + Model selector (applies to all generation modes) -->
-        <div class="d-flex align-items-center flex-wrap mb-3 gap-2 p-2 rounded" style="background: #f8f9fa;">
+        <div class="ai-only d-flex align-items-center flex-wrap mb-3 gap-2 p-2 rounded" style="background: #f8f9fa;">
             <span class="fw-bold small">AI Provider:</span>
             <div class="btn-group btn-group-sm" role="group" id="ai-provider-toggle">
                 <input type="radio" class="btn-check" name="aiProvider" id="provider-openai" value="openai" checked>
@@ -583,8 +595,23 @@
         
         <!-- Tab Content -->
         <div class="tab-content" id="sourceTypeContent">
+            <!-- Manual Tab: no model involved. Platforms, accounts and the image
+                 below are the same shared pickers the generator uses. -->
+            <div class="tab-pane fade {% if not selected_source %}show active{% endif %}" id="manual-content" role="tabpanel">
+                <div class="mb-3">
+                    <div class="d-flex justify-content-between align-items-center mb-2 flex-wrap gap-1">
+                        <label class="form-label fw-bold mb-0" for="manual-input">Your Post</label>
+                        <span class="text-muted small">Nothing is generated: what you write here is what gets saved.</span>
+                    </div>
+                    <textarea class="form-control" id="manual-input" rows="6"
+                              placeholder="Write your post here...&#10;&#10;Pick where it should go below, add an image if you like, then save it."
+                              oninput="updateManualComposerCount()"></textarea>
+                    <div class="small mt-2 d-flex flex-wrap gap-2 align-items-center" id="manual-charcount" aria-live="polite"></div>
+                </div>
+            </div>
+
             <!-- Freeform Tab -->
-            <div class="tab-pane fade {% if not selected_source %}show active{% endif %}" id="freeform-content" role="tabpanel">
+            <div class="tab-pane fade" id="freeform-content" role="tabpanel">
                 <div class="mb-3">
                     <div class="d-flex justify-content-between align-items-center mb-2">
                         <label class="form-label fw-bold mb-0">Topic or Prompt</label>
@@ -879,7 +906,7 @@
                 </div>
                 {% endif %}
             </div>
-            <div class="col-md-4">
+            <div class="col-md-4 ai-only">
                 <label class="form-label fw-bold" for="posts-per-platform">Posts per Platform</label>
                 <div class="input-group">
                     <button class="btn btn-outline-secondary" type="button" onclick="adjustPostCount(-1)">−</button>
@@ -971,7 +998,7 @@
         </div>
         
         <!-- Tone Selection -->
-        <div class="mb-4">
+        <div class="mb-4 ai-only">
             <label class="form-label fw-bold mb-3">Tone & Style</label>
             <div class="d-flex flex-wrap gap-2">
                 <label class="tone-option selected" data-tone="professional">
@@ -998,7 +1025,7 @@
         </div>
         
         <!-- Additional Context -->
-        <div class="mb-4">
+        <div class="mb-4 ai-only">
             <div class="d-flex justify-content-between align-items-center mb-2">
                 <label class="form-label fw-bold mb-0" for="extra-context">Additional Instructions (optional)</label>
                 <div class="btn-group btn-group-sm" role="group" aria-label="Prompt library">
@@ -1011,8 +1038,15 @@
             <small class="text-muted">Works with every tab — including From URL and From Saved Source. This context is added to the AI prompt to guide generation.</small>
         </div>
         
+        <!-- Save Button (manual tab) -->
+        <div class="manual-only">
+            <button type="button" class="btn btn-lg btn-success" id="manual-save-btn" onclick="saveManualPost()">
+                💾 Save Post
+            </button>
+        </div>
+
         <!-- Generate Button -->
-        <div class="d-grid">
+        <div class="d-grid ai-only">
             <button type="button" class="btn btn-lg text-white" id="generate-btn" 
                     style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);"
                     onclick="generatePosts()">
@@ -1217,7 +1251,7 @@
         <span class="badge bg-light text-dark">0 posts</span>
     </div>
     <div class="card-body">
-        <p class="text-muted mb-3">No posts yet. Generate posts above, or write one and tick where it should go:</p>
+        <p class="text-muted mb-3">No posts yet. Write or generate some above, or write one here and tick where it should go:</p>
         <div id="saved-posts-container">
             <div class="social-copy-card">
                 <div class="social-copy-body">
@@ -1689,6 +1723,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const checkbox = this.querySelector('input[type="checkbox"]');
             checkbox.checked = !checkbox.checked;
             this.classList.toggle('selected', checkbox.checked);
+            updateManualComposerCount();
         });
     });
     
@@ -2074,6 +2109,7 @@ function clearBulkImageFile() {
 
 function getActiveSourceType() {
     const activeTab = document.querySelector('#sourceTypeTabs .nav-link.active');
+    if (activeTab.id === 'manual-tab') return 'manual';
     if (activeTab.id === 'freeform-tab') return 'freeform';
     if (activeTab.id === 'url-tab') return 'url';
     if (activeTab.id === 'text-tab') return 'text';
@@ -2086,6 +2122,7 @@ function getActiveSourceType() {
 
 function getContent() {
     const sourceType = getActiveSourceType();
+    if (sourceType === 'manual') return document.getElementById('manual-input').value.trim();
     if (sourceType === 'freeform') return document.getElementById('freeform-input').value.trim();
     if (sourceType === 'url') return document.getElementById('url-input').value.trim();
     if (sourceType === 'text') return document.getElementById('text-input').value.trim();
@@ -2097,6 +2134,130 @@ function getContent() {
     }
     return '';
 }
+
+/* ── Manual tab ──────────────────────────────────────────── */
+// The generator card doubles as the manual composer. Which controls show is one
+// class on the card body, derived from the active tab: the manual tab hides what
+// only a model needs (provider, count, tone, instructions, Generate).
+const SOURCE_TAB_KEY = 'compose.sourceTab';
+
+function applyGeneratorMode() {
+    const manual = getActiveSourceType() === 'manual';
+    document.getElementById('generator-body').classList.toggle('mode-manual', manual);
+    if (manual) updateManualComposerCount();
+}
+
+function tickedPlatforms() {
+    return Array.from(document.querySelectorAll('#platform-checkboxes input:checked'))
+                .map(cb => cb.value);
+}
+
+// The targets the server writes a row for: each ticked account of a ticked
+// platform as "platform:account_id", and a bare platform name for a ticked
+// platform with no account ticked (its default account). Sent together they are
+// exactly the set of rows the saved card is a view over.
+function manualPostTargets() {
+    const accounts = selectedAccountTargets();
+    const withAccount = new Set(accounts.map(t => t.split(':')[0]));
+    return accounts.concat(tickedPlatforms().filter(p => !withAccount.has(p)));
+}
+
+function updateManualComposerCount() {
+    const input = document.getElementById('manual-input');
+    const out = document.getElementById('manual-charcount');
+    if (!input || !out) return;
+    const length = input.value.length;
+    const platforms = tickedPlatforms();
+
+    const chip = (text, className) => {
+        const el = document.createElement('span');
+        el.className = className;
+        el.textContent = text;
+        return el;
+    };
+    out.replaceChildren(chip(`${length} character${length === 1 ? '' : 's'}`, 'text-muted'));
+    if (platforms.length === 0) {
+        out.appendChild(chip('Pick at least one platform below', 'text-danger'));
+        return;
+    }
+    // Each ticked platform against its own limit: one long post can be fine for
+    // LinkedIn and too long for X, and that is worth seeing before saving.
+    platforms.forEach(p => {
+        const limit = platformCharLimits[p] || 5000;
+        const over = length > limit;
+        out.appendChild(chip(`${PLATFORM_LABELS[p] || p} ${length} / ${limit}`,
+            over ? 'badge bg-danger' : 'badge bg-light text-dark border'));
+    });
+    if (platforms.includes('instagram')) {
+        out.appendChild(chip('Instagram needs an image to publish', 'text-muted'));
+    }
+}
+
+function saveManualPost() {
+    const input = document.getElementById('manual-input');
+    const content = input.value.trim();
+    if (!content) {
+        alert('Write your post first.');
+        input.focus();
+        return;
+    }
+    const targets = manualPostTargets();
+    if (targets.length === 0) {
+        alert('Please select at least one platform');
+        return;
+    }
+    const tooLong = tickedPlatforms().filter(p => content.length > (platformCharLimits[p] || 5000));
+    if (tooLong.length &&
+        !confirm(`This post is ${content.length} characters, over the limit for ` +
+                 `${tooLong.map(p => PLATFORM_LABELS[p] || p).join(', ')}. Save it anyway?`)) {
+        return;
+    }
+
+    const formData = new FormData();
+    targets.forEach(t => formData.append('targets', t));
+    formData.append('content', content);
+    const imageUrl = document.getElementById('final-image-url').value.trim();
+    if (imageUrl) formData.append('image_url', imageUrl);
+
+    const btn = document.getElementById('manual-save-btn');
+    const original = btn.innerHTML;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm"></span> Saving...';
+    btn.disabled = true;
+
+    fetch('{{ url_for("compose_create_post") }}', { method: 'POST', body: formData })
+        .then(response => response.json())
+        .then(data => {
+            if (!data.success) throw new Error(data.error || 'Failed to save post');
+            const n = (data.post_ids || []).length;
+            showToast(n > 1 ? `Post saved for ${n} accounts! Refreshing...` : 'Post saved! Refreshing...', 'success');
+            (data.warnings || []).forEach(w => showToast(w, 'info'));
+            setTimeout(() => location.reload(), 900);
+        })
+        .catch(error => {
+            alert('Error: ' + error.message);
+            btn.innerHTML = original;
+            btn.disabled = false;
+        });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('#sourceTypeTabs .nav-link').forEach(tab => {
+        tab.addEventListener('shown.bs.tab', () => {
+            applyGeneratorMode();
+            try { localStorage.setItem(SOURCE_TAB_KEY, tab.id); } catch (e) { /* private mode */ }
+        });
+    });
+    // Reopen the tab used last, so choosing to generate isn't undone by the
+    // manual tab being first. A "use this saved source" link still wins.
+    let remembered = null;
+    try { remembered = localStorage.getItem(SOURCE_TAB_KEY); } catch (e) { /* private mode */ }
+    const target = remembered && remembered !== 'manual-tab' && document.getElementById(remembered);
+    const savedSourceOpen = document.getElementById('saved-tab').classList.contains('active');
+    if (target && !savedSourceOpen && target.closest('#sourceTypeTabs')) {
+        bootstrap.Tab.getOrCreateInstance(target).show();
+    }
+    applyGeneratorMode();
+});
 
 /* ── Image tab: file handling ────────────────────────────── */
 const _imageFiles = [];

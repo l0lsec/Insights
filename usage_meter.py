@@ -47,6 +47,24 @@ def _envf(name: str, default: float) -> float:
 # "gpt-4o-2024-08-06" resolves to the "gpt-4o" entry and "gpt-4o-mini-..." to
 # "gpt-4o-mini".
 PRICING = {
+    # GPT-6 family (prices as published 2026-09-29; prompts over 272K tokens on
+    # Astra bill at a higher rate, which this estimate ignores).
+    "gpt-6-astra": {
+        "in": _envf("USAGE_PRICE_GPT_6_ASTRA_IN", 10.00),
+        "out": _envf("USAGE_PRICE_GPT_6_ASTRA_OUT", 50.00),
+    },
+    "gpt-6.1-sol": {
+        "in": _envf("USAGE_PRICE_GPT_6_SOL_IN", 2.00),
+        "out": _envf("USAGE_PRICE_GPT_6_SOL_OUT", 10.00),
+    },
+    "gpt-6-sol": {
+        "in": _envf("USAGE_PRICE_GPT_6_SOL_IN", 2.00),
+        "out": _envf("USAGE_PRICE_GPT_6_SOL_OUT", 10.00),
+    },
+    "gpt-6-luna": {
+        "in": _envf("USAGE_PRICE_GPT_6_LUNA_IN", 0.10),
+        "out": _envf("USAGE_PRICE_GPT_6_LUNA_OUT", 0.50),
+    },
     "gpt-4o-mini": {
         "in": _envf("USAGE_PRICE_GPT_4O_MINI_IN", 0.15),
         "out": _envf("USAGE_PRICE_GPT_4O_MINI_OUT", 0.60),
@@ -74,7 +92,21 @@ DEFAULT_PRICE = {
 # Anthropic (Claude) chat rates, dollars per 1,000,000 tokens (input / output).
 # Matched by longest-prefix against the model name, so e.g. "claude-opus-4-8"
 # resolves to the "claude-opus" entry unless a more specific key is added.
+# Opus 5.5 and the Sonnet 5.x line are priced below their older siblings, so they
+# need their own keys; Fable sits above Opus.
 PRICING_ANTHROPIC = {
+    "claude-fable": {
+        "in": _envf("USAGE_PRICE_CLAUDE_FABLE_IN", 10.00),
+        "out": _envf("USAGE_PRICE_CLAUDE_FABLE_OUT", 50.00),
+    },
+    "claude-opus-5-5": {
+        "in": _envf("USAGE_PRICE_CLAUDE_OPUS_5_5_IN", 4.00),
+        "out": _envf("USAGE_PRICE_CLAUDE_OPUS_5_5_OUT", 20.00),
+    },
+    "claude-sonnet-5": {
+        "in": _envf("USAGE_PRICE_CLAUDE_SONNET_5_IN", 2.00),
+        "out": _envf("USAGE_PRICE_CLAUDE_SONNET_5_OUT", 10.00),
+    },
     "claude-opus": {
         "in": _envf("USAGE_PRICE_CLAUDE_OPUS_IN", 5.00),
         "out": _envf("USAGE_PRICE_CLAUDE_OPUS_OUT", 25.00),

@@ -138,7 +138,7 @@ View and manage JIRA tickets created from action items.
 
 
 ### Command Center (Compose)
-Generate social media posts from any source - prompts, URLs, or text. Save URL sources for future use and manage your content pipeline.
+Write social media posts yourself, or generate them from any source - prompts, URLs, or text. Save URL sources for future use and manage your content pipeline.
 
 
 ### Schedule Queue
@@ -272,9 +272,12 @@ All variables can be set in a `.env` file in the project root. See `.env.example
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LLM_PROVIDER` | `openai` | Cloud provider for text/vision generation: `openai` or `anthropic` |
-| `OPENAI_MODEL` | `gpt-4o` | OpenAI model used for summarization, articles, and post generation |
+| `OPENAI_MODEL` | `gpt-6.1-sol` | OpenAI model used for summarization, articles, and post generation. Also selectable in the Compose model dropdown: `gpt-6-astra` (most capable), `gpt-6-luna` (cheapest) |
+| `OPENAI_REASONING_EFFORT` | `low` | How hard GPT-5 and later think before answering: `low`, `medium`, `high`, `xhigh`, `max` |
 | `ANTHROPIC_API_KEY` | — | Anthropic (Claude) API key. Required when `LLM_PROVIDER=anthropic` |
-| `ANTHROPIC_MODEL` | `claude-opus-4-8` | Claude model used when `LLM_PROVIDER=anthropic` |
+| `ANTHROPIC_MODEL` | `claude-opus-5-5` | Claude model used when `LLM_PROVIDER=anthropic`. Also selectable in the Compose dropdown: `claude-sonnet-5-5`, `claude-fable-5-1` (most capable, costs most), `claude-haiku-4-5` |
+| `ANTHROPIC_EFFORT` | `low` | Thinking depth for Opus 5.x, Sonnet 5.x and Fable: `low`, `medium`, `high`, `xhigh`, `max` |
+| `ANTHROPIC_REFUSAL_FALLBACK` | `1` | Re-run a request on a fallback model, in the same call, when a safety classifier declines it. Set `0` to turn off |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Base URL for an optional local Ollama server |
 | `OLLAMA_TEXT_MODEL` | `llama3.2` | Local text model used when generation is routed through Ollama |
 | `OLLAMA_VISION_MODEL` | `llama3.2-vision` | Local vision model used when image inputs are routed through Ollama |
@@ -428,6 +431,9 @@ Articles can be refined with AI-assisted feedback and are saved on the **Article
 ### Command Center
 
 The Command Center (`/compose`) is your hub for social media content creation:
+
+**Writing Posts Yourself:**
+The **Write Manually** tab is the first one in the **Create Posts** card, and no AI model is involved. Write the post, tick the platforms (and, where a platform has several connected accounts, which of them) it should go to, optionally add an image, and press **Save Post**. It is saved as one card with a row per ticked account, exactly like a generated post, so you can then edit, queue, schedule or post it the same way. A counter shows the post's length against each ticked platform's limit and asks before saving something too long for one of them. The tab you used last is reopened next time, so choosing to generate isn't undone by Write Manually being first. (There is also a quick "Write a New Post" form under the saved posts list.)
 
 **Generating Posts:**
 1. **From Prompt** - Enter any topic or idea and let AI generate platform-optimized posts

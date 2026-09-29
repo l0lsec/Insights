@@ -18,8 +18,8 @@ from urllib.parse import urlparse, parse_qs
 # selected per-call via ``use_local`` and always uses the Ollama (OpenAI-compatible)
 # path regardless of this setting.
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").strip().lower()
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
-ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-4-8")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-6.1-sol")
+ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5-5")
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "llama3.2-vision")
 OLLAMA_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2")
@@ -29,9 +29,28 @@ OLLAMA_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2")
 # offered too, even when it is not listed here. Local (Ollama) models are
 # discovered separately by the browser via the Ollama status endpoint.
 MODEL_CHOICES = {
-    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-4.1-mini"],
-    "anthropic": ["claude-opus-4-8", "claude-sonnet-5", "claude-haiku-4-5"],
+    "openai": ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"],
+    "anthropic": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-4-5"],
 }
+
+# The newest models of both providers reason before they answer, and those
+# reasoning tokens are drawn from the same output budget as the answer. Call
+# sites were written for models that answered directly (``max_tokens=160`` for a
+# one-line label), so each adapter adds this much room on top of what the caller
+# asked for, and asks for the lowest effort every model of the family accepts:
+# routine post/summary copy gains nothing from deep reasoning, and it is billed.
+REASONING_TOKEN_HEADROOM = 4096
+OPENAI_REASONING_EFFORT = os.environ.get("OPENAI_REASONING_EFFORT", "low").strip().lower()
+ANTHROPIC_EFFORT = os.environ.get("ANTHROPIC_EFFORT", "low").strip().lower()
+
+# Claude models that think by default and cannot have thinking switched off
+# (Fable, Opus 5.x, Sonnet 5.x). They take the ``effort`` control and the
+# output headroom above; older Claude models and Haiku take neither.
+_CLAUDE_THINKS_BY_DEFAULT = re.compile(r"^claude-(fable|mythos|opus-5|sonnet-5)")
+# Models that support the server-side refusal fallback (see _AnthropicChatClient).
+_CLAUDE_HAS_REFUSAL_FALLBACK = re.compile(r"^claude-(fable|mythos|opus-5|sonnet-5-5)")
+# OpenAI models that reason: GPT-5 and later, and the o-series.
+_OPENAI_REASONING_MODEL = re.compile(r"^(gpt-(?:[5-9]|\d{2,})|o\d)")
 
 logger = logging.getLogger(__name__)
 
@@ -140,14 +159,23 @@ class _AnthropicChatClient:
     * ``system`` role messages become Anthropic's top-level ``system`` parameter.
     * OpenAI ``image_url`` content blocks become Anthropic ``image`` blocks.
     * Sampling kwargs (``temperature``, ``top_p``, ``extra_body`` …) are dropped —
-      Claude Opus 4.7+ reject them with a 400.
+      Claude Opus 4.7+ and Sonnet 5+ reject them with a 400.
     * ``max_tokens`` is required by Anthropic, so a default is supplied when a caller
       omits it.
+    * Models that think by default (Fable, Opus 5.x, Sonnet 5.x) get a low
+      ``effort`` and extra output headroom, because their thinking is drawn from
+      ``max_tokens`` and a caller sized for a bare answer would otherwise be cut
+      off before the answer starts.
+    * Those same models also get the server-side refusal fallback, so a request
+      a safety classifier declines is re-run on a fallback model in the same
+      call. This app writes about security topics, which is exactly what those
+      classifiers look at. Set ``ANTHROPIC_REFUSAL_FALLBACK=0`` to turn it off.
     * The response is wrapped so ``.choices[0].message.content`` and ``.usage``
       behave like the OpenAI shape the callers read.
     """
 
     DEFAULT_MAX_TOKENS = 4096
+    FALLBACK_BETA = "server-side-fallback-2026-07-01"
 
     def __init__(self, api_key: str | None):
         if not api_key:
@@ -155,6 +183,8 @@ class _AnthropicChatClient:
         from anthropic import Anthropic
 
         self._client = Anthropic(api_key=api_key)
+        self._fallback_enabled = os.environ.get(
+            "ANTHROPIC_REFUSAL_FALLBACK", "1").strip().lower() not in ("0", "false", "off", "no")
         # Mirror the OpenAI client surface: ``client.chat.completions.create(...)``.
         self.chat = types.SimpleNamespace(
             completions=types.SimpleNamespace(create=self._create)
@@ -181,13 +211,40 @@ class _AnthropicChatClient:
         if system:
             kwargs["system"] = system
 
-        return _AnthropicChatResponse(self._client.messages.create(**kwargs))
+        if _CLAUDE_THINKS_BY_DEFAULT.match(model):
+            kwargs["max_tokens"] += REASONING_TOKEN_HEADROOM
+            kwargs["output_config"] = {"effort": ANTHROPIC_EFFORT}
+
+        if self._fallback_enabled and _CLAUDE_HAS_REFUSAL_FALLBACK.match(model):
+            message = self._client.beta.messages.create(
+                betas=[self.FALLBACK_BETA], fallbacks="default", **kwargs)
+        else:
+            message = self._client.messages.create(**kwargs)
+        return _AnthropicChatResponse(message)
+
+
+class LLMRefusal(RuntimeError):
+    """The model declined the request (Anthropic ``stop_reason: "refusal"``).
+
+    Raised instead of returning an empty reply, so callers surface why nothing
+    came back rather than failing later on a blank string.
+    """
 
 
 class _AnthropicChatResponse:
     """Wrap an Anthropic ``Message`` in the OpenAI response shape callers expect."""
 
     def __init__(self, message):
+        if getattr(message, "stop_reason", None) == "refusal":
+            details = getattr(message, "stop_details", None)
+            category = getattr(details, "category", None)
+            explanation = getattr(details, "explanation", None)
+            raise LLMRefusal(
+                "The model declined this request"
+                + (f" ({category})" if category else "")
+                + (f": {explanation}" if explanation else ".")
+                + " Try rephrasing it or choosing a different model."
+            )
         text = "".join(
             block.text for block in message.content
             if getattr(block, "type", None) == "text"
@@ -195,6 +252,57 @@ class _AnthropicChatResponse:
         self.choices = [types.SimpleNamespace(message=types.SimpleNamespace(content=text))]
         self.usage = message.usage  # exposes input_tokens / output_tokens
         self.model = message.model
+
+
+class _OpenAIChatClient:
+    """Adapts the call sites' chat-completions kwargs to reasoning-model rules.
+
+    Every call site was written for GPT-4-era models: ``temperature=…`` and
+    ``max_tokens=…``. GPT-5 and later reject both (``max_tokens`` became
+    ``max_completion_tokens``; sampling knobs are refused while the model
+    reasons), so this wrapper translates them once here instead of editing a
+    dozen call sites, and leaves other models' requests untouched. Everything
+    else on the client (``responses``, ``audio`` …) passes straight through.
+
+    If the API still names a parameter it will not accept (a custom
+    ``OPENAI_MODEL`` this list does not know about), that parameter is dropped
+    or renamed and the request retried, rather than failing the whole action.
+    """
+
+    _UNSUPPORTED = ("unsupported_parameter", "unsupported_value")
+    _SAMPLING = ("temperature", "top_p", "presence_penalty", "frequency_penalty")
+
+    def __init__(self, client):
+        self._client = client
+        self.chat = types.SimpleNamespace(
+            completions=types.SimpleNamespace(create=self._create)
+        )
+
+    def __getattr__(self, name):
+        return getattr(self._client, name)
+
+    def _create(self, *, model, **kwargs):
+        from openai import BadRequestError
+
+        if _OPENAI_REASONING_MODEL.match(model):
+            for name in self._SAMPLING:
+                kwargs.pop(name, None)
+            if kwargs.get("max_tokens") is not None:
+                kwargs["max_completion_tokens"] = kwargs.pop("max_tokens") + REASONING_TOKEN_HEADROOM
+            kwargs.setdefault("reasoning_effort", OPENAI_REASONING_EFFORT)
+
+        for _attempt in range(len(kwargs) + 1):
+            try:
+                return self._client.chat.completions.create(model=model, **kwargs)
+            except BadRequestError as exc:
+                param = getattr(exc, "param", None)
+                if getattr(exc, "code", None) not in self._UNSUPPORTED or param not in kwargs:
+                    raise
+                logger.info("OpenAI rejected %r for %s; retrying without it", param, model)
+                value = kwargs.pop(param)
+                if param == "max_tokens":
+                    kwargs["max_completion_tokens"] = value
+        raise RuntimeError(f"OpenAI kept rejecting parameters for {model}")
 
 
 def _get_llm_client(use_local: bool = False, vision: bool = False,
@@ -233,7 +341,7 @@ def _get_llm_client(use_local: bool = False, vision: bool = False,
     if not client.api_key:
         raise RuntimeError("OPENAI_API_KEY is not configured")
     m = model if (model and not model.startswith("claude")) else OPENAI_MODEL
-    return client, m, "openai"
+    return _OpenAIChatClient(client), m, "openai"
 
 
 def _get_llm_params(use_local: bool, num_platforms: int = 1, posts_per_call: int = 1) -> dict:
