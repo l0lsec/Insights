@@ -52,3 +52,24 @@ the text you are about to send and check that none of these appear:
 
 A pull request description or a comment can be edited after the fact, but it may
 already have been seen, mailed and indexed by then, so check first.
+
+## Commits are authored as the owner, with the GitHub no-reply address
+
+Author and committer are the owner's GitHub profile, `l0lsec`, with GitHub's
+no-reply address. Never put the owner's personal email address in a commit, a
+file, a comment or a message; the owner has asked that it not be disclosed.
+
+Cloud sessions start with a `Claude` git identity, so set the right one before
+the first commit:
+
+    git config user.name l0lsec
+    git config user.email 51931886+l0lsec@users.noreply.github.com
+
+Before pushing, the authors about to be published should be that identity and
+nothing else:
+
+    git log origin/main..HEAD --format='%an <%ae> | %cn <%ce>' | sort -u
+
+Commits already on `main` that are authored as `Claude` were left as they are on
+purpose. Changing them means rewriting `main` and force-pushing it, which the
+owner declined. Do not rewrite them to tidy this up.
