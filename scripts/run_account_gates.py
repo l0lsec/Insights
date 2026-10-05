@@ -37,6 +37,8 @@ GATES = [
      "an existing single-account install migrates and keeps working"),
     ("check_login_without_identity.py", "NO_IDENTITY_OK",
      "a login with no identity never damages an account that has one"),
+    ("check_instagram_expired_default.py", "IG_EXPIRED_DEFAULT_OK",
+     "an expired Instagram default never hides or outranks a working login"),
 ]
 
 TIMEOUT_SECONDS = 300

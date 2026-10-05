@@ -116,6 +116,8 @@ from database import (
     # Instagram token functions
     save_instagram_token,
     get_instagram_token,
+    find_social_account,
+    get_default_social_account,
     delete_instagram_token,
     update_instagram_token,
     update_instagram_user_info,
@@ -3913,6 +3915,46 @@ def threads_configure():
     )
 
 
+def _instagram_token_is_dead(token):
+    """True when an Instagram token is past its expiry, not merely close to it.
+
+    Instagram only refreshes a long-lived token that is still valid, so once
+    the expiry has passed the login can never post again until someone
+    reconnects it. A token inside the refresh window is still alive.
+    """
+    return token is None or instagram_is_token_expired(token['expires_at'], buffer_minutes=0)
+
+
+def _live_instagram_token():
+    """(account, token) for the first connected Instagram login that can post.
+
+    The default account comes first; the rest follow in the order the accounts
+    screen lists them. Returns (None, None) when every login has expired.
+    """
+    for account in list_social_accounts('instagram'):
+        token = get_instagram_token(account['id'])
+        if not _instagram_token_is_dead(token):
+            return account, token
+    return None, None
+
+
+def _promote_over_dead_instagram_default(account_id):
+    """Make a freshly connected login the default if the default can no longer post.
+
+    A new login normally joins as a second account and leaves the default where
+    it is. But an expired default would keep every post that does not name an
+    account aimed at a login that is guaranteed to fail, and the status card
+    would keep reporting the platform as disconnected, even though the user has
+    just connected a working account. Returns True when the default moved.
+    """
+    default = get_default_social_account('instagram')
+    if not default or default['id'] == account_id:
+        return False
+    if not _instagram_token_is_dead(get_instagram_token(default['id'])):
+        return False
+    return set_default_social_account(account_id)
+
+
 @app.route('/instagram/status')
 def instagram_status():
     """Check Instagram connection status."""
@@ -3964,10 +4006,34 @@ def instagram_status():
             })
         except Exception as e:
             app.logger.warning("Failed to refresh Instagram token: %s", e)
+            # The default login is dead, but another connected login may not
+            # be. Reporting the whole platform as disconnected in that case is
+            # what made a successful connect look like it had failed.
+            live_account, live_token = _live_instagram_token()
+            if live_token is not None:
+                live_type = live_token['account_type'] if 'account_type' in live_token.keys() else None
+                return jsonify({
+                    "connected": True,
+                    "configured": True,
+                    "username": live_token['username'],
+                    "display_name": live_token['display_name'],
+                    "profile_picture_url": live_token['profile_picture_url'],
+                    "account_type": live_type,
+                    "warning": (
+                        f"@{token['username']} (the default) has expired and needs "
+                        f"reconnecting; posts that do not name an account will fail "
+                        f"until it is reconnected or another account is made default."
+                    ),
+                    "user_id": live_token['user_id'],
+                    "expires_at": live_token['expires_at'],
+                    "default_expired": True,
+                    "accounts": _platform_accounts_json('instagram'),
+                })
             return jsonify({
                 "connected": False,
                 "configured": True,
                 "message": "Token expired. Please reconnect.",
+                "accounts": _platform_accounts_json('instagram'),
             })
 
     return jsonify({
@@ -4093,6 +4159,10 @@ def instagram_callback():
         )
 
         app.logger.info("Instagram connected for user: @%s (%s)", username, account_type or 'unknown type')
+
+        connected = find_social_account('instagram', ig_user_id or user_id)
+        if connected and _promote_over_dead_instagram_default(connected['id']):
+            app.logger.info("@%s is now the Instagram default (the previous default had expired)", username)
 
         # Redirect to schedule page with success message
         return _oauth_return_redirect(url_for('schedule_list') + '?instagram=connected')
