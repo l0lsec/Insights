@@ -4,6 +4,82 @@
 {% block subtitle %}<p class="page-subtitle">Your publishing queue, posting time slots and per-platform limits.</p>{% endblock %}
 {% block content %}
 {% from 'partials/connection_strip.html' import connection_strip %}
+{# The queue holds one entry per platform and account; a post that goes to
+   several is drawn as one row (see _scheduled_queue_groups). These macros draw
+   it, and the queue-rebuilding script below draws the same thing from JSON, so
+   a change to one belongs in the other. scripts/check_queue_groups.py parity
+   fails when they drift. #}
+{% set QUEUE_PLATFORMS = {
+    'linkedin': ('#0077B5', '💼 LinkedIn'),
+    'threads': ('#000000', '🧵 Threads'),
+    'twitter': ('#000000', '𝕏 twitter'),
+    'facebook': ('#1877F2', '📘 Facebook'),
+    'instagram': ('#E4405F', '📷 Instagram'),
+} %}
+{% macro queue_platform_badge(m) -%}
+{%- set meta = QUEUE_PLATFORMS.get(m.platform) -%}
+{%- if meta -%}
+<span class="badge" style="background-color: {{ meta[0] }};"{% if m.account_label %} title="{{ m.account_label }}"{% endif %}>{{ meta[1] }}{% if m.badge_label %} · {{ m.badge_label }}{% endif %}</span>
+{%- else -%}
+<span class="badge bg-secondary">{{ m.platform }}</span>
+{%- endif -%}
+{%- endmacro %}
+{% macro queue_status_badge(status, error) -%}
+{%- if status == 'pending' -%}<span class="badge bg-warning text-dark">⏳ Pending</span>
+{%- elif status == 'posted' -%}<span class="badge bg-success">✅ Posted</span>
+{%- elif status == 'failed' -%}<span class="badge bg-danger" title="{{ error or '' }}">❌ Failed</span>
+{%- elif status == 'cancelled' -%}<span class="badge bg-secondary">🚫 Cancelled</span>
+{%- else -%}<span class="badge bg-secondary">{{ status }}</span>
+{%- endif -%}
+{%- endmacro %}
+{% macro queue_view_link(e, label) -%}
+{%- set url = e.linkedin_post_urn -%}
+{%- if e.platform == 'threads' and url.startswith('http') -%}
+<a href="{{ url }}" target="_blank" class="btn btn-sm btn-outline-dark" title="View on Threads">{{ label }}</a>
+{%- elif e.platform == 'twitter' and url.startswith('http') -%}
+<a href="{{ url }}" target="_blank" class="btn btn-sm btn-outline-dark" title="View on X">{{ label }}</a>
+{%- elif e.platform == 'facebook' and url.startswith('http') -%}
+<a href="{{ url }}" target="_blank" class="btn btn-sm btn-outline-info" title="View on Facebook">{{ label }}</a>
+{%- elif e.platform == 'instagram' and url.startswith('http') -%}
+<a href="{{ url }}" target="_blank" class="btn btn-sm btn-outline-danger" title="View on Instagram">{{ label }}</a>
+{%- elif e.platform == 'linkedin' -%}
+<a href="https://www.linkedin.com/feed/update/{{ url }}" target="_blank" class="btn btn-sm btn-outline-primary" title="View on LinkedIn">{{ label }}</a>
+{%- endif -%}
+{%- endmacro %}
+{# The buttons of one row. ``e`` is a group (a row that may stand for several
+   platforms: its buttons act on every id in ``e.ids``), or a single platform's
+   entry inside an expanded row (``group`` is none, and it has no Edit Content,
+   since the copy belongs to the whole post). #}
+{% macro queue_actions(e, group=none) -%}
+{%- set multi = group and group.members|length > 1 -%}
+{%- set ids = group.ids|join(',') if multi else e.id -%}
+{%- set platforms = group.platforms|join(',') if multi else e.platform -%}
+{%- if e.status == 'pending' -%}
+<button class="btn btn-sm btn-outline-primary edit-time-btn" data-post-id="{{ e.id }}" data-post-ids="{{ ids }}" data-platform="{{ platforms }}" data-scheduled-for="{{ e.scheduled_for }}" title="Edit Time">✏️ Time</button>
+{%- if group and (group.social_post_id or group.standalone_post_id) %}
+<button class="btn btn-sm btn-outline-secondary edit-content-btn" data-post-id="{{ group.social_post_id or group.standalone_post_id }}" data-post-ids="{{ group.source_ids|join(',') }}" data-post-type="{{ group.source_type }}" data-platform="{{ platforms }}" data-content="{{ (group.social_content or group.standalone_content or '')|e }}" data-image-url="{{ (group.social_image_url or group.standalone_image_url or '')|e }}" title="Edit Content">📝 Content</button>
+{%- endif %}
+<button class="btn btn-sm btn-success post-now-btn" data-post-id="{{ e.id }}" data-post-ids="{{ ids }}" data-platform="{{ platforms }}" title="Post Now">🚀 Post Now</button>
+<button class="btn btn-sm btn-outline-warning cancel-post-btn" data-post-id="{{ e.id }}" data-post-ids="{{ ids }}" data-platform="{{ platforms }}" title="Cancel">🚫 Cancel</button>
+{%- elif e.status == 'posted' and (group.members|selectattr('linkedin_post_urn')|list if multi else e.linkedin_post_urn) -%}
+{%- if multi -%}
+{%- for m in group.members %}{% if m.linkedin_post_urn %}{{ queue_view_link(m, '🔗 ' ~ m.platform_name) }} {% endif %}{% endfor -%}
+{%- else -%}
+{{ queue_view_link(e, '🔗 View') }}
+{%- endif -%}
+{%- elif e.status == 'failed' -%}
+<button class="btn btn-sm btn-outline-success retry-post-btn" data-post-id="{{ e.id }}" data-post-ids="{{ ids }}" data-platform="{{ platforms }}" title="Retry Posting">🔄 Retry</button>
+<button class="btn btn-sm btn-outline-danger delete-post-btn" data-post-id="{{ e.id }}" data-post-ids="{{ ids }}" data-platform="{{ platforms }}" title="Delete">🗑️ Delete</button>
+{%- if multi %}
+<button class="btn btn-sm btn-outline-secondary show-error-btn" data-error="{% for m in group.members %}{{ m.platform_name }}: {{ m.error_message or 'No error details available' }}{% if not loop.last %}
+{% endif %}{% endfor %}" title="Show Error">ℹ️ Error</button>
+{%- else %}
+<button class="btn btn-sm btn-outline-secondary show-error-btn" data-error="{{ e.error_message }}" title="Show Error">ℹ️ Error</button>
+{%- endif %}
+{%- else -%}
+<button class="btn btn-sm btn-outline-danger delete-post-btn" data-post-id="{{ e.id }}" data-post-ids="{{ ids }}" data-platform="{{ platforms }}" title="Delete">🗑️ Delete</button>
+{%- endif -%}
+{%- endmacro %}
 <style>
 /* Drag-and-drop styling */
 .sortable-ghost {
@@ -33,6 +109,25 @@
 }
 tr.not-draggable .drag-handle {
     cursor: not-allowed !important;
+}
+/* A row that stands for one post on several platforms */
+.queue-expand-btn {
+    display: block;
+    margin-top: 4px;
+    margin-left: 0 !important;
+    font-size: 0.78rem;
+    text-decoration: none;
+    line-height: 1.2;
+    white-space: nowrap;
+}
+.queue-platforms {
+    display: inline-flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+tr.queue-detail > td {
+    background-color: #f8f9fa;
+    border-top-style: dashed;
 }
 /* Sortable column header */
 th[onclick] {
@@ -506,7 +601,7 @@ th[onclick]:hover {
                 <span class="badge" style="background-color: #0077B5;" id="queue-linkedin-badge">💼 {{ linkedin_count }}</span>
                 <span class="badge bg-dark" id="queue-threads-badge">🧵 {{ threads_count }}</span>
                 <span class="badge" style="background-color: #1877F2;" id="queue-facebook-badge">📘 {{ facebook_count }}</span>
-                <span class="badge bg-secondary" id="queue-total-badge">{{ scheduled_posts|length }} total</span>
+                <span class="badge bg-secondary" id="queue-total-badge" title="{{ entry_count }} platform entries">{{ queue_groups|length }} {{ 'posts' if queue_groups|length != 1 else 'post' }}{% if entry_count != queue_groups|length %} · {{ entry_count }} entries{% endif %}</span>
                 <button class="btn btn-sm btn-outline-primary d-none" id="move-top-btn" onclick="moveSelectedToTop()" title="Move selected to top of queue">
                     ⬆️ Move to Top
                 </button>
@@ -550,7 +645,7 @@ th[onclick]:hover {
                     </tr>
                 </thead>
                 <tbody id="schedule-tbody">
-                    {% if not scheduled_posts %}
+                    {% if not queue_groups %}
                     <tr>
                         <td colspan="8" class="text-center py-5 text-muted">
                             <div style="font-size: 3rem;">📅</div>
@@ -560,132 +655,77 @@ th[onclick]:hover {
                         </td>
                     </tr>
                     {% endif %}
-                    {% for post in scheduled_posts %}
-                    <tr data-post-id="{{ post.id }}" data-scheduled-for="{{ post.scheduled_for }}" class="{% if post.status != 'pending' %}not-draggable{% endif %}">
-                        <td class="drag-handle {% if post.status == 'pending' %}drag-enabled{% else %}drag-disabled{% endif %}">
-                            {% if post.status == 'pending' %}⋮⋮{% else %}&nbsp;{% endif %}
+                    {% for group in queue_groups %}
+                    {% set multi = group.members|length > 1 %}
+                    <tr data-post-id="{{ group.id }}" data-post-ids="{{ group.ids|join(',') }}" data-scheduled-for="{{ group.scheduled_for }}" class="queue-group{% if group.status != 'pending' %} not-draggable{% endif %}">
+                        <td class="drag-handle {% if group.status == 'pending' %}drag-enabled{% else %}drag-disabled{% endif %}">
+                            {% if group.status == 'pending' %}⋮⋮{% else %}&nbsp;{% endif %}
                         </td>
                         <td>
-                            <input type="checkbox" class="form-check-input post-checkbox" 
-                                   data-post-id="{{ post.id }}" onchange="updateSelectedCount()">
+                            <input type="checkbox" class="form-check-input post-checkbox"
+                                   data-post-id="{{ group.id }}" data-post-ids="{{ group.ids|join(',') }}" onchange="updateSelectedCount()">
                         </td>
+                        <td>{{ queue_status_badge(group.status, group.error_message) }}</td>
                         <td>
-                            {% if post.status == 'pending' %}
-                            <span class="badge bg-warning text-dark">⏳ Pending</span>
-                            {% elif post.status == 'posted' %}
-                            <span class="badge bg-success">✅ Posted</span>
-                            {% elif post.status == 'failed' %}
-                            <span class="badge bg-danger" title="{{ post.error_message or '' }}">❌ Failed</span>
-                            {% elif post.status == 'cancelled' %}
-                            <span class="badge bg-secondary">🚫 Cancelled</span>
-                            {% else %}
-                            <span class="badge bg-secondary">{{ post.status }}</span>
-                            {% endif %}
-                        </td>
-                        <td>
-                            <span title="{{ post.scheduled_for }}">
-                                {{ post.scheduled_for_display or post.scheduled_for }}
+                            <span title="{{ group.scheduled_for }}">
+                                {{ group.scheduled_for_display or group.scheduled_for }}
                             </span>
-                            {% if post.posted_at %}
-                            <br><small class="text-muted">Posted: {{ post.posted_at }}</small>
+                            {% if group.posted_at %}
+                            <br><small class="text-muted">Posted: {{ group.posted_at }}</small>
                             {% endif %}
                         </td>
                         <td>
-                            {% if post.post_type == 'social' %}
+                            {% if group.post_type == 'social' %}
                             <span class="badge bg-info">Social Post</span>
-                            {% elif post.post_type == 'article' %}
+                            {% elif group.post_type == 'article' %}
                             <span class="badge bg-primary">Article</span>
                             {% else %}
-                            <span class="badge bg-secondary">{{ post.post_type }}</span>
+                            <span class="badge bg-secondary">{{ group.post_type }}</span>
                             {% endif %}
                         </td>
                         <td class="description-cell" style="max-width: 300px;">
-                            {% if post.social_content %}
-                            {{ post.social_content[:100] }}{% if post.social_content|length > 100 %}...{% endif %}
-                            {% elif post.standalone_content %}
-                            {{ post.standalone_content[:100] }}{% if post.standalone_content|length > 100 %}...{% endif %}
-                            {% elif post.article_topic %}
-                            <strong>{{ post.article_topic }}</strong>
+                            {% if group.social_content %}
+                            {{ group.social_content[:100] }}{% if group.social_content|length > 100 %}...{% endif %}
+                            {% elif group.standalone_content %}
+                            {{ group.standalone_content[:100] }}{% if group.standalone_content|length > 100 %}...{% endif %}
+                            {% elif group.article_topic %}
+                            <strong>{{ group.article_topic }}</strong>
                             {% else %}
                             <span class="text-muted">No content preview</span>
                             {% endif %}
-                            {% if post.standalone_video_url %}
+                            {% if group.standalone_video_url %}
                             <span class="badge bg-dark ms-1 video-badge" title="This post goes out with a video">🎬 Video</span>
                             {% endif %}
                         </td>
                         <td>
-                            {% if post.platform == 'linkedin' %}
-                            <span class="badge" style="background-color: #0077B5;">💼 LinkedIn</span>
-                            {% elif post.platform == 'threads' %}
-                            <span class="badge" style="background-color: #000000;">🧵 Threads</span>
-                            {% elif post.platform == 'twitter' %}
-                            <span class="badge" style="background-color: #000000;">𝕏 twitter</span>
-                            {% elif post.platform == 'instagram' %}
-                            <span class="badge" style="background-color: #E4405F;">📷 Instagram</span>
-                            {% else %}
-                            <span class="badge bg-secondary">{{ post.platform }}</span>
+                            <span class="queue-platforms">{% for m in group.members %}{{ queue_platform_badge(m) }}{% endfor %}</span>
+                            {% if multi %}
+                            <button type="button" class="btn btn-sm btn-link p-0 ms-1 queue-expand-btn" data-group-id="{{ group.id }}" aria-expanded="false" title="Show each platform separately">▸ By platform</button>
                             {% endif %}
                         </td>
-                        <td>
-                            {% if post.status == 'pending' %}
-                            <button class="btn btn-sm btn-outline-primary edit-time-btn" data-post-id="{{ post.id }}" data-scheduled-for="{{ post.scheduled_for }}" title="Edit Time">
-                                ✏️ Time
-                            </button>
-                            {% if post.social_post_id or post.standalone_post_id %}
-                            <button class="btn btn-sm btn-outline-secondary edit-content-btn" data-post-id="{{ post.social_post_id or post.standalone_post_id }}" data-post-type="{{ 'social' if post.social_post_id else 'standalone' }}" data-platform="{{ post.platform }}" data-content="{{ (post.social_content or post.standalone_content or '')|e }}" data-image-url="{{ (post.social_image_url or post.standalone_image_url or '')|e }}" title="Edit Content">
-                                📝 Content
-                            </button>
-                            {% endif %}
-                            <button class="btn btn-sm btn-success post-now-btn" data-post-id="{{ post.id }}" data-platform="{{ post.platform }}" title="Post Now">
-                                🚀 Post Now
-                            </button>
-                            <button class="btn btn-sm btn-outline-warning cancel-post-btn" data-post-id="{{ post.id }}" title="Cancel">
-                                🚫 Cancel
-                            </button>
-                            {% elif post.status == 'posted' and post.linkedin_post_urn %}
-                                {% if post.platform == 'threads' and post.linkedin_post_urn.startswith('http') %}
-                                    <a href="{{ post.linkedin_post_urn }}" 
-                                       target="_blank" class="btn btn-sm btn-outline-dark" title="View on Threads">
-                                        🔗 View
-                                    </a>
-                                {% elif post.platform == 'twitter' and post.linkedin_post_urn.startswith('http') %}
-                                    <a href="{{ post.linkedin_post_urn }}" 
-                                       target="_blank" class="btn btn-sm btn-outline-dark" title="View on X">
-                                        🔗 View
-                                    </a>
-                                {% elif post.platform == 'facebook' and post.linkedin_post_urn.startswith('http') %}
-                                    <a href="{{ post.linkedin_post_urn }}"
-                                       target="_blank" class="btn btn-sm btn-outline-info" title="View on Facebook">
-                                        🔗 View
-                                    </a>
-                                {% elif post.platform == 'instagram' and post.linkedin_post_urn.startswith('http') %}
-                                    <a href="{{ post.linkedin_post_urn }}"
-                                       target="_blank" class="btn btn-sm btn-outline-danger" title="View on Instagram">
-                                        🔗 View
-                                    </a>
-                                {% elif post.platform == 'linkedin' %}
-                                <a href="https://www.linkedin.com/feed/update/{{ post.linkedin_post_urn }}" 
-                                   target="_blank" class="btn btn-sm btn-outline-primary" title="View on LinkedIn">
-                                    🔗 View
-                                </a>
-                                {% endif %}
-                            {% elif post.status == 'failed' %}
-                            <button class="btn btn-sm btn-outline-success retry-post-btn" data-post-id="{{ post.id }}" title="Retry Posting">
-                                🔄 Retry
-                            </button>
-                            <button class="btn btn-sm btn-outline-danger delete-post-btn" data-post-id="{{ post.id }}" title="Delete">
-                                🗑️ Delete
-                            </button>
-                            <button class="btn btn-sm btn-outline-secondary show-error-btn" data-error="{{ post.error_message|e }}" title="Show Error">
-                                ℹ️ Error
-                            </button>
-                            {% else %}
-                            <button class="btn btn-sm btn-outline-danger delete-post-btn" data-post-id="{{ post.id }}" title="Delete">
-                                🗑️ Delete
-                            </button>
-                            {% endif %}
-                        </td>
+                        <td>{{ queue_actions(group, group) }}</td>
                     </tr>
+                    {% if multi %}
+                    {% for m in group.members %}
+                    <tr class="queue-detail d-none" data-group-id="{{ group.id }}" data-entry-id="{{ m.id }}">
+                        <td></td>
+                        <td></td>
+                        <td>{{ queue_status_badge(m.status, m.error_message) }}</td>
+                        <td>
+                            <span title="{{ m.scheduled_for }}">
+                                {{ m.scheduled_for_display or m.scheduled_for }}
+                            </span>
+                            {% if m.posted_at %}
+                            <br><small class="text-muted">Posted: {{ m.posted_at }}</small>
+                            {% endif %}
+                        </td>
+                        <td></td>
+                        <td class="description-cell text-muted small">↳ {{ m.account_label or m.platform_name }}</td>
+                        <td>{{ queue_platform_badge(m) }}</td>
+                        <td>{{ queue_actions(m) }}</td>
+                    </tr>
+                    {% endfor %}
+                    {% endif %}
                     {% endfor %}
                 </tbody>
             </table>
@@ -718,6 +758,7 @@ th[onclick]:hover {
             </div>
             <div class="modal-body">
                 <input type="hidden" id="edit-post-id">
+                <input type="hidden" id="edit-post-ids">
                 <div class="mb-3">
                     <label class="form-label">New Scheduled Time</label>
                     <input type="datetime-local" class="form-control" id="edit-datetime" required>
@@ -821,6 +862,7 @@ th[onclick]:hover {
             </div>
             <div class="modal-body">
                 <input type="hidden" id="edit-content-post-id">
+                <input type="hidden" id="edit-content-post-ids">
                 <input type="hidden" id="edit-content-post-type">
                 <input type="hidden" id="edit-content-image-url">
                 <input type="hidden" id="edit-content-original-image-url">
@@ -949,34 +991,103 @@ document.addEventListener('DOMContentLoaded', function() {
 });
 
 // Initialize SortableJS for queue reordering
+let queueSortable = null;
+
+// The pending rows, in the order they now sit in the table. A row stands for a
+// whole post, so this is one id per post; the server moves the copies with it.
+function pendingQueueOrder() {
+    const tbody = document.getElementById('schedule-tbody');
+    return Array.from(tbody.querySelectorAll('tr.queue-group:not(.not-draggable)'))
+        .map(row => parseInt(row.dataset.postId, 10));
+}
+
+// Initialize SortableJS for queue reordering
 function initSortable() {
     const tbody = document.getElementById('schedule-tbody');
     if (!tbody) return;
-    
-    new Sortable(tbody, {
+
+    // A rebuilt table gets a fresh sorter; the old one would answer every drag too.
+    if (queueSortable) queueSortable.destroy();
+    queueSortable = new Sortable(tbody, {
         animation: 150,
         handle: '.drag-handle',
+        // Only a post's own row drags; the per-platform rows under it follow
+        // the post because the reload after a drop redraws them.
+        draggable: 'tr.queue-group',
         filter: '.not-draggable',
         ghostClass: 'sortable-ghost',
         chosenClass: 'sortable-chosen',
         dragClass: 'sortable-drag',
+        onStart: collapseAllQueueGroups,
         onMove: function(evt) {
             // Prevent dragging onto non-draggable rows
             return !evt.related.classList.contains('not-draggable');
         },
         onEnd: function(evt) {
             // Only process if position actually changed
-            if (evt.oldIndex === evt.newIndex) return;
-            
-            // Get all pending post IDs in new order
-            const rows = tbody.querySelectorAll('tr:not(.not-draggable)');
-            const pendingPostIds = Array.from(rows).map(row => parseInt(row.dataset.postId));
-            
+            if (evt.oldDraggableIndex === evt.newDraggableIndex) return;
+
+            const pendingPostIds = pendingQueueOrder();
             if (pendingPostIds.length > 1) {
                 reorderQueue(pendingPostIds);
             }
         }
     });
+}
+
+// Show or hide the per-platform rows under a post that goes to several platforms.
+function toggleQueueGroup(btn) {
+    const open = btn.getAttribute('aria-expanded') !== 'true';
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    btn.textContent = (open ? '▾' : '▸') + ' By platform';
+    document.querySelectorAll(`tr.queue-detail[data-group-id="${btn.dataset.groupId}"]`)
+        .forEach(row => row.classList.toggle('d-none', !open));
+}
+
+function collapseAllQueueGroups() {
+    document.querySelectorAll('.queue-expand-btn[aria-expanded="true"]').forEach(toggleQueueGroup);
+}
+
+// The ids a control acts on: every entry of the row it sits in. A row for one
+// post going to several platforms carries all of them in data-post-ids.
+function idsOf(el) {
+    const raw = el.dataset.postIds || el.dataset.postId || '';
+    return raw.split(',').map(v => parseInt(v, 10)).filter(v => !Number.isNaN(v));
+}
+
+// The platforms of the entries idsOf(el) names, in the same order.
+function platformsOf(el) {
+    return (el.dataset.platform || '').split(',').filter(Boolean);
+}
+
+// Send one request per id, in order, so a post on several platforms is acted
+// on everywhere, and say which ones failed. An id that threw is reported, not
+// skipped, because the others were still sent.
+async function requestEach(ids, makeRequest, fallback) {
+    const failed = [];
+    for (const id of ids) {
+        try {
+            const data = await (await makeRequest(id)).json();
+            if (!data.success) failed.push({ id, error: data.error || fallback || 'Failed' });
+        } catch (error) {
+            failed.push({ id, error: 'Error: ' + error.message });
+        }
+    }
+    return failed;
+}
+
+// The failures as one message; on a multi-platform row each says where it was.
+function describeFailures(failed, ids, platforms) {
+    return failed.map(f => {
+        const platform = platforms[ids.indexOf(f.id)];
+        return (ids.length > 1 && platform ? `${platform}: ` : '') + f.error;
+    }).join('\n');
+}
+
+// After a row action: report what failed, and redraw if anything changed.
+function finishQueueAction(ids, platforms, failed) {
+    if (failed.length) alert(describeFailures(failed, ids, platforms));
+    if (failed.length < ids.length) location.reload();
 }
 
 // Reorder queue by sending new order to backend
@@ -1165,11 +1276,16 @@ function refreshQueue() {
                 if (linkedinBadge) linkedinBadge.innerHTML = `💼 ${data.linkedin_count}`;
                 if (threadsBadge) threadsBadge.innerHTML = `🧵 ${data.threads_count}`;
                 if (facebookBadge) facebookBadge.innerHTML = `📘 ${data.facebook_count}`;
-                if (totalBadge) totalBadge.textContent = `${data.total_count} total`;
+                if (totalBadge) {
+                    const n = data.total_count;
+                    totalBadge.textContent = `${n} ${n === 1 ? 'post' : 'posts'}` +
+                        (data.entry_count !== n ? ` · ${data.entry_count} entries` : '');
+                    totalBadge.title = `${data.entry_count} platform entries`;
+                }
                 
                 // Rebuild table body
-                if (tbody && data.posts) {
-                    rebuildQueueTable(data.posts);
+                if (tbody && data.groups) {
+                    rebuildQueueTable(data.groups);
                 }
                 
                 // Also refresh next slots
@@ -1196,48 +1312,76 @@ function escapeHtml(value) {
         .replace(/'/g, '&#39;');
 }
 
-// Rebuild the queue table with new data
-function rebuildQueueTable(posts) {
+// The queue draws a post that goes to several platforms as one row. These
+// functions draw it from JSON; the queue_* macros at the top of this template
+// draw the same rows on first load, so a change to one belongs in the other.
+// scripts/check_queue_groups.py parity fails when they drift.
+
+// Rebuild the queue table with new data: one group per post.
+function rebuildQueueTable(groups) {
     const tbody = document.getElementById('schedule-tbody');
     if (!tbody) return;
     
-    if (posts.length === 0) {
+    if (groups.length === 0) {
         tbody.innerHTML = `<tr><td colspan="8" class="text-center text-muted py-4">No scheduled posts match the current filters.</td></tr>`;
         return;
     }
     
-    tbody.innerHTML = posts.map(post => {
-        const statusBadge = getStatusBadge(post.status, post.error_message);
-        const platformBadge = getPlatformBadge(post.platform);
-        const typeBadge = getTypeBadge(post.post_type);
-        const contentPreview = post.content_preview
-            ? escapeHtml(post.content_preview)
-            : (post.article_topic ? `<strong>${escapeHtml(post.article_topic)}</strong>` : '<span class="text-muted">No content preview</span>');
-        const isDraggable = post.status === 'pending';
-        const rowClass = isDraggable ? '' : 'not-draggable';
+    tbody.innerHTML = groups.map(group => {
+        const multi = group.members.length > 1;
+        const idList = group.ids.join(',');
+        const contentPreview = group.content_preview
+            ? escapeHtml(group.content_preview)
+            : (group.article_topic ? `<strong>${escapeHtml(group.article_topic)}</strong>` : '<span class="text-muted">No content preview</span>');
+        const isDraggable = group.status === 'pending';
+        const rowClass = 'queue-group' + (isDraggable ? '' : ' not-draggable');
         
-        return `
-            <tr data-post-id="${post.id}" data-scheduled-for="${post.scheduled_for}" class="${rowClass}">
-                <td class="drag-handle" style="cursor: ${isDraggable ? 'grab' : 'not-allowed'}; text-align: center; color: ${isDraggable ? '#6c757d' : '#dee2e6'};">
+        const row = `
+            <tr data-post-id="${group.id}" data-post-ids="${idList}" data-scheduled-for="${escapeHtml(group.scheduled_for)}" class="${rowClass}">
+                <td class="drag-handle ${isDraggable ? 'drag-enabled' : 'drag-disabled'}">
                     ${isDraggable ? '⋮⋮' : '&nbsp;'}
                 </td>
                 <td>
                     <input type="checkbox" class="form-check-input post-checkbox" 
-                           data-post-id="${post.id}" onchange="updateSelectedCount()">
+                           data-post-id="${group.id}" data-post-ids="${idList}" onchange="updateSelectedCount()">
                 </td>
-                <td>${statusBadge}</td>
+                <td>${getStatusBadge(group.status, group.error_message)}</td>
                 <td>
-                    <span title="${post.scheduled_for}">
-                        ${post.scheduled_for_display || post.scheduled_for}
+                    <span title="${escapeHtml(group.scheduled_for)}">
+                        ${escapeHtml(group.scheduled_for_display || group.scheduled_for)}
                     </span>
-                    ${post.posted_at ? `<br><small class="text-muted">Posted: ${post.posted_at}</small>` : ''}
+                    ${group.posted_at ? `<br><small class="text-muted">Posted: ${escapeHtml(group.posted_at)}</small>` : ''}
                 </td>
-                <td>${typeBadge}</td>
-                <td class="description-cell" style="max-width: 300px;">${contentPreview}${post.standalone_video_url ? ' <span class="badge bg-dark ms-1 video-badge" title="This post goes out with a video">🎬 Video</span>' : ''}</td>
-                <td>${platformBadge}</td>
-                <td>${getActionButtons(post)}</td>
+                <td>${getTypeBadge(group.post_type)}</td>
+                <td class="description-cell" style="max-width: 300px;">${contentPreview}${group.standalone_video_url ? ' <span class="badge bg-dark ms-1 video-badge" title="This post goes out with a video">🎬 Video</span>' : ''}</td>
+                <td>
+                    <span class="queue-platforms">${group.members.map(getPlatformBadge).join('')}</span>${multi ? `
+                    <button type="button" class="btn btn-sm btn-link p-0 ms-1 queue-expand-btn" data-group-id="${group.id}" aria-expanded="false" title="Show each platform separately">▸ By platform</button>` : ''}
+                </td>
+                <td>${getActionButtons(group, group)}</td>
             </tr>
         `;
+        if (!multi) return row;
+
+        // The same post, one row per platform, for acting on a single platform.
+        const details = group.members.map(member => `
+            <tr class="queue-detail d-none" data-group-id="${group.id}" data-entry-id="${member.id}">
+                <td></td>
+                <td></td>
+                <td>${getStatusBadge(member.status, member.error_message)}</td>
+                <td>
+                    <span title="${escapeHtml(member.scheduled_for)}">
+                        ${escapeHtml(member.scheduled_for_display || member.scheduled_for)}
+                    </span>
+                    ${member.posted_at ? `<br><small class="text-muted">Posted: ${escapeHtml(member.posted_at)}</small>` : ''}
+                </td>
+                <td></td>
+                <td class="description-cell text-muted small">↳ ${escapeHtml(member.account_label || member.platform_name)}</td>
+                <td>${getPlatformBadge(member)}</td>
+                <td>${getActionButtons(member)}</td>
+            </tr>
+        `).join('');
+        return row + details;
     }).join('');
     
     // Reinitialize sortable after rebuild
@@ -1248,75 +1392,103 @@ function getStatusBadge(status, errorMessage) {
     switch(status) {
         case 'pending': return '<span class="badge bg-warning text-dark">⏳ Pending</span>';
         case 'posted': return '<span class="badge bg-success">✅ Posted</span>';
-        case 'failed': return `<span class="badge bg-danger" title="${errorMessage || ''}">❌ Failed</span>`;
+        case 'failed': return `<span class="badge bg-danger" title="${escapeHtml(errorMessage || '')}">❌ Failed</span>`;
         case 'cancelled': return '<span class="badge bg-secondary">🚫 Cancelled</span>';
-        default: return `<span class="badge bg-secondary">${status}</span>`;
+        default: return `<span class="badge bg-secondary">${escapeHtml(status)}</span>`;
     }
 }
 
-function getPlatformBadge(platform) {
-    switch(platform) {
-        case 'linkedin': return '<span class="badge" style="background-color: #0077B5;">💼 LinkedIn</span>';
-        case 'threads': return '<span class="badge" style="background-color: #000000;">🧵 Threads</span>';
-        case 'twitter': return '<span class="badge" style="background-color: #000000;">𝕏 twitter</span>';
-        case 'facebook': return '<span class="badge" style="background-color: #1877F2;">📘 Facebook</span>';
-        case 'instagram': return '<span class="badge" style="background-color: #E4405F;">📷 Instagram</span>';
-        default: return `<span class="badge bg-secondary">${platform}</span>`;
-    }
+const QUEUE_PLATFORMS = {
+    linkedin: ['#0077B5', '💼 LinkedIn'],
+    threads: ['#000000', '🧵 Threads'],
+    twitter: ['#000000', '𝕏 twitter'],
+    facebook: ['#1877F2', '📘 Facebook'],
+    instagram: ['#E4405F', '📷 Instagram'],
+};
+
+// One platform's badge. ``member`` is one entry of a row; badge_label (an
+// account's name) is set only when a row holds two entries on one platform.
+function getPlatformBadge(member) {
+    const meta = QUEUE_PLATFORMS[member.platform];
+    if (!meta) return `<span class="badge bg-secondary">${escapeHtml(member.platform)}</span>`;
+    const title = member.account_label ? ` title="${escapeHtml(member.account_label)}"` : '';
+    const suffix = member.badge_label ? ` · ${escapeHtml(member.badge_label)}` : '';
+    return `<span class="badge" style="background-color: ${meta[0]};"${title}>${meta[1]}${suffix}</span>`;
 }
 
 function getTypeBadge(postType) {
     switch(postType) {
         case 'social': return '<span class="badge bg-info">Social Post</span>';
         case 'article': return '<span class="badge bg-primary">Article</span>';
-        default: return `<span class="badge bg-secondary">${postType}</span>`;
+        default: return `<span class="badge bg-secondary">${escapeHtml(postType)}</span>`;
     }
 }
 
-function getActionButtons(post) {
-    if (post.status === 'pending') {
+// The link to a published entry on its own platform, or '' when it has none.
+function getViewLink(entry, label) {
+    const url = entry.linkedin_post_urn || '';
+    const href = escapeHtml(url);
+    const web = url.startsWith('http');
+    if (entry.platform === 'threads' && web) {
+        return `<a href="${href}" target="_blank" class="btn btn-sm btn-outline-dark" title="View on Threads">${label}</a>`;
+    } else if (entry.platform === 'twitter' && web) {
+        return `<a href="${href}" target="_blank" class="btn btn-sm btn-outline-dark" title="View on X">${label}</a>`;
+    } else if (entry.platform === 'facebook' && web) {
+        return `<a href="${href}" target="_blank" class="btn btn-sm btn-outline-info" title="View on Facebook">${label}</a>`;
+    } else if (entry.platform === 'instagram' && web) {
+        return `<a href="${href}" target="_blank" class="btn btn-sm btn-outline-danger" title="View on Instagram">${label}</a>`;
+    } else if (entry.platform === 'linkedin') {
+        return `<a href="https://www.linkedin.com/feed/update/${href}" target="_blank" class="btn btn-sm btn-outline-primary" title="View on LinkedIn">${label}</a>`;
+    }
+    return '';
+}
+
+// The buttons of one row. ``entry`` is a group (a row that may stand for
+// several platforms: its buttons act on every id in group.ids), or one
+// platform's entry inside an expanded row (no ``group``, and no Edit Content,
+// since the copy belongs to the whole post).
+function getActionButtons(entry, group) {
+    const multi = !!group && group.members.length > 1;
+    const ids = multi ? group.ids.join(',') : String(entry.id);
+    const platforms = multi ? group.platforms.join(',') : entry.platform;
+    const target = `data-post-id="${entry.id}" data-post-ids="${ids}" data-platform="${platforms}"`;
+
+    if (entry.status === 'pending') {
         let contentBtn = '';
-        const contentPostId = post.social_post_id || post.standalone_post_id;
-        if (contentPostId) {
-            const postType = post.social_post_id ? 'social' : 'standalone';
-            const content = escapeHtml(post.social_content || post.standalone_content || '');
-            const imageUrl = escapeHtml(post.social_image_url || post.standalone_image_url || '');
+        if (group && (group.social_post_id || group.standalone_post_id)) {
+            const content = escapeHtml(group.social_content || group.standalone_content || '');
+            const imageUrl = escapeHtml(group.social_image_url || group.standalone_image_url || '');
             contentBtn = `
-            <button class="btn btn-sm btn-outline-secondary edit-content-btn" data-post-id="${contentPostId}" data-post-type="${postType}" data-platform="${post.platform}" data-content="${content}" data-image-url="${imageUrl}" title="Edit Content">
+            <button class="btn btn-sm btn-outline-secondary edit-content-btn" data-post-id="${group.social_post_id || group.standalone_post_id}" data-post-ids="${group.source_ids.join(',')}" data-post-type="${group.source_type}" data-platform="${platforms}" data-content="${content}" data-image-url="${imageUrl}" title="Edit Content">
                 📝 Content
             </button>`;
         }
         return `
-            <button class="btn btn-sm btn-outline-primary edit-time-btn" data-post-id="${post.id}" data-scheduled-for="${post.scheduled_for}" title="Edit Time">
+            <button class="btn btn-sm btn-outline-primary edit-time-btn" ${target} data-scheduled-for="${escapeHtml(entry.scheduled_for)}" title="Edit Time">
                 ✏️ Time
             </button>${contentBtn}
-            <button class="btn btn-sm btn-success post-now-btn" data-post-id="${post.id}" data-platform="${post.platform}" title="Post Now">
+            <button class="btn btn-sm btn-success post-now-btn" ${target} title="Post Now">
                 🚀 Post Now
             </button>
-            <button class="btn btn-sm btn-outline-warning cancel-post-btn" data-post-id="${post.id}" title="Cancel">
+            <button class="btn btn-sm btn-outline-warning cancel-post-btn" ${target} title="Cancel">
                 🚫 Cancel
             </button>
         `;
-    } else if (post.status === 'posted' && post.linkedin_post_urn) {
-        if (post.platform === 'threads' && post.linkedin_post_urn.startsWith('http')) {
-            return `<a href="${post.linkedin_post_urn}" target="_blank" class="btn btn-sm btn-outline-dark" title="View on Threads">🔗 View</a>`;
-        } else if (post.platform === 'twitter' && post.linkedin_post_urn.startsWith('http')) {
-            return `<a href="${post.linkedin_post_urn}" target="_blank" class="btn btn-sm btn-outline-dark" title="View on X">🔗 View</a>`;
-        } else if (post.platform === 'facebook' && post.linkedin_post_urn.startsWith('http')) {
-            return `<a href="${post.linkedin_post_urn}" target="_blank" class="btn btn-sm btn-outline-info" title="View on Facebook">🔗 View</a>`;
-        } else if (post.platform === 'instagram' && post.linkedin_post_urn.startsWith('http')) {
-            return `<a href="${post.linkedin_post_urn}" target="_blank" class="btn btn-sm btn-outline-danger" title="View on Instagram">🔗 View</a>`;
-        } else if (post.platform === 'linkedin') {
-            return `<a href="https://www.linkedin.com/feed/update/${post.linkedin_post_urn}" target="_blank" class="btn btn-sm btn-outline-primary" title="View on LinkedIn">🔗 View</a>`;
+    } else if (entry.status === 'posted' && (multi ? group.members.some(m => m.linkedin_post_urn) : entry.linkedin_post_urn)) {
+        if (multi) {
+            return group.members.filter(m => m.linkedin_post_urn)
+                .map(m => getViewLink(m, '🔗 ' + m.platform_name)).join(' ');
         }
-        return '';
-    } else if (post.status === 'failed') {
-        const safeError = (post.error_message || '').replace(/"/g, '&quot;');
+        return getViewLink(entry, '🔗 View');
+    } else if (entry.status === 'failed') {
+        const safeError = escapeHtml(multi
+            ? group.members.map(m => `${m.platform_name}: ${m.error_message || 'No error details available'}`).join('\n')
+            : (entry.error_message || ''));
         return `
-            <button class="btn btn-sm btn-outline-success retry-post-btn" data-post-id="${post.id}" title="Retry Posting">
+            <button class="btn btn-sm btn-outline-success retry-post-btn" ${target} title="Retry Posting">
                 🔄 Retry
             </button>
-            <button class="btn btn-sm btn-outline-danger delete-post-btn" data-post-id="${post.id}" title="Delete">
+            <button class="btn btn-sm btn-outline-danger delete-post-btn" ${target} title="Delete">
                 🗑️ Delete
             </button>
             <button class="btn btn-sm btn-outline-secondary show-error-btn" data-error="${safeError}" title="Show Error">
@@ -1325,7 +1497,7 @@ function getActionButtons(post) {
         `;
     } else {
         return `
-            <button class="btn btn-sm btn-outline-danger delete-post-btn" data-post-id="${post.id}" title="Delete">
+            <button class="btn btn-sm btn-outline-danger delete-post-btn" ${target} title="Delete">
                 🗑️ Delete
             </button>
         `;
@@ -1803,89 +1975,60 @@ function disconnectTwitter() {
         });
 }
 
-function postNow(postId, platform, btn) {
-    if (!confirm(`Post this ${platform} content immediately?`)) return;
+async function postNow(ids, platforms, btn) {
+    const where = platforms.join(', ');
+    if (!confirm(ids.length > 1 ? `Post this content to ${where} immediately?` : `Post this ${where} content immediately?`)) return;
     
     const originalText = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '⏳ Posting...';
     
-    fetch(`/schedule/${postId}/post-now`, { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                btn.innerHTML = '✅ Posted!';
-                btn.className = 'btn btn-sm btn-success';
-                setTimeout(() => location.reload(), 1500);
-            } else {
-                btn.disabled = false;
-                btn.innerHTML = originalText;
-                alert(data.error || 'Failed to post');
-            }
-        })
-        .catch(error => {
-            btn.disabled = false;
-            btn.innerHTML = originalText;
-            alert('Error: ' + error.message);
-        });
+    const failed = await requestEach(ids, id => fetch(`/schedule/${id}/post-now`, { method: 'POST' }), 'Failed to post');
+    if (failed.length === 0) {
+        btn.innerHTML = '✅ Posted!';
+        btn.className = 'btn btn-sm btn-success';
+        setTimeout(() => location.reload(), 1500);
+        return;
+    }
+    btn.disabled = false;
+    btn.innerHTML = originalText;
+    if (failed.length < ids.length) {
+        alert(`Posted to ${ids.length - failed.length} of ${ids.length} platforms. Not posted:\n` +
+              describeFailures(failed, ids, platforms));
+        location.reload();
+    } else {
+        alert(describeFailures(failed, ids, platforms));
+    }
 }
 
-function cancelPost(postId) {
-    if (!confirm('Cancel this scheduled post?')) return;
+async function cancelPost(ids, platforms) {
+    if (!confirm(ids.length > 1 ? `Cancel this post on all ${ids.length} platforms?` : 'Cancel this scheduled post?')) return;
     
-    fetch(`/schedule/${postId}/cancel`, { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                location.reload();
-            } else {
-                alert(data.error || 'Failed to cancel post');
-            }
-        })
-        .catch(error => {
-            alert('Error: ' + error.message);
-        });
+    const failed = await requestEach(ids, id => fetch(`/schedule/${id}/cancel`, { method: 'POST' }), 'Failed to cancel post');
+    finishQueueAction(ids, platforms, failed);
 }
 
-function deletePost(postId) {
-    if (!confirm('Delete this scheduled post?')) return;
+async function deletePost(ids, platforms) {
+    if (!confirm(ids.length > 1 ? `Delete this post from all ${ids.length} platforms?` : 'Delete this scheduled post?')) return;
     
-    fetch(`/schedule/${postId}/delete`, { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                location.reload();
-            } else {
-                alert(data.error || 'Failed to delete post');
-            }
-        })
-        .catch(error => {
-            alert('Error: ' + error.message);
-        });
+    const failed = await requestEach(ids, id => fetch(`/schedule/${id}/delete`, { method: 'POST' }), 'Failed to delete post');
+    finishQueueAction(ids, platforms, failed);
 }
 
-function retryPost(postId, btn) {
+async function retryPost(ids, platforms, btn) {
     const originalText = btn.innerHTML;
     btn.innerHTML = '⏳ Retrying...';
     btn.disabled = true;
     
-    fetch(`/schedule/${postId}/retry`, { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                alert('Post successful!');
-                location.reload();
-            } else {
-                alert(data.error || 'Retry failed');
-                btn.innerHTML = originalText;
-                btn.disabled = false;
-            }
-        })
-        .catch(error => {
-            alert('Error: ' + error.message);
-            btn.innerHTML = originalText;
-            btn.disabled = false;
-        });
+    const failed = await requestEach(ids, id => fetch(`/schedule/${id}/retry`, { method: 'POST' }), 'Retry failed');
+    if (failed.length === 0) {
+        alert('Post successful!');
+        location.reload();
+        return;
+    }
+    btn.innerHTML = originalText;
+    btn.disabled = false;
+    finishQueueAction(ids, platforms, failed);
 }
 
 function clearQueue() {
@@ -1954,14 +2097,19 @@ function updateSelectedCount() {
 
 function deleteSelected() {
     const checkboxes = document.querySelectorAll('.post-checkbox:checked');
-    const postIds = Array.from(checkboxes).map(cb => cb.dataset.postId);
+    // A ticked row is a whole post: delete every platform's entry of it.
+    const postIds = Array.from(checkboxes).flatMap(idsOf);
     
     if (postIds.length === 0) {
         alert('No posts selected');
         return;
     }
     
-    if (!confirm(`Delete ${postIds.length} selected post${postIds.length !== 1 ? 's' : ''}? This cannot be undone.`)) return;
+    const rows = checkboxes.length;
+    const what = rows === postIds.length
+        ? `${rows} selected post${rows !== 1 ? 's' : ''}`
+        : `${rows} selected post${rows !== 1 ? 's' : ''} (${postIds.length} platform entries)`;
+    if (!confirm(`Delete ${what}? This cannot be undone.`)) return;
     
     fetch('/schedule/delete-selected', {
         method: 'POST',
@@ -1993,12 +2141,12 @@ function moveSelectedToBottom() {
 function moveSelectedPosts(position) {
     // Get only pending posts that are selected
     const checkboxes = document.querySelectorAll('.post-checkbox:checked');
-    const postIds = Array.from(checkboxes)
-        .filter(cb => {
-            const row = cb.closest('tr');
-            return row && !row.classList.contains('not-draggable');
-        })
-        .map(cb => parseInt(cb.dataset.postId));
+    // A ticked row is a whole post; the server moves its other platforms with it.
+    const pending = Array.from(checkboxes).filter(cb => {
+        const row = cb.closest('tr');
+        return row && !row.classList.contains('not-draggable');
+    });
+    const postIds = pending.flatMap(idsOf);
     
     if (postIds.length === 0) {
         alert('No pending posts selected');
@@ -2006,7 +2154,7 @@ function moveSelectedPosts(position) {
     }
     
     const positionText = position === 'top' ? 'top' : 'bottom';
-    if (!confirm(`Move ${postIds.length} post${postIds.length !== 1 ? 's' : ''} to the ${positionText} of the queue?`)) return;
+    if (!confirm(`Move ${pending.length} post${pending.length !== 1 ? 's' : ''} to the ${positionText} of the queue?`)) return;
     
     // Show loading state
     const btn = position === 'top' ? document.getElementById('move-top-btn') : document.getElementById('move-bottom-btn');
@@ -2041,8 +2189,10 @@ function showError(errorMessage) {
     new bootstrap.Modal(document.getElementById('errorModal')).show();
 }
 
-function openEditModal(postId, currentScheduledFor) {
+function openEditModal(postId, currentScheduledFor, ids) {
     document.getElementById('edit-post-id').value = postId;
+    // Every platform the row covers, so the copies keep one time together.
+    document.getElementById('edit-post-ids').value = (ids || [postId]).join(',');
     
     // Convert ISO datetime to local datetime-local format
     try {
@@ -2076,6 +2226,7 @@ function submitEdit() {
     
     const formData = new FormData();
     formData.append('scheduled_for', datetime);
+    formData.append('ids', document.getElementById('edit-post-ids').value || postId);
     
     fetch(`/schedule/${postId}/edit`, {
         method: 'POST',
@@ -2249,11 +2400,13 @@ function submitSlotEdit() {
 }
 
 // Content editing functions
-function openEditContentModal(postId, postType, platform, currentContent, currentImageUrl) {
+function openEditContentModal(postId, postType, platform, currentContent, currentImageUrl, postIds) {
     currentContent = currentContent || '';
     currentImageUrl = currentImageUrl || '';
     
     document.getElementById('edit-content-post-id').value = postId;
+    // Every saved post behind the row: the copy is shared, so it changes everywhere.
+    document.getElementById('edit-content-post-ids').value = (postIds || [postId]).join(',');
     document.getElementById('edit-content-post-type').value = postType;
     document.getElementById('edit-content-textarea').value = currentContent;
     document.getElementById('edit-content-image-url').value = currentImageUrl;
@@ -2267,7 +2420,8 @@ function openEditContentModal(postId, postType, platform, currentContent, curren
         facebook: '📘 Facebook',
         instagram: '📷 Instagram',
     };
-    document.getElementById('edit-content-platform').textContent = platformLabels[platform] || platform;
+    document.getElementById('edit-content-platform').textContent =
+        String(platform).split(',').map(p => platformLabels[p] || p).join(' + ');
     
     // Reset image UI
     resetContentImageUI();
@@ -2450,9 +2604,28 @@ function clearContentImage() {
     updateContentImagePreview('');
 }
 
-function submitContentEdit() {
+// Save one thing (the copy or the image) to every saved post behind a row, and
+// return what failed. Saved Compose posts take the whole list in one request,
+// which keeps their rows matching one another; social posts are one at a time.
+async function saveToAllPosts(postType, postId, ids, what, fields) {
+    const body = () => {
+        const formData = new FormData();
+        fields.forEach(([key, value]) => formData.append(key, value));
+        return formData;
+    };
+    if (postType === 'social') {
+        return requestEach(ids, id => fetch(`/social/${id}/${what}`, { method: 'POST', body: body() }), 'Failed to save');
+    }
+    const formData = body();
+    formData.append('post_ids', ids.join(','));
+    return requestEach([postId], () => fetch(`/compose/post/${postId}/${what}`, { method: 'POST', body: formData }), 'Failed to save');
+}
+
+async function submitContentEdit() {
     const postId = document.getElementById('edit-content-post-id').value;
     const postType = document.getElementById('edit-content-post-type').value;
+    const ids = (document.getElementById('edit-content-post-ids').value || postId)
+        .split(',').map(v => parseInt(v, 10)).filter(v => !Number.isNaN(v));
     const content = document.getElementById('edit-content-textarea').value.trim();
     const imageUrl = document.getElementById('edit-content-image-url').value;
     const originalImageUrl = document.getElementById('edit-content-original-image-url').value;
@@ -2468,52 +2641,21 @@ function submitContentEdit() {
     saveBtn.innerHTML = '⏳ Saving...';
     saveBtn.disabled = true;
     
-    // Use the appropriate endpoints based on post type
-    const contentUrl = postType === 'social' 
-        ? `/social/${postId}/edit` 
-        : `/compose/post/${postId}/edit`;
+    // Save content first, then the image if it changed
+    let failed = await saveToAllPosts(postType, Number(postId), ids, 'edit', [['content', content]]);
+    if (failed.length === 0 && imageUrl !== originalImageUrl) {
+        failed = await saveToAllPosts(postType, Number(postId), ids, 'image', [['image_url', imageUrl]]);
+    }
     
-    const imageEndpoint = postType === 'social' 
-        ? `/social/${postId}/image` 
-        : `/compose/post/${postId}/image`;
-    
-    const contentFormData = new FormData();
-    contentFormData.append('content', content);
-    
-    // Save content first
-    fetch(contentUrl, { method: 'POST', body: contentFormData })
-        .then(response => response.json())
-        .then(data => {
-            if (!data.success) {
-                throw new Error(data.error || 'Failed to save content');
-            }
-            
-            // If image changed, save image too
-            if (imageUrl !== originalImageUrl) {
-                const imageFormData = new FormData();
-                imageFormData.append('image_url', imageUrl);
-                
-                return fetch(imageEndpoint, { method: 'POST', body: imageFormData })
-                    .then(response => response.json());
-            }
-            return { success: true };
-        })
-        .then(data => {
-            if (data.success) {
-                bootstrap.Modal.getInstance(document.getElementById('editContentModal')).hide();
-                // Reload to show updated content
-                location.reload();
-            } else {
-                alert('Error: ' + (data.error || 'Failed to save'));
-                saveBtn.innerHTML = originalText;
-                saveBtn.disabled = false;
-            }
-        })
-        .catch(error => {
-            alert('Error: ' + error.message);
-            saveBtn.innerHTML = originalText;
-            saveBtn.disabled = false;
-        });
+    if (failed.length === 0) {
+        bootstrap.Modal.getInstance(document.getElementById('editContentModal')).hide();
+        // Reload to show updated content
+        location.reload();
+    } else {
+        alert('Error: ' + failed.map(f => f.error).join('\n'));
+        saveBtn.innerHTML = originalText;
+        saveBtn.disabled = false;
+    }
 }
 
 // Delegated event handlers for buttons with data attributes
@@ -2548,7 +2690,7 @@ document.addEventListener('click', function(e) {
     // Edit time button
     btn = e.target.closest('.edit-time-btn');
     if (btn) {
-        openEditModal(Number(btn.dataset.postId), btn.dataset.scheduledFor);
+        openEditModal(Number(btn.dataset.postId), btn.dataset.scheduledFor, idsOf(btn));
         return;
     }
 
@@ -2560,7 +2702,8 @@ document.addEventListener('click', function(e) {
             btn.dataset.postType,
             btn.dataset.platform,
             btn.dataset.content,
-            btn.dataset.imageUrl
+            btn.dataset.imageUrl,
+            idsOf(btn)
         );
         return;
     }
@@ -2568,28 +2711,35 @@ document.addEventListener('click', function(e) {
     // Post now button
     btn = e.target.closest('.post-now-btn');
     if (btn) {
-        postNow(Number(btn.dataset.postId), btn.dataset.platform, btn);
+        postNow(idsOf(btn), platformsOf(btn), btn);
         return;
     }
 
     // Cancel post button
     btn = e.target.closest('.cancel-post-btn');
     if (btn) {
-        cancelPost(Number(btn.dataset.postId));
+        cancelPost(idsOf(btn), platformsOf(btn));
         return;
     }
 
     // Retry post button
     btn = e.target.closest('.retry-post-btn');
     if (btn) {
-        retryPost(Number(btn.dataset.postId), btn);
+        retryPost(idsOf(btn), platformsOf(btn), btn);
         return;
     }
 
     // Delete post button
     btn = e.target.closest('.delete-post-btn');
     if (btn) {
-        deletePost(Number(btn.dataset.postId));
+        deletePost(idsOf(btn), platformsOf(btn));
+        return;
+    }
+
+    // Expand or collapse a post's per-platform rows
+    btn = e.target.closest('.queue-expand-btn');
+    if (btn) {
+        toggleQueueGroup(btn);
         return;
     }
 

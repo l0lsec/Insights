@@ -168,12 +168,39 @@ ACCOUNT_JS_GATES = [
      ("syntax",)),
 ]
 
+# The schedule queue shows one row for a post that goes to several platforms.
+# One script, one gate per claim, picked by argument. Fake clients, no keys; the
+# JavaScript ones lift the page's own functions and run them under node.
+QUEUE_GATES = [
+    ("check_queue_groups.py", "QUEUE_GROUP_OK",
+     "queue entries that are one post collapse; a different moment, copy, image, state or repost does not",
+     ("group",)),
+    ("check_queue_groups.py", "QUEUE_PAGE_OK",
+     "the schedule page and its JSON draw one row per post, carry every member id, and count honestly",
+     ("page",)),
+    ("check_queue_groups.py", "QUEUE_ORDER_OK",
+     "drag-reorder and move to top or bottom never split a post that goes to several platforms",
+     ("order",)),
+    ("check_queue_groups.py", "QUEUE_EDIT_OK",
+     "editing a collapsed row's time moves every platform and nothing outside it",
+     ("edit",)),
+    ("check_queue_groups.py", "QUEUE_PARITY_OK",
+     "the server-rendered queue rows and the script-redrawn rows are identical, under node",
+     ("parity",)),
+    ("check_queue_groups.py", "QUEUE_JS_OK",
+     "a collapsed row's Post Now, Cancel, Retry, Delete, Edit and bulk actions reach every platform, under node",
+     ("js",)),
+    ("check_queue_groups.py", "QUEUE_SYNTAX_OK",
+     "every inline script on the schedule page parses and none is declared twice",
+     ("syntax",)),
+]
+
 # check_*.py files that are deliberately not gates, with the reason. Empty is the
 # healthy state: a script that is not a gate should not carry the check_ prefix.
 NOT_GATES = {}
 
 ALL_GATES = (ACCOUNT_GATES + ACCOUNT_JS_GATES + LIBRARY_GATES + COMPOSE_GATES
-             + VIDEO_GATES + MANUAL_POST_GATES)
+             + VIDEO_GATES + MANUAL_POST_GATES + QUEUE_GATES)
 
 
 def _unpack(entry):

@@ -2809,9 +2809,83 @@ def list_scheduled_posts(
 
         # Dynamic sort order (validate to prevent SQL injection)
         order = "DESC" if sort_order.lower() == 'desc' else "ASC"
-        query += f" ORDER BY sp.scheduled_for {order}"
+        # id breaks ties so entries sharing a moment (a post and its copies on
+        # other platforms) always list in the same order.
+        query += f" ORDER BY sp.scheduled_for {order}, sp.id ASC"
         cur = conn.execute(query, params)
         return cur.fetchall()
+
+
+def _scheduled_field(row, name):
+    """A column of a queue row, or None when the row does not carry it."""
+    return row[name] if name in row.keys() else None
+
+
+def scheduled_group_key(row):
+    """What makes two queue entries one post going to more than one place.
+
+    The queue holds one entry per platform and account, so a post sent to three
+    places is three entries. They are the same post when they have the same
+    copy, image and video, are in the same state and go out at the same moment;
+    that is the key. An article is the same post by its article id, since the
+    copy it publishes is built from the article. An entry with nothing to show
+    (its post was deleted) is never merged with anything.
+    """
+    post_type = _scheduled_field(row, 'post_type')
+    article_id = _scheduled_field(row, 'article_id')
+    if post_type == 'article' and article_id:
+        what = ('article', article_id)
+    else:
+        content = (_scheduled_field(row, 'social_content')
+                   or _scheduled_field(row, 'standalone_content') or '')
+        if not content:
+            return ('entry', row['id'])
+        image = (_scheduled_field(row, 'social_image_url')
+                 or _scheduled_field(row, 'standalone_image_url') or '')
+        what = ('copy', content, image, _scheduled_field(row, 'standalone_video_url') or '')
+    return (post_type, what, row['status'], row['scheduled_for'])
+
+
+def group_scheduled_rows(rows):
+    """``rows`` (from list_scheduled_posts) as lists of entries that are one post.
+
+    Groups come out in the order their first entry appears, and entries keep
+    their order within a group. A group holds at most one entry per platform
+    and account: a second entry for the same account is a deliberate repost,
+    so it starts a group of its own rather than hiding in this one.
+    """
+    groups = []
+    open_groups = {}
+    for row in rows:
+        slot = (_scheduled_field(row, 'platform'), _scheduled_field(row, 'account_id'))
+        for group in open_groups.setdefault(scheduled_group_key(row), []):
+            if slot not in group['slots']:
+                group['slots'].add(slot)
+                group['rows'].append(row)
+                break
+        else:
+            group = {'slots': {slot}, 'rows': [row]}
+            open_groups[scheduled_group_key(row)].append(group)
+            groups.append(group)
+    return [group['rows'] for group in groups]
+
+
+def get_scheduled_group_ids(scheduled_id: int, db_path: str = DB_PATH) -> List[int]:
+    """The ids of every queue entry shown in one row with ``scheduled_id``.
+
+    A row that does not exist (or has no copies) is its own group.
+    """
+    with sqlite3.connect(db_path) as conn:
+        found = conn.execute(
+            "SELECT status FROM scheduled_posts WHERE id = ?", (scheduled_id,)
+        ).fetchone()
+    if not found:
+        return [scheduled_id]
+    for group in group_scheduled_rows(list_scheduled_posts(status=found[0], db_path=db_path)):
+        ids = [row['id'] for row in group]
+        if scheduled_id in ids:
+            return ids
+    return [scheduled_id]
 
 
 def get_pending_scheduled_posts(db_path: str = DB_PATH) -> List[sqlite3.Row]:
@@ -2928,54 +3002,59 @@ def redistribute_scheduled_posts(platform: str, db_path: str = DB_PATH) -> int:
     return redistributed
 
 
+def _assign_group_times(conn, groups, times):
+    """Give ``groups[i]`` the moment ``times[i]``, every entry of it at once."""
+    for group, when in zip(groups, times):
+        ids = [row['id'] for row in group]
+        conn.execute(
+            f"UPDATE scheduled_posts SET scheduled_for = ? "
+            f"WHERE status = 'pending' AND id IN ({','.join('?' for _ in ids)})",
+            [when, *ids],
+        )
+
+
 def reorder_scheduled_posts(post_ids: List[int], db_path: str = DB_PATH) -> bool:
     """Reorder pending scheduled posts by swapping their scheduled times.
-    
+
     Takes a list of post IDs in the desired new order. The scheduled_for times
     are preserved but reassigned based on the new order.
-    
+
+    The queue page shows a post that goes to several platforms as one row, so
+    an id stands for its whole group: its copies move with it and keep sharing
+    one moment. Times are handed out per group, never per entry, which is what
+    keeps a group of three from being split when it swaps places with a lone
+    entry.
+
     Args:
         post_ids: List of scheduled post IDs in the desired order
         db_path: Database path
-        
+
     Returns:
         True if successful, False otherwise
     """
     if not post_ids or len(post_ids) < 2:
         return True  # Nothing to reorder
-    
+
+    by_id = {}
+    for group in group_scheduled_rows(list_scheduled_posts(status='pending', db_path=db_path)):
+        for row in group:
+            by_id[row['id']] = group
+
+    ordered = []
+    for post_id in post_ids:
+        group = by_id.get(post_id)
+        if group is not None and not any(group is seen for seen in ordered):
+            ordered.append(group)
+    if len(ordered) < 2:
+        return True  # Not enough posts to reorder
+
+    # The moments these posts already hold, earliest first; the first post in
+    # the new order gets the earliest, and so on.
+    times = sorted(group[0]['scheduled_for'] for group in ordered)
     with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        
-        # Get current scheduled times for all provided post IDs
-        placeholders = ",".join("?" for _ in post_ids)
-        cur = conn.execute(
-            f"""
-            SELECT id, scheduled_for FROM scheduled_posts
-            WHERE id IN ({placeholders}) AND status = 'pending'
-            ORDER BY scheduled_for ASC
-            """,
-            post_ids,
-        )
-        rows = cur.fetchall()
-        
-        if len(rows) < 2:
-            return True  # Not enough posts to reorder
-        
-        # Get the times in chronological order (these are the slots we'll keep)
-        times_in_order = sorted([row['scheduled_for'] for row in rows])
-        
-        # Now assign each post_id (in the new order) to a time slot (in chronological order)
-        # This way, the first post in the user's new order gets the earliest time, etc.
-        for i, post_id in enumerate(post_ids):
-            if i < len(times_in_order):
-                conn.execute(
-                    "UPDATE scheduled_posts SET scheduled_for = ? WHERE id = ? AND status = 'pending'",
-                    (times_in_order[i], post_id),
-                )
-        
+        _assign_group_times(conn, ordered, times)
         conn.commit()
-    
+
     return True
 
 
@@ -2985,63 +3064,39 @@ def move_posts_to_position(
     db_path: str = DB_PATH,
 ) -> bool:
     """Move selected pending posts to the top or bottom of the queue.
-    
+
+    Moves whole groups (see reorder_scheduled_posts): selecting one entry of a
+    post that goes to several platforms moves all of them.
+
     Args:
         post_ids: List of scheduled post IDs to move
         position: 'top' to move to earliest times, 'bottom' to move to latest times
         db_path: Database path
-        
+
     Returns:
         True if successful, False otherwise
     """
     if not post_ids:
         return True  # Nothing to move
-    
+
+    # Every pending post, earliest first, as groups; their moments are the
+    # slots the new order is dealt into.
+    groups = group_scheduled_rows(list_scheduled_posts(status='pending', db_path=db_path))
+    if len(groups) < 2:
+        return True  # Not enough posts to reorder
+
+    selected_ids = set(post_ids)
+    selected = [g for g in groups if any(row['id'] in selected_ids for row in g)]
+    others = [g for g in groups if not any(row['id'] in selected_ids for row in g)]
+    if not selected:
+        return True  # No selected posts found
+
+    new_order = selected + others if position == 'top' else others + selected
+    times = [group[0]['scheduled_for'] for group in groups]
     with sqlite3.connect(db_path) as conn:
-        conn.row_factory = sqlite3.Row
-        
-        # Get ALL pending posts ordered by scheduled_for
-        cur = conn.execute(
-            """
-            SELECT id, scheduled_for FROM scheduled_posts
-            WHERE status = 'pending'
-            ORDER BY scheduled_for ASC
-            """
-        )
-        all_posts = cur.fetchall()
-        
-        if len(all_posts) < 2:
-            return True  # Not enough posts to reorder
-        
-        # Separate selected posts from non-selected posts
-        selected_ids_set = set(post_ids)
-        selected_posts = [p for p in all_posts if p['id'] in selected_ids_set]
-        other_posts = [p for p in all_posts if p['id'] not in selected_ids_set]
-        
-        if not selected_posts:
-            return True  # No selected posts found
-        
-        # Get all times in order
-        all_times = sorted([p['scheduled_for'] for p in all_posts])
-        
-        # Create new ordering based on position
-        if position == 'top':
-            # Selected posts first, then others
-            new_order = selected_posts + other_posts
-        else:  # bottom
-            # Others first, then selected posts
-            new_order = other_posts + selected_posts
-        
-        # Assign times to new order
-        for i, post in enumerate(new_order):
-            if i < len(all_times):
-                conn.execute(
-                    "UPDATE scheduled_posts SET scheduled_for = ? WHERE id = ? AND status = 'pending'",
-                    (all_times[i], post['id']),
-                )
-        
+        _assign_group_times(conn, new_order, times)
         conn.commit()
-    
+
     return True
 
 

@@ -137,6 +137,8 @@ from database import (
     get_scheduled_post,
     get_pending_schedules_for_social_posts,
     list_scheduled_posts,
+    group_scheduled_rows,
+    get_scheduled_group_ids,
     get_pending_scheduled_posts,
     update_scheduled_post_status,
     update_scheduled_post_time,
@@ -4714,42 +4716,124 @@ def schedule_add():
         return jsonify({"error": str(e)}), 500
 
 
+def _scheduled_entry_view(row):
+    """One queue entry as the schedule page shows it."""
+    entry = dict(row)
+    if entry.get('scheduled_for'):
+        try:
+            dt = datetime.fromisoformat(entry['scheduled_for'])
+            entry['scheduled_for_display'] = dt.strftime('%Y-%m-%d %H:%M')
+        except (ValueError, TypeError):
+            entry['scheduled_for_display'] = entry['scheduled_for']
+    content = entry.get('social_content') or entry.get('standalone_content') or ''
+    entry['content_preview'] = content[:100] + ('...' if len(content) > 100 else '')
+    # Only pending entries can be dragged to a new place in the queue.
+    entry['is_draggable'] = entry.get('status') == 'pending'
+    return entry
+
+
+# What the page needs to know about each platform an entry goes to. The entry
+# itself carries the copy; this is the part that differs between platforms.
+_QUEUE_MEMBER_FIELDS = (
+    'id', 'platform', 'account_id', 'status', 'scheduled_for',
+    'scheduled_for_display', 'posted_at', 'linkedin_post_urn', 'error_message',
+)
+
+
+def _scheduled_queue_groups(rows):
+    """Queue entries grouped the way the schedule page shows them.
+
+    The queue holds one entry per platform and account, so one post sent to
+    three places is three entries. The page shows it as one row: the group
+    keeps the first entry's fields (so a lone entry looks exactly as it always
+    did) and adds ``ids`` and ``members`` for the rest. Every action on a
+    multi-platform row is sent to each id in ``ids``.
+
+    ``source_ids`` are the saved posts behind the entries (the copy that
+    Edit Content rewrites) and ``source_type`` says which kind they are.
+    """
+    accounts = {}
+
+    def account_label(entry):
+        account_id = entry.get('account_id')
+        if not account_id:
+            return None
+        if account_id not in accounts:
+            account = get_social_account(account_id)
+            accounts[account_id] = (
+                social_publisher.account_label(account, entry.get('platform')) if account else None
+            )
+        return accounts[account_id]
+
+    groups = []
+    for members in group_scheduled_rows(rows):
+        entries = [_scheduled_entry_view(row) for row in members]
+        group = dict(entries[0])
+        platforms = [entry.get('platform') for entry in entries]
+        slim = []
+        for entry in entries:
+            member = {key: entry.get(key) for key in _QUEUE_MEMBER_FIELDS}
+            member['platform_name'] = social_publisher.platform_name(entry.get('platform'))
+            member['account_label'] = account_label(entry)
+            # Two accounts on one platform need telling apart; otherwise the
+            # platform's own name is all the badge needs.
+            member['badge_label'] = (
+                member['account_label'] if platforms.count(entry.get('platform')) > 1 else None
+            )
+            slim.append(member)
+        group['ids'] = [entry['id'] for entry in entries]
+        group['members'] = slim
+        group['platforms'] = platforms
+        group['source_type'] = (
+            'social' if group.get('social_post_id')
+            else 'standalone' if group.get('standalone_post_id') else None
+        )
+        group['source_ids'] = [
+            entry.get('social_post_id') or entry.get('standalone_post_id')
+            for entry in entries
+            if entry.get('social_post_id') or entry.get('standalone_post_id')
+        ]
+        groups.append(group)
+    return groups
+
+
+def _scheduled_queue_filters():
+    """The status, platform, date and sort filters of the queue, from the query string."""
+    sort_order = request.args.get('sort', 'asc')
+    return {
+        'status': request.args.get('status', 'pending'),
+        'platform': request.args.get('platform', ''),
+        'date_from': request.args.get('date_from', '').strip(),
+        'date_to': request.args.get('date_to', '').strip(),
+        'sort_order': sort_order if sort_order in ('asc', 'desc') else 'asc',
+    }
+
+
+def _list_scheduled_rows(filters):
+    return list_scheduled_posts(
+        status=filters['status'] if filters['status'] else None,
+        platform=filters['platform'] if filters['platform'] else None,
+        date_from=filters['date_from'] if filters['date_from'] else None,
+        date_to=filters['date_to'] if filters['date_to'] else None,
+        sort_order=filters['sort_order'],
+    )
+
+
 @app.route('/schedule')
 def schedule_list():
     """View all scheduled posts."""
-    status_filter = request.args.get('status', 'pending')
-    platform_filter = request.args.get('platform', '')
-    date_from = request.args.get('date_from', '').strip()
-    date_to = request.args.get('date_to', '').strip()
-    sort_order = request.args.get('sort', 'asc')
-    
-    # Validate sort order
-    if sort_order not in ('asc', 'desc'):
-        sort_order = 'asc'
-    
+    filters = _scheduled_queue_filters()
+    status_filter = filters['status']
+    platform_filter = filters['platform']
+    date_from = filters['date_from']
+    date_to = filters['date_to']
+    sort_order = filters['sort_order']
+
     # Initialize default time slots if none exist
     initialize_default_time_slots()
-    
-    posts = list_scheduled_posts(
-        status=status_filter if status_filter else None,
-        platform=platform_filter if platform_filter else None,
-        date_from=date_from if date_from else None,
-        date_to=date_to if date_to else None,
-        sort_order=sort_order,
-    )
-    
-    # Convert to list of dicts and format dates
-    scheduled = []
-    for p in posts:
-        post_dict = dict(p)
-        # Parse scheduled_for for display
-        if post_dict.get('scheduled_for'):
-            try:
-                dt = datetime.fromisoformat(post_dict['scheduled_for'])
-                post_dict['scheduled_for_display'] = dt.strftime('%Y-%m-%d %H:%M')
-            except (ValueError, TypeError):
-                post_dict['scheduled_for_display'] = post_dict['scheduled_for']
-        scheduled.append(post_dict)
+
+    posts = _list_scheduled_rows(filters)
+    groups = _scheduled_queue_groups(posts)
     
     # Check LinkedIn connection status
     token = get_linkedin_token()
@@ -4793,14 +4877,16 @@ def schedule_list():
     # Get Threads username for constructing view URLs (kept for backward compatibility)
     threads_username = threads_token['username'] if threads_token and 'username' in threads_token.keys() else None
     
-    # Count posts by platform
-    linkedin_count = sum(1 for p in scheduled if p.get('platform') == 'linkedin')
-    threads_count = sum(1 for p in scheduled if p.get('platform') == 'threads')
-    facebook_count = sum(1 for p in scheduled if p.get('platform') == 'facebook')
+    # Count entries by platform: the badges count what will be published, so a
+    # post going to two platforms counts once on each.
+    linkedin_count = sum(1 for p in posts if p['platform'] == 'linkedin')
+    threads_count = sum(1 for p in posts if p['platform'] == 'threads')
+    facebook_count = sum(1 for p in posts if p['platform'] == 'facebook')
     
     return render_template(
         'schedule.html',
-        scheduled_posts=scheduled,
+        queue_groups=groups,
+        entry_count=len(posts),
         status_filter=status_filter,
         platform_filter=platform_filter,
         date_from=date_from,
@@ -4821,58 +4907,35 @@ def schedule_list():
 
 @app.route('/schedule/list-json')
 def schedule_list_json():
-    """Return scheduled posts as JSON for AJAX refresh."""
-    status_filter = request.args.get('status', '')
-    platform_filter = request.args.get('platform', '')
-    date_from = request.args.get('date_from', '').strip()
-    date_to = request.args.get('date_to', '').strip()
-    sort_order = request.args.get('sort', 'asc')
-    
-    # Validate sort order
-    if sort_order not in ('asc', 'desc'):
-        sort_order = 'asc'
-    
-    posts = list_scheduled_posts(
-        status=status_filter if status_filter else None,
-        platform=platform_filter if platform_filter else None,
-        date_from=date_from if date_from else None,
-        date_to=date_to if date_to else None,
-        sort_order=sort_order,
-    )
-    
-    # Convert to list of dicts and format dates
-    scheduled = []
-    for p in posts:
-        post_dict = dict(p)
-        # Parse scheduled_for for display
-        if post_dict.get('scheduled_for'):
-            try:
-                dt = datetime.fromisoformat(post_dict['scheduled_for'])
-                post_dict['scheduled_for_display'] = dt.strftime('%Y-%m-%d %H:%M')
-            except (ValueError, TypeError):
-                post_dict['scheduled_for_display'] = post_dict['scheduled_for']
-        
-        # Add content preview (truncated)
-        content = post_dict.get('social_content') or post_dict.get('standalone_content') or ''
-        post_dict['content_preview'] = content[:100] + ('...' if len(content) > 100 else '')
-        
-        # Determine if it's draggable (only pending posts)
-        post_dict['is_draggable'] = post_dict.get('status') == 'pending'
-        
-        scheduled.append(post_dict)
-    
-    # Count posts by platform
-    linkedin_count = sum(1 for p in scheduled if p.get('platform') == 'linkedin')
-    threads_count = sum(1 for p in scheduled if p.get('platform') == 'threads')
-    facebook_count = sum(1 for p in scheduled if p.get('platform') == 'facebook')
-    
+    """Return the queue as JSON for AJAX refresh.
+
+    ``groups`` is what the page draws: one item per post, however many
+    platforms it goes to (see _scheduled_queue_groups). ``total_count`` counts
+    those posts; ``entry_count`` counts the per-platform entries behind them.
+    ``posts`` is the same queue as one flat entry per platform, as this feed
+    always returned it, for anything that reads entries rather than rows.
+    """
+    filters = _scheduled_queue_filters()
+    # The page defaults to pending; a refresh asks for exactly what is selected,
+    # so an empty status here means "all statuses".
+    filters['status'] = request.args.get('status', '')
+
+    posts = _list_scheduled_rows(filters)
+    groups = _scheduled_queue_groups(posts)
+
+    linkedin_count = sum(1 for p in posts if p['platform'] == 'linkedin')
+    threads_count = sum(1 for p in posts if p['platform'] == 'threads')
+    facebook_count = sum(1 for p in posts if p['platform'] == 'facebook')
+
     return jsonify({
         "success": True,
-        "posts": scheduled,
+        "groups": groups,
+        "posts": [_scheduled_entry_view(row) for row in posts],
         "linkedin_count": linkedin_count,
         "threads_count": threads_count,
         "facebook_count": facebook_count,
-        "total_count": len(scheduled),
+        "total_count": len(groups),
+        "entry_count": len(posts),
     })
 
 
@@ -5154,7 +5217,20 @@ def schedule_edit(scheduled_id: int):
     except (ValueError, TypeError):
         return jsonify({"error": "Invalid datetime format"}), 400
     
-    success = update_scheduled_post_time(scheduled_id, scheduled_for)
+    # A row that stands for one post on several platforms sends its ids, so the
+    # copies move together instead of splitting into two rows. Only ids that
+    # really are in this entry's group count: the browser's list can be stale,
+    # and a time change must not reach an unrelated post.
+    ids = [scheduled_id]
+    requested = _requested_post_ids(scheduled_id, field='ids')
+    if requested:
+        in_group = set(get_scheduled_group_ids(scheduled_id))
+        ids += [i for i in requested if i != scheduled_id and i in in_group]
+
+    # Every id is tried; the edit succeeds when the one the request is about
+    # was still pending. A copy that already went out stays where it is.
+    updated = [update_scheduled_post_time(i, scheduled_for) for i in ids]
+    success = updated[0]
     
     if success:
         # Format the display time
@@ -5167,6 +5243,7 @@ def schedule_edit(scheduled_id: int):
             "success": True,
             "scheduled_for": scheduled_for,
             "scheduled_for_display": display,
+            "updated_ids": [i for i, ok in zip(ids, updated) if ok],
             "message": f"Post rescheduled for {display}",
         })
     else:

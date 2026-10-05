@@ -73,6 +73,7 @@ Catalogue a large media archive and sort it by **year** and **category** — bui
 - **Facebook Integration** - OAuth-based posting to Facebook Pages with text, image and video support
 - **X/Twitter Integration** - OAuth 2.0 with PKCE for posting text, images and videos (pay-per-use media uploads)
 - **Instagram Integration** - OAuth-based publishing of feed posts, **carousels** (2–10 images/videos), **Reels**, and **Stories** (image or video). Requires a professional (Business/Creator) account
+- **Consolidated Queue** - A post queued to several platforms for the same moment is one row on the Schedule page, with a badge per platform. Its buttons (time, content, Post Now, Cancel, retry, delete), drag-to-reorder and bulk actions act on every platform at once, and "By platform" opens the per-platform rows to act on one alone
 - **Time Slot Management** - Configure recurring posting times by day of week and platform
 - **Auto-Queue** - Posts automatically slot into the next available time
 - **Daily Limits** - Set per-platform daily posting caps
