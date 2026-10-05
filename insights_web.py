@@ -5538,6 +5538,10 @@ def schedule_debug():
 # Saved posts are paginated per platform so the Compose page stays small even
 # with thousands of imported/generated posts.
 POSTS_PAGE_SIZE = 20
+# The most cards one /compose/posts/more request will render. "Load all" asks
+# for this many at a time rather than for everything at once, so a library of
+# thousands of posts arrives as it renders instead of as one huge response.
+POSTS_MAX_BATCH = 100
 
 
 # Every platform a saved post can target, in the order a Compose card draws its
@@ -5885,6 +5889,7 @@ def compose_page():
         platform_totals=platform_totals,
         compose_platforms=list(COMPOSE_PLATFORMS),
         page_size=POSTS_PAGE_SIZE,
+        max_batch=POSTS_MAX_BATCH,
         brief_filter_options=brief_filter_options,
         next_slots=next_slots,
         saved_sources=saved_sources,
@@ -5913,15 +5918,20 @@ def compose_posts_more():
 
     ``total`` is how many cards match, which the caller needs for the count
     badge and the "Load more (N of total)" label.
+
+    ``limit`` sets how many cards to return (default POSTS_PAGE_SIZE, at most
+    POSTS_MAX_BATCH); "Load all" and scroll loading page with it.
     """
     offset = request.args.get('offset', 0, type=int) or 0
     if offset < 0:
         offset = 0
+    limit = request.args.get('limit', POSTS_PAGE_SIZE, type=int) or POSTS_PAGE_SIZE
+    limit = max(1, min(limit, POSTS_MAX_BATCH))
 
     groups, _ = _filtered_post_groups(request.args)
 
     total = len(groups)
-    page = groups[offset:offset + POSTS_PAGE_SIZE]
+    page = groups[offset:offset + limit]
     has_more = total > offset + len(page)
 
     ids = [row['id'] for group in page for row in group['platforms'].values()]

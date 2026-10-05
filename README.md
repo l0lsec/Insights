@@ -52,6 +52,7 @@ Catalogue a large media archive and sort it by **year** and **category** — bui
 
 #### Social Media Management
 - **Command Center** - Central hub for generating posts from prompts, URLs, saved sources, or free text
+- **Long Lists** - The saved-posts list shows 20 cards and loads the next 20 as you scroll down (switch it off with *Load as I scroll*), and *Load all* loads every post matching the current filters in batches of 100, with progress and a way to stop
 - **Multi-Platform Generation** - Create multiple posts per platform in a single batch (1-21 posts)
 - **Tone Selection** - Choose from professional, casual, witty, educational, or promotional tones
 - **Image Management** - Upload images, search stock photos (Unsplash, Pexels, Pixabay), and attach to posts

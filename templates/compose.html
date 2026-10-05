@@ -1289,10 +1289,11 @@
                     {% for group in post_groups %}{{ render_post_item(group) }}{% endfor %}
                     </div>
                     {% if group_total > post_groups|length %}
-                    <div class="text-center mt-3 pt-3 border-top load-more-container">
-                        <button class="btn btn-sm btn-outline-secondary load-more-btn" data-offset="{{ post_groups|length }}" onclick="loadMorePosts(this)">
-                            Load more ({{ post_groups|length }} of {{ group_total }}) ▼
-                        </button>
+                    {# The same controls loadMoreControlsHtml() draws after a filter change; keep them identical. #}
+                    <div class="text-center mt-3 pt-3 border-top load-more-container d-flex justify-content-center align-items-center flex-wrap gap-2" data-total="{{ group_total }}">
+                        <button class="btn btn-sm btn-outline-secondary load-more-btn" data-offset="{{ post_groups|length }}" onclick="loadMorePosts(this)">Load more ({{ post_groups|length }} of {{ group_total }}) ▼</button>
+                        <button class="btn btn-sm btn-outline-primary load-all-btn" onclick="loadAllPosts(this)" title="Load every post that matches the current filters">Load all ({{ group_total - post_groups|length }} more) ⏬</button>
+                        <label class="form-check form-switch d-inline-flex align-items-center gap-2 mb-0 ms-2 small text-muted auto-load-switch" title="Load the next posts automatically when you scroll to the bottom"><input type="checkbox" class="form-check-input auto-load-toggle" onchange="setAutoLoad(this.checked)" checked> Load as I scroll</label>
                     </div>
                     {% endif %}
                     {{ new_post_composer() }}
@@ -5043,45 +5044,214 @@ function toggleChipQueue(btn) {
     toggleQueue(postId, 'standalone', platform, btn, btn.dataset.queued === 'true');
 }
 
-// Load the next page of saved posts and append them.
-async function loadMorePosts(btn) {
-    const offset = parseInt(btn.dataset.offset || '0', 10);
-    const original = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = '⏳ Loading...';
-    try {
-        // Page within the filtered set — the server applies the same filters the
-        // list was rendered under, so "Load more" can't surface non-matching posts.
-        const filters = currentPostFilters();
-        const res = await fetch('/compose/posts/more' + postFilterQuery(filters, {
-            offset: String(offset),
-        }));
-        const data = await res.json();
-        if (!res.ok || data.error) {
-            showToast(data.error || 'Failed to load more posts', 'error');
-            btn.disabled = false;
-            btn.innerHTML = original;
-            return;
-        }
-        const container = document.getElementById('posts-container');
-        if (container && data.html) {
-            container.insertAdjacentHTML('beforeend', data.html);
-            initLoadedPosts(container);
-        }
-        btn.dataset.offset = data.next_offset;
-        if (data.has_more) {
-            btn.disabled = false;
-            btn.innerHTML = `Load more (${data.next_offset} of ${data.total}) ▼`;
-        } else {
-            const wrap = btn.closest('.load-more-container');
-            if (wrap) wrap.remove();
-        }
-    } catch (e) {
-        showToast('Failed to load more posts: ' + e.message, 'error');
-        btn.disabled = false;
-        btn.innerHTML = original;
+// ---------------------------------------------------------------------------
+// Loading the rest of the saved-posts list: "Load more", "Load all" and
+// loading as you scroll. All three append batches of the *filtered* set from
+// /compose/posts/more, one load at a time.
+// ---------------------------------------------------------------------------
+const POSTS_PAGE_SIZE = {{ page_size }};     // what "Load more" and scrolling ask for
+const POSTS_MAX_BATCH = {{ max_batch }};     // what "Load all" asks for, per request
+const AUTO_LOAD_KEY = 'compose.autoLoad';
+
+let postsLoading = false;      // a batch is in flight; start no other
+let loadAllRunning = false;    // "Load all" is part-way through the set
+let loadAllStop = false;       // ask it to finish after the batch in flight
+let autoLoadPaused = false;    // a scroll-triggered load failed; wait for the user
+let loadMoreObserver = null;
+
+// The "Load more" row, or null once everything matching is on the page.
+function loadMoreControls() {
+    const wrap = document.querySelector('#saved-posts-container .load-more-container');
+    return wrap ? {
+        wrap,
+        more: wrap.querySelector('.load-more-btn'),
+        all: wrap.querySelector('.load-all-btn'),
+    } : null;
+}
+
+// The row's markup. The Jinja that renders the first page draws the same thing.
+function loadMoreControlsHtml(shown, total) {
+    return `<button class="btn btn-sm btn-outline-secondary load-more-btn" data-offset="${shown}" onclick="loadMorePosts(this)">Load more (${shown} of ${total}) ▼</button>` +
+        `<button class="btn btn-sm btn-outline-primary load-all-btn" onclick="loadAllPosts(this)" title="Load every post that matches the current filters">Load all (${total - shown} more) ⏬</button>` +
+        `<label class="form-check form-switch d-inline-flex align-items-center gap-2 mb-0 ms-2 small text-muted auto-load-switch" title="Load the next posts automatically when you scroll to the bottom"><input type="checkbox" class="form-check-input auto-load-toggle" onchange="setAutoLoad(this.checked)" ${autoLoadEnabled() ? 'checked' : ''}> Load as I scroll</label>`;
+}
+
+// Put the row's labels back to "idle" for ``shown`` of ``total`` cards.
+function setLoadMoreLabels(shown, total) {
+    const controls = loadMoreControls();
+    if (!controls) return;
+    controls.wrap.dataset.total = total;
+    controls.more.dataset.offset = shown;
+    controls.more.disabled = false;
+    controls.more.innerHTML = `Load more (${shown} of ${total}) ▼`;
+    controls.all.disabled = false;
+    controls.all.innerHTML = `Load all (${total - shown} more) ⏬`;
+}
+
+// Put the row back to idle for what is on the page now, whatever just ended.
+function restoreLoadMoreLabels() {
+    const controls = loadMoreControls();
+    if (!controls) return;
+    setLoadMoreLabels(parseInt(controls.more.dataset.offset || '0', 10),
+                      parseInt(controls.wrap.dataset.total || '0', 10));
+}
+
+// Show a batch's outcome: fewer left, or the row gone when nothing is.
+function showBatchResult(data) {
+    if (data.has_more) {
+        setLoadMoreLabels(data.next_offset, data.total);
+    } else {
+        const controls = loadMoreControls();
+        if (controls) controls.wrap.remove();
     }
 }
+
+// Append the next batch of the filtered list. Returns the server's reply, or
+// null when nothing was appended: the request failed, or the filters changed
+// while it was out, so the cards belong to a list that is no longer shown.
+async function loadPostsBatch(limit) {
+    const controls = loadMoreControls();
+    const container = document.getElementById('posts-container');
+    if (!controls || !container) return null;
+
+    const filters = currentPostFilters();
+    const signature = JSON.stringify(filters);
+    // A filter change is still rendering; this offset belongs to the old list.
+    if (signature !== renderedFilterSignature) return null;
+
+    const offset = parseInt(controls.more.dataset.offset || '0', 10);
+    let data;
+    try {
+        // Page within the filtered set — the server applies the same filters the
+        // list was rendered under, so this can't surface non-matching posts.
+        const res = await fetch('/compose/posts/more' + postFilterQuery(filters, {
+            offset: String(offset),
+            limit: String(limit),
+        }));
+        data = await res.json();
+        if (!res.ok || data.error) throw new Error(data.error || 'Failed to load more posts');
+    } catch (e) {
+        autoLoadPaused = true;   // don't retry on every scroll tick
+        showToast('Failed to load more posts: ' + e.message, 'error');
+        return null;
+    }
+    if (renderedFilterSignature !== signature || JSON.stringify(currentPostFilters()) !== signature) {
+        return null;
+    }
+
+    if (data.html) {
+        container.insertAdjacentHTML('beforeend', data.html);
+        initLoadedPosts(container);
+    }
+    return data;
+}
+
+// Run one load at a time. When it ends, look at the row again: if it is still
+// near the viewport (a short page, a tall window) scrolling loads the next.
+async function withPostsLoad(work) {
+    if (postsLoading) return;
+    postsLoading = true;
+    try {
+        await work();
+    } finally {
+        postsLoading = false;
+        restoreLoadMoreLabels();
+        watchLoadMore();
+    }
+}
+
+// Load the next page of saved posts and append them. ``trigger`` is the clicked
+// button, or 'scroll' when the page asked for it.
+async function loadMorePosts(trigger) {
+    if (trigger !== 'scroll') autoLoadPaused = false;
+    await withPostsLoad(async () => {
+        const controls = loadMoreControls();
+        if (!controls) return;
+        controls.more.disabled = true;
+        controls.all.disabled = true;
+        controls.more.innerHTML = '⏳ Loading...';
+        const data = await loadPostsBatch(POSTS_PAGE_SIZE);
+        if (data) showBatchResult(data);
+    });
+}
+
+// Load every post matching the current filters, a batch at a time so they
+// appear as they arrive. Clicking the button again while it runs stops it.
+async function loadAllPosts() {
+    if (loadAllRunning) {
+        loadAllStop = true;
+        const controls = loadMoreControls();
+        if (controls) controls.all.innerHTML = '⏳ Stopping…';
+        return;
+    }
+    autoLoadPaused = false;
+    await withPostsLoad(async () => {
+        loadAllRunning = true;
+        loadAllStop = false;
+        try {
+            while (!loadAllStop) {
+                const controls = loadMoreControls();
+                if (!controls) break;
+                const shown = parseInt(controls.more.dataset.offset || '0', 10);
+                controls.more.disabled = true;
+                controls.all.disabled = false;   // the same button stops it
+                controls.all.innerHTML = `⏳ Loading… ${shown} of ${controls.wrap.dataset.total} — click to stop`;
+                const data = await loadPostsBatch(POSTS_MAX_BATCH);
+                if (!data) break;   // failed, or the filters changed: keep what is loaded
+                showBatchResult(data);
+                if (!data.has_more) {
+                    showToast(`Loaded all ${data.total} posts`, 'success');
+                    break;
+                }
+            }
+        } finally {
+            loadAllRunning = false;
+            loadAllStop = false;
+        }
+    });
+}
+
+// Is loading as you scroll on? Remembered per browser; on unless turned off.
+function autoLoadEnabled() {
+    try {
+        return localStorage.getItem(AUTO_LOAD_KEY) !== 'off';
+    } catch (e) {
+        return true;
+    }
+}
+
+function setAutoLoad(on) {
+    try {
+        localStorage.setItem(AUTO_LOAD_KEY, on ? 'on' : 'off');
+    } catch (e) { /* storage blocked: the choice lasts until the page does */ }
+    document.querySelectorAll('.auto-load-toggle').forEach(toggle => { toggle.checked = on; });
+    autoLoadPaused = false;
+    watchLoadMore();
+}
+
+// Watch the "Load more" row and load the next page as it nears the viewport.
+// Observing afresh reports the row's current state, so a row that is still in
+// view after a load triggers the next one.
+function watchLoadMore() {
+    if (loadMoreObserver) loadMoreObserver.disconnect();
+    const controls = loadMoreControls();
+    if (!controls || !autoLoadEnabled() || typeof IntersectionObserver === 'undefined') return;
+    if (!loadMoreObserver) {
+        loadMoreObserver = new IntersectionObserver(onLoadMoreNearViewport, { rootMargin: '600px 0px' });
+    }
+    loadMoreObserver.observe(controls.wrap);
+}
+
+function onLoadMoreNearViewport(entries) {
+    if (!entries.some(entry => entry.isIntersecting)) return;
+    if (!autoLoadEnabled() || autoLoadPaused || postsLoading) return;
+    loadMorePosts('scroll');
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+    document.querySelectorAll('.auto-load-toggle').forEach(toggle => { toggle.checked = autoLoadEnabled(); });
+    watchLoadMore();
+});
 
 function setChipQueuedUI(btn, queued, scheduledFor) {
     btn.innerHTML = queued ? '\u2705' : '\u2795';
@@ -7102,7 +7272,7 @@ function initLoadedPosts(container) {
     }
 }
 
-// Add, update or remove the list's "Load more" control for the set now shown.
+// Add, update or remove the list's "Load more" row for the set now shown.
 function syncLoadMore(shown, total) {
     const body = document.querySelector('#saved-posts-container .social-copy-body');
     if (!body) return;
@@ -7113,15 +7283,14 @@ function syncLoadMore(shown, total) {
     }
     if (!wrap) {
         wrap = document.createElement('div');
-        wrap.className = 'text-center mt-3 pt-3 border-top load-more-container';
-        wrap.innerHTML = '<button class="btn btn-sm btn-outline-secondary load-more-btn" onclick="loadMorePosts(this)"></button>';
+        wrap.className = 'text-center mt-3 pt-3 border-top load-more-container d-flex justify-content-center align-items-center flex-wrap gap-2';
+        wrap.dataset.total = total;
+        wrap.innerHTML = loadMoreControlsHtml(shown, total);
         const postsContainer = body.querySelector('.posts-container');
         postsContainer.insertAdjacentElement('afterend', wrap);
     }
-    const btn = wrap.querySelector('.load-more-btn');
-    btn.dataset.offset = shown;
-    btn.disabled = false;
-    btn.innerHTML = `Load more (${shown} of ${total}) ▼`;
+    setLoadMoreLabels(shown, total);
+    watchLoadMore();
 }
 
 // Re-render the saved-posts list for the current filter bar.
@@ -7147,6 +7316,11 @@ async function applyPostFilters() {
 
     const container = document.getElementById('posts-container');
     if (!container) return;
+
+    // A scroll load that failed was for the old list. (A "Load all" that is
+    // part-way through ends by itself: loadPostsBatch drops the batch in flight
+    // because the filters it was asked under are gone.)
+    autoLoadPaused = false;
 
     const seq = ++filterRequestSeq;
     if (resultsSpan) resultsSpan.textContent = 'Filtering…';

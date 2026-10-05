@@ -195,12 +195,30 @@ QUEUE_GATES = [
      ("syntax",)),
 ]
 
+# Loading the rest of the Compose list: the route's batch size, and the Load more,
+# Load all and scroll-loading controls, the latter run under node against a fake
+# DOM, a fake paging server and a fake IntersectionObserver.
+PAGING_GATES = [
+    ("check_compose_paging.py", "PAGING_ROUTE_OK",
+     "the list route takes a batch size and paging covers each matching card exactly once",
+     ("route",)),
+    ("check_compose_paging.py", "PAGING_WIRING_OK",
+     "the Compose list has Load more, Load all and the scroll switch, and the script redraws them identically",
+     ("wiring",)),
+    ("check_compose_paging.py", "PAGING_LOADALL_OK",
+     "Load all pages through the filtered set, can be stopped, survives failure and stale filters, under node",
+     ("loadall",)),
+    ("check_compose_paging.py", "PAGING_SCROLL_OK",
+     "scrolling loads the next page once at a time, is switchable, and pauses after a failure, under node",
+     ("scroll",)),
+]
+
 # check_*.py files that are deliberately not gates, with the reason. Empty is the
 # healthy state: a script that is not a gate should not carry the check_ prefix.
 NOT_GATES = {}
 
 ALL_GATES = (ACCOUNT_GATES + ACCOUNT_JS_GATES + LIBRARY_GATES + COMPOSE_GATES
-             + VIDEO_GATES + MANUAL_POST_GATES + QUEUE_GATES)
+             + VIDEO_GATES + MANUAL_POST_GATES + QUEUE_GATES + PAGING_GATES)
 
 
 def _unpack(entry):
