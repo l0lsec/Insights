@@ -17,6 +17,7 @@ claim against the real code and prints its own token only at the end:
     python scripts/check_video.py download   VIDEO_DOWNLOAD_OK
     python scripts/check_video.py ui         VIDEO_UI_OK
     python scripts/check_video.py newpost    VIDEO_NEWPOST_OK
+    python scripts/check_video.py reelopts   VIDEO_REELOPTS_OK
 
 The client sections drive the real platform clients against a fake HTTP layer
 that records every request, then compare a hash of the bytes the "platform"
@@ -677,8 +678,10 @@ class _IgClient:
     def publish_image_post(self, token, caption, image_url, user_tags=None):
         return self._ok("image", url=image_url)
 
-    def publish_reel_post(self, token, caption, video_url):
-        return self._ok("reel", url=video_url)
+    def publish_reel_post(self, token, caption, video_url, **options):
+        # Options are recorded only when sent, so a post without any still
+        # records exactly what it did before Reel options existed.
+        return self._ok("reel", url=video_url, **options)
 
     def publish_carousel_post(self, token, caption, items):
         return self._ok("carousel", items=items)
@@ -1223,6 +1226,99 @@ def section_download():
     print("VIDEO_DOWNLOAD_OK")
 
 
+# ---------------------------------------------------------------------------
+# reelopts
+# ---------------------------------------------------------------------------
+
+
+def section_reelopts():
+    """A Reel's cover frame and collaborators reach Instagram, from the queue too."""
+    import instagram_client as igc
+
+    # 1. The real client puts them on the container request, and leaves them off
+    #    when not given (the control: the request is what it always was).
+    sent = []
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"id": "c-1"}
+
+    real_post = igc.requests.post
+    igc.requests.post = lambda url, params=None, **kw: sent.append(dict(params or {})) or _Resp()
+    client = igc.InstagramClient()
+    client._poll_and_publish = lambda *a, **k: {"success": True}
+    try:
+        client.publish_reel_post("tok", "Caption", VIDEO, thumb_offset_ms=3600,
+                                 collaborators=["showupshowout", "showupshowoutllc"])
+        client.publish_reel_post("tok", "Caption", VIDEO)
+    finally:
+        igc.requests.post = real_post
+    check(len(sent) == 2, f"expected two container requests: {sent}")
+    check(sent[0].get("thumb_offset") == "3600", f"cover offset missing: {sent[0]}")
+    check(json.loads(sent[0].get("collaborators", "null")) == ["showupshowout", "showupshowoutllc"],
+          f"collaborators missing: {sent[0]}")
+    check("thumb_offset" not in sent[1] and "collaborators" not in sent[1],
+          f"control: a Reel without options must not send them: {sent[1]}")
+
+    # 2. Stored on a post, they reach the client on publish (the queue's path),
+    #    and a post without them calls the client exactly as before.
+    from _accounts_gate import isolated_app, connect
+    directory, database, web, publisher, test_client = isolated_app()
+    P = database.DB_PATH
+    web._maybe_attach_link_image = lambda *a, **k: None
+    account = connect(database, "instagram", "ig-1", "brandco")
+    ig = _IgClient()
+    web.get_instagram_client = lambda: ig
+    publisher.get_instagram_client = lambda: ig
+
+    def publish(pid):
+        ig.calls.clear()
+        post = database.get_standalone_post(pid, db_path=P)
+        return publisher.publish("instagram", account, content="Caption", image_url=post["image_url"],
+                                 video_url=post["video_url"], standalone_post_id=pid)
+
+    with_opts = database.add_standalone_post("manual", "g", "instagram", "Caption", db_path=P,
+                                             account_id=account, video_url=VIDEO)
+    without = database.add_standalone_post("manual", "g", "instagram", "Other", db_path=P,
+                                           account_id=account, video_url=VIDEO)
+
+    # the route validates and stores
+    r = test_client.post(f"/compose/post/{with_opts}/reel-options",
+                         json={"thumb_offset_ms": 3600, "collaborators": "@showupshowout, showupshowoutllc"})
+    check(r.status_code == 200, f"route refused valid options: {r.status_code} {r.get_json()}")
+    check(r.get_json()["reel_options"] == {"thumb_offset_ms": 3600,
+                                          "collaborators": ["showupshowout", "showupshowoutllc"]},
+          f"route did not normalize: {r.get_json()}")
+    for bad, why in (({"collaborators": ["a", "b", "c", "d"]}, "at most"),
+                     ({"collaborators": ["bad name!"]}, "Invalid Instagram username"),
+                     ({"thumb_offset_ms": -5}, "negative"),
+                     ({"thumb_offset_ms": "soon"}, "whole number")):
+        r = test_client.post(f"/compose/post/{with_opts}/reel-options", json=bad)
+        check(r.status_code == 400 and why in r.get_json().get("error", ""),
+              f"route should refuse {bad}: {r.status_code} {r.get_json()}")
+    stored = database.get_standalone_post(with_opts, db_path=P)["ig_reel_options"]
+    check(json.loads(stored)["thumb_offset_ms"] == 3600, f"a refused request overwrote the options: {stored}")
+
+    publish(with_opts)
+    check(ig.calls == [{"kind": "reel", "url": VIDEO, "thumb_offset_ms": 3600,
+                        "collaborators": ["showupshowout", "showupshowoutllc"]}],
+          f"stored options did not reach the client: {ig.calls}")
+    publish(without)
+    check(ig.calls == [{"kind": "reel", "url": VIDEO}], f"control: a post without options changed: {ig.calls}")
+
+    # an empty body clears them
+    r = test_client.post(f"/compose/post/{with_opts}/reel-options", json={})
+    check(r.status_code == 200 and database.get_standalone_post(with_opts, db_path=P)["ig_reel_options"] is None,
+          f"an empty body should clear the options: {r.get_json()}")
+    publish(with_opts)
+    check(ig.calls == [{"kind": "reel", "url": VIDEO}], f"cleared options still sent: {ig.calls}")
+
+    print("a Reel's cover frame and collaborators are stored on the post, validated, and sent when it publishes")
+    print("VIDEO_REELOPTS_OK")
+
+
 SECTIONS = {
     "schema": section_schema,
     "router": section_router,
@@ -1236,6 +1332,7 @@ SECTIONS = {
     "copy": section_copy,
     "compat": section_compat,
     "download": section_download,
+    "reelopts": section_reelopts,
 }
 
 if __name__ == "__main__":

@@ -304,6 +304,12 @@ def init_db(db_path: str = DB_PATH) -> None:
         # it as a Reel). It is card-wide like image_url: the rows of a card share it.
         if "video_url" not in standalone_columns:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN video_url TEXT")
+        # ig_reel_options is a JSON object for an Instagram Reel:
+        # {"thumb_offset_ms": int, "collaborators": [username, ...]}. The cover frame
+        # and collaborators cannot be changed once a Reel is published, so they are
+        # stored on the post and sent with it, whenever the queue publishes it.
+        if "ig_reel_options" not in standalone_columns:
+            conn.execute("ALTER TABLE standalone_posts ADD COLUMN ig_reel_options TEXT")
         # URL sources - stores extracted content from URLs for reuse
         conn.execute(
             """
@@ -3960,6 +3966,27 @@ def set_standalone_post_media(
                 "UPDATE standalone_posts SET ig_post_type = ?, media_items = ? WHERE id = ?",
                 (ig_post_type, json.dumps(items), post_id),
             )
+        conn.commit()
+
+
+def set_standalone_post_reel_options(
+    post_id: int,
+    options: Optional[dict],
+    db_path: str = DB_PATH,
+) -> None:
+    """Set the Instagram Reel cover frame and collaborators for a standalone post.
+
+    Args:
+        post_id: The post ID
+        options: {"thumb_offset_ms": int, "collaborators": [username, ...]};
+            None or an empty dict clears them. Only Instagram Reels read it.
+    """
+    payload = json.dumps(options) if options else None
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE standalone_posts SET ig_reel_options = ? WHERE id = ?",
+            (payload, post_id),
+        )
         conn.commit()
 
 

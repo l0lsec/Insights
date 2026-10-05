@@ -130,6 +130,9 @@ VIDEO_GATES = [
     ("check_video.py", "VIDEO_NEWPOST_OK",
      "a new post takes a video, refuses an unusable one before creating anything",
      ("newpost",)),
+    ("check_video.py", "VIDEO_REELOPTS_OK",
+     "a Reel's cover frame and collaborators are stored, validated and sent when it publishes",
+     ("reelopts",)),
 ]
 
 # Writing a post by hand, and the model adapters behind generation. One script,

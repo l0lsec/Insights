@@ -550,6 +550,8 @@ class InstagramClient:
         caption: str,
         video_url: str,
         share_to_feed: bool = True,
+        thumb_offset_ms: Optional[int] = None,
+        collaborators: Optional[list] = None,
     ) -> dict:
         """Publish a Reel (single video) to Instagram.
 
@@ -559,6 +561,10 @@ class InstagramClient:
             video_url: Public URL of the video (MP4/MOV, H.264/AAC; Instagram enforces
                 its own length and size limits and reports a rejection)
             share_to_feed: Also show the reel on the main feed grid
+            thumb_offset_ms: Where in the video the cover frame is taken, in
+                milliseconds (Instagram uses the first frame when absent)
+            collaborators: Up to 3 Instagram usernames invited as collaborators;
+                the post shows on their profiles once they accept
 
         Returns:
             Dict with success status and post details
@@ -572,13 +578,18 @@ class InstagramClient:
 
         caption = self._truncate_caption(caption)
         logger.info("Creating Instagram reel container with video: %s", video_url)
-        container_id, error = self._create_container({
+        params = {
             "media_type": "REELS",
             "video_url": video_url,
             "caption": caption,
             "share_to_feed": "true" if share_to_feed else "false",
             "access_token": access_token,
-        })
+        }
+        if thumb_offset_ms is not None:
+            params["thumb_offset"] = str(int(thumb_offset_ms))
+        if collaborators:
+            params["collaborators"] = json.dumps(list(collaborators))
+        container_id, error = self._create_container(params)
         if error:
             return error
         return self._poll_and_publish(container_id, access_token, max_retries=VIDEO_MAX_RETRIES)

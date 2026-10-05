@@ -175,6 +175,7 @@ from database import (
     update_social_post_image,
     set_standalone_post_media,
     set_standalone_post_user_tags,
+    set_standalone_post_reel_options,
     delete_standalone_post,
     delete_standalone_posts_bulk,
     mark_standalone_post_used,
@@ -8122,6 +8123,29 @@ def compose_set_post_media(post_id: int):
     return jsonify({"success": True, "ig_post_type": ig_post_type, "media_items": clean})
 
 
+@app.route('/compose/post/<int:post_id>/reel-options', methods=['POST'])
+def compose_set_post_reel_options(post_id: int):
+    """Set an Instagram Reel's cover frame and collaborators.
+
+    JSON/Form: ``thumb_offset_ms`` (milliseconds into the video) and
+    ``collaborators`` (a list, or a comma/space separated string, of up to three
+    usernames). Instagram cannot change either once the Reel is published, so
+    they are stored on the post and sent when it publishes, now or from the
+    queue. An empty body clears them.
+    """
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = request.form.to_dict()
+    options, error = _clean_reel_options(payload)
+    if error:
+        return jsonify({"error": error}), 400
+    set_standalone_post_reel_options(post_id, options or None)
+    return jsonify({"success": True, "reel_options": options})
+
+
 @app.route('/compose/post/<int:post_id>/user-tags', methods=['POST'])
 def compose_set_post_user_tags(post_id: int):
     """Set the Instagram people-tags for a standalone post (feed photos only).
@@ -8594,6 +8618,68 @@ def _ensure_instagram_media(
     return None, f"Unknown Instagram post type: {ig_post_type}"
 
 
+IG_USERNAME_RE = re.compile(r'[A-Za-z0-9._]{1,30}')
+REEL_MAX_COLLABORATORS = 3  # Instagram's limit for a Reel
+
+
+def _clean_reel_options(raw) -> tuple[dict | None, str | None]:
+    """Validate Reel options from a request: ``(options, error)``.
+
+    ``thumb_offset_ms`` is where the cover frame is taken (milliseconds into the
+    video); ``collaborators`` is up to three usernames. Missing keys are left
+    out, so an empty object clears both.
+    """
+    if not isinstance(raw, dict):
+        return None, "Reel options must be an object"
+    options: dict = {}
+    offset = raw.get('thumb_offset_ms')
+    if offset not in (None, ''):
+        try:
+            offset = int(offset)
+        except (TypeError, ValueError):
+            return None, "thumb_offset_ms must be a whole number of milliseconds"
+        if offset < 0:
+            return None, "thumb_offset_ms cannot be negative"
+        options['thumb_offset_ms'] = offset
+    names = raw.get('collaborators') or []
+    if isinstance(names, str):
+        names = [n for n in re.split(r'[\s,]+', names) if n]
+    if not isinstance(names, list):
+        return None, "collaborators must be a list of usernames"
+    clean: list[str] = []
+    for name in names:
+        username = str(name or '').strip().lstrip('@')
+        if not username:
+            continue
+        if not IG_USERNAME_RE.fullmatch(username):
+            return None, f"Invalid Instagram username: {name!r}"
+        if username.lower() not in {c.lower() for c in clean}:
+            clean.append(username)
+    if len(clean) > REEL_MAX_COLLABORATORS:
+        return None, f"A Reel can have at most {REEL_MAX_COLLABORATORS} collaborators."
+    if clean:
+        options['collaborators'] = clean
+    return options, None
+
+
+def _reel_publish_kwargs(raw) -> dict:
+    """The stored Reel options as keyword arguments for ``publish_reel_post``.
+
+    A post with none passes nothing, so the client call is exactly what it was
+    before the option existed.
+    """
+    if not raw:
+        return {}
+    try:
+        stored = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return {}
+    options, error = _clean_reel_options(stored)
+    if error or not options:
+        return {}
+    return options
+
+
 def _instagram_publish_for_post(
     access_token: str,
     *,
@@ -8617,6 +8703,7 @@ def _instagram_publish_for_post(
     ig_post_type = 'feed'
     media_items: list = []
     user_tags: list = []
+    reel_options: dict = {}
     if standalone_post_id:
         row = get_standalone_post(standalone_post_id)
         if row:
@@ -8635,6 +8722,7 @@ def _instagram_publish_for_post(
                     user_tags = json.loads(raw_tags)
                 except (ValueError, TypeError):
                     user_tags = []
+            reel_options = _reel_publish_kwargs(row.get('ig_reel_options'))
 
     resolved, err = _ensure_instagram_media(
         content, image_url, ig_post_type, media_items,
@@ -8648,12 +8736,12 @@ def _instagram_publish_for_post(
     caption = (content or "")[:2200]
 
     if ig_post_type == 'feed' and video_url:
-        return client.publish_reel_post(access_token, caption, resolved[0]["url"])
+        return client.publish_reel_post(access_token, caption, resolved[0]["url"], **reel_options)
 
     if ig_post_type == 'carousel':
         return client.publish_carousel_post(access_token, caption, resolved)
     if ig_post_type == 'reel':
-        return client.publish_reel_post(access_token, caption, resolved[0]["url"])
+        return client.publish_reel_post(access_token, caption, resolved[0]["url"], **reel_options)
     if ig_post_type == 'story':
         item = resolved[0]
         if item.get("kind") == "video":
