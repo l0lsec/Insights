@@ -156,6 +156,30 @@
                                     </button>
                                     <span class="small text-muted" id="ig-media-hint-{{ group.id }}"></span>
                                 </div>
+                                {# Who else is on the Instagram post. Collaborators are invited and show
+                                   on the post only once they accept; tags are for Reels (a photo is
+                                   tagged in the 👁️ Preview, where its position matters). Both save
+                                   on change and apply to every Instagram account on this card. #}
+                                <div class="ig-people border rounded p-2 mb-2" id="ig-people-{{ group.id }}">
+                                    <div class="d-flex flex-wrap gap-2 align-items-start">
+                                        <div style="flex: 1 1 240px;">
+                                            <label class="small text-muted mb-1" for="ig-collaborators-{{ group.id }}">🤝 Collaborators <span>(up to {{ IG_MAX_COLLABORATORS }})</span></label>
+                                            <input type="text" class="form-control form-control-sm" id="ig-collaborators-{{ group.id }}"
+                                                   value="{% for h in group.ig.ig_collaborators %}@{{ h }}{% if not loop.last %}, {% endif %}{% endfor %}"
+                                                   placeholder="@username, @username" autocomplete="off" spellcheck="false"
+                                                   onchange="saveIgPeople({{ group.id }})">
+                                        </div>
+                                        <div class="ig-reel-tags-col{% if group.ig.ig_effective_format != 'reel' %} d-none{% endif %}" style="flex: 1 1 240px;">
+                                            <label class="small text-muted mb-1" for="ig-reel-tags-{{ group.id }}">🏷️ Tag people <span>(Reels)</span></label>
+                                            <input type="text" class="form-control form-control-sm" id="ig-reel-tags-{{ group.id }}"
+                                                   value="{% for h in group.ig.ig_reel_tags %}@{{ h }}{% if not loop.last %}, {% endif %}{% endfor %}"
+                                                   placeholder="@username, @username" autocomplete="off" spellcheck="false"
+                                                   onchange="saveIgPeople({{ group.id }})">
+                                        </div>
+                                    </div>
+                                    <div class="small text-muted mt-1">Collaborators receive an invite and only appear on the post once they accept. They must be public accounts. Stories can't have collaborators.</div>
+                                    <div class="small text-danger mt-1 d-none" id="ig-people-error-{{ group.id }}" role="alert"></div>
+                                </div>
                                 <!-- Multi-media builder for carousel / reel / story -->
                                 <div id="ig-media-builder-{{ group.id }}"
                                      class="border rounded p-2 mb-2 {% if group.ig.ig_post_type in [None, 'feed'] %}d-none{% endif %}"

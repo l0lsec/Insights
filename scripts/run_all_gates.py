@@ -216,12 +216,48 @@ PAGING_GATES = [
      ("scroll",)),
 ]
 
+# Instagram collaborators and Reel people-tags. One script, one gate per claim,
+# picked by argument. The client ones replace `requests` with a recorder and read
+# the HTTP the client would send; the rest drive the real routes, database and
+# publisher with a recording client. Nothing posts anywhere. Two run the pages'
+# JavaScript under node.
+IG_PEOPLE_GATES = [
+    ("check_ig_people.py", "IG_PEOPLE_CLIENT_OK",
+     "collaborators and Reel tags reach Instagram's request exactly as entered, on a reel, an image and a carousel",
+     ("client",)),
+    ("check_ig_people.py", "IG_PEOPLE_NONE_OK",
+     "a post with no collaborators or tags sends the same requests as before they existed",
+     ("none",)),
+    ("check_ig_people.py", "IG_PEOPLE_REFUSE_OK",
+     "a bad handle or too many collaborators is refused before any request or row is made",
+     ("refuse",)),
+    ("check_ig_people.py", "IG_PEOPLE_REJECT_OK",
+     "Instagram rejecting a collaborator fails the post naming them, publishes nothing, and is not retried without them",
+     ("reject",)),
+    ("check_ig_people.py", "IG_PEOPLE_PERSIST_OK",
+     "the new columns migrate an old database, the routes round-trip, and a card's people stay together",
+     ("persist",)),
+    ("check_ig_people.py", "IG_PEOPLE_PUBLISH_OK",
+     "Post now, the whole-card publish and the scheduler each deliver a post's collaborators and tags",
+     ("publish",)),
+    ("check_ig_people.py", "IG_PEOPLE_UI_OK",
+     "Write Manually, the card and the schedule page show the people controls, the invite copy and a queued post's people",
+     ("ui",)),
+    ("check_ig_people.py", "IG_PEOPLE_JS_OK",
+     "the Compose page's people functions send what the server expects, show a refusal and follow the format, under node",
+     ("js",)),
+    ("check_ig_people.py", "IG_PEOPLE_QUEUE_OK",
+     "the server-rendered queue row and the script redraw show the same collaborators and tags, under node",
+     ("queue",)),
+]
+
 # check_*.py files that are deliberately not gates, with the reason. Empty is the
 # healthy state: a script that is not a gate should not carry the check_ prefix.
 NOT_GATES = {}
 
 ALL_GATES = (ACCOUNT_GATES + ACCOUNT_JS_GATES + LIBRARY_GATES + COMPOSE_GATES
-             + VIDEO_GATES + MANUAL_POST_GATES + QUEUE_GATES + PAGING_GATES)
+             + VIDEO_GATES + MANUAL_POST_GATES + QUEUE_GATES + PAGING_GATES
+             + IG_PEOPLE_GATES)
 
 
 def _unpack(entry):

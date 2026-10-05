@@ -304,12 +304,46 @@ def init_db(db_path: str = DB_PATH) -> None:
         # it as a Reel). It is card-wide like image_url: the rows of a card share it.
         if "video_url" not in standalone_columns:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN video_url TEXT")
-        # ig_reel_options is a JSON object for an Instagram Reel:
-        # {"thumb_offset_ms": int, "collaborators": [username, ...]}. The cover frame
-        # and collaborators cannot be changed once a Reel is published, so they are
-        # stored on the post and sent with it, whenever the queue publishes it.
+        # ig_reel_options is a JSON object for an Instagram Reel's cover frame:
+        # {"thumb_offset_ms": int}. The cover frame cannot be changed once a Reel is
+        # published, so it is stored on the post and sent with it, whenever the queue
+        # publishes it. (It used to hold the Reel's collaborators too; see below.)
         if "ig_reel_options" not in standalone_columns:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN ig_reel_options TEXT")
+        # Instagram people on a post, both JSON lists of lowercase usernames.
+        # ig_collaborators are invited as collaborators (feed image, carousel and
+        # Reel; each must accept before they show on the post). ig_reel_tags are
+        # the accounts tagged when the post goes out as a Reel, where a tag is a
+        # username only. Kept apart from ig_user_tags, whose entries carry x/y
+        # positions on a photo and mean nothing on a video.
+        if "ig_collaborators" not in standalone_columns:
+            conn.execute("ALTER TABLE standalone_posts ADD COLUMN ig_collaborators TEXT")
+        if "ig_reel_tags" not in standalone_columns:
+            conn.execute("ALTER TABLE standalone_posts ADD COLUMN ig_reel_tags TEXT")
+        # A Reel's collaborators were first kept inside ig_reel_options. They now share
+        # ig_collaborators with every other format, so one list is what Compose shows
+        # and what publishes. Move any still in the old place; a row is touched only
+        # while it holds them there, so running this again changes nothing.
+        for row_id, raw_options, current in conn.execute(
+            "SELECT id, ig_reel_options, ig_collaborators FROM standalone_posts "
+            "WHERE ig_reel_options LIKE '%collaborators%'"
+        ).fetchall():
+            try:
+                options = json.loads(raw_options)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(options, dict) or "collaborators" not in options:
+                continue
+            moved = options.pop("collaborators")
+            names = list(dict.fromkeys(
+                str(name).strip().lstrip("@").lower()
+                for name in (moved if isinstance(moved, list) else []) if str(name).strip()
+            ))
+            conn.execute(
+                "UPDATE standalone_posts SET ig_collaborators = ?, ig_reel_options = ? WHERE id = ?",
+                (current or (json.dumps(names) if names else None),
+                 json.dumps(options) if options else None, row_id),
+            )
         # URL sources - stores extracted content from URLs for reuse
         conn.execute(
             """
@@ -2617,7 +2651,10 @@ def get_scheduled_post(scheduled_id: int, db_path: str = DB_PATH) -> Optional[sq
                    a.episode_id,
                    st.content AS standalone_content, st.platform AS standalone_platform,
                    st.image_url AS standalone_image_url,
-                   st.video_url AS standalone_video_url
+                   st.video_url AS standalone_video_url,
+                   st.ig_post_type AS standalone_ig_post_type,
+                   st.ig_collaborators AS standalone_ig_collaborators,
+                   st.ig_reel_tags AS standalone_ig_reel_tags
             FROM scheduled_posts sp
             LEFT JOIN social_posts soc ON sp.social_post_id = soc.id
             LEFT JOIN articles a ON sp.article_id = a.id
@@ -2790,7 +2827,10 @@ def list_scheduled_posts(
                    a.topic AS article_topic, a.content AS article_content,
                    st.content AS standalone_content, st.platform AS standalone_platform,
                    st.image_url AS standalone_image_url,
-                   st.video_url AS standalone_video_url
+                   st.video_url AS standalone_video_url,
+                   st.ig_post_type AS standalone_ig_post_type,
+                   st.ig_collaborators AS standalone_ig_collaborators,
+                   st.ig_reel_tags AS standalone_ig_reel_tags
             FROM scheduled_posts sp
             LEFT JOIN social_posts soc ON sp.social_post_id = soc.id
             LEFT JOIN articles a ON sp.article_id = a.id
@@ -2911,7 +2951,10 @@ def get_pending_scheduled_posts(db_path: str = DB_PATH) -> List[sqlite3.Row]:
                    a.episode_id,
                    st.content AS standalone_content, st.platform AS standalone_platform,
                    st.image_url AS standalone_image_url,
-                   st.video_url AS standalone_video_url
+                   st.video_url AS standalone_video_url,
+                   st.ig_post_type AS standalone_ig_post_type,
+                   st.ig_collaborators AS standalone_ig_collaborators,
+                   st.ig_reel_tags AS standalone_ig_reel_tags
             FROM scheduled_posts sp
             LEFT JOIN social_posts soc ON sp.social_post_id = soc.id
             LEFT JOIN articles a ON sp.article_id = a.id
@@ -3649,6 +3692,8 @@ def add_standalone_post(
     brief_run_id: Optional[int] = None,
     account_id: Optional[int] = None,
     video_url: Optional[str] = None,
+    ig_collaborators: Optional[list] = None,
+    ig_reel_tags: Optional[list] = None,
 ) -> int:
     """Save a standalone post (not tied to an article) and return its id.
     
@@ -3660,6 +3705,9 @@ def add_standalone_post(
         image_url: Optional URL of an image to attach to the post
         video_url: Optional URL of a video to attach. A post with a video
             publishes the video and ignores the image.
+        ig_collaborators / ig_reel_tags: usernames already cleaned by the caller
+            (see instagram_client.normalize_handles); stored as JSON, and only
+            meaningful on an Instagram row.
         repost: If True, marks this as an intentional duplicate that bypassed
             the import-time duplicate check so the same content can be posted
             again.
@@ -3677,10 +3725,12 @@ def add_standalone_post(
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
             """
-            INSERT INTO standalone_posts (source_type, source_content, platform, content, image_url, created_at, used, repost, brief_id, brief_run_id, account_id, video_url)
-            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+            INSERT INTO standalone_posts (source_type, source_content, platform, content, image_url, created_at, used, repost, brief_id, brief_run_id, account_id, video_url, ig_collaborators, ig_reel_tags)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (source_type, source_content, platform, content, image_url, created_at, 1 if repost else 0, brief_id, brief_run_id, account_id, video_url),
+            (source_type, source_content, platform, content, image_url, created_at, 1 if repost else 0, brief_id, brief_run_id, account_id, video_url,
+             json.dumps(ig_collaborators) if ig_collaborators else None,
+             json.dumps(ig_reel_tags) if ig_reel_tags else None),
         )
         conn.commit()
         return cur.lastrowid
@@ -4008,6 +4058,29 @@ def set_standalone_post_user_tags(
         conn.execute(
             "UPDATE standalone_posts SET ig_user_tags = ? WHERE id = ?",
             (payload, post_id),
+        )
+        conn.commit()
+
+
+def set_standalone_post_ig_people(
+    post_id: int,
+    collaborators: Optional[list] = None,
+    reel_tags: Optional[list] = None,
+    db_path: str = DB_PATH,
+) -> None:
+    """Set the Instagram collaborators and Reel tags of a standalone post.
+
+    Both are lists of usernames already cleaned by the caller; an empty list or
+    None clears that field. They are written together because the compose card
+    edits them as one pair, and a field left out would otherwise be ambiguous
+    between "unchanged" and "cleared".
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE standalone_posts SET ig_collaborators = ?, ig_reel_tags = ? WHERE id = ?",
+            (json.dumps(collaborators) if collaborators else None,
+             json.dumps(reel_tags) if reel_tags else None,
+             post_id),
         )
         conn.commit()
 

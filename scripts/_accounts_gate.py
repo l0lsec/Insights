@@ -72,8 +72,18 @@ class RecordingClient:
     def publish_text_post(self, access_token, text):
         return self._record("text", access_token, text=text)
 
-    def publish_image_post(self, access_token, text=None, image_url=None, user_tags=None):
-        return self._record("image", access_token, text=text, image=image_url)
+    def publish_image_post(self, access_token, text=None, image_url=None, user_tags=None,
+                           collaborators=None):
+        # Threads and Instagram share this method name. The Instagram-only
+        # arguments are recorded only when a caller passes them, so a Threads
+        # post (and an Instagram post with no people) records exactly what it
+        # always did.
+        extra = {}
+        if user_tags is not None:
+            extra["user_tags"] = user_tags
+        if collaborators is not None:
+            extra["collaborators"] = collaborators
+        return self._record("image", access_token, text=text, image=image_url, **extra)
 
     def publish_video_post(self, access_token, text=None, video_url=None):
         return self._record("video", access_token, text=text, video=video_url)
@@ -94,8 +104,29 @@ class RecordingClient:
         return self._record("text", page_access_token, page=page_id, text=text)
 
     # --- Instagram ------------------------------------------------------
-    def publish_reel_post(self, access_token, caption=None, video_url=None):
-        return self._record("video", access_token, text=caption, video=video_url)
+    # (publish_image_post above is Instagram's image method too.) Collaborators
+    # and tags are recorded only when passed, so a post with none records the
+    # same call as before they existed.
+    def publish_reel_post(self, access_token, caption=None, video_url=None,
+                          share_to_feed=True, thumb_offset_ms=None, collaborators=None,
+                          user_tags=None):
+        extra = {}
+        if thumb_offset_ms is not None:
+            extra["thumb_offset_ms"] = thumb_offset_ms
+        if collaborators is not None:
+            extra["collaborators"] = collaborators
+        if user_tags is not None:
+            extra["user_tags"] = user_tags
+        return self._record("video", access_token, text=caption, video=video_url, **extra)
+
+    def publish_carousel_post(self, access_token, caption=None, media_items=None,
+                              collaborators=None):
+        extra = {} if collaborators is None else {"collaborators": collaborators}
+        return self._record("carousel", access_token, text=caption,
+                            items=media_items, **extra)
+
+    def publish_story_post(self, access_token, image_url=None, video_url=None):
+        return self._record("story", access_token, image=image_url, video=video_url)
 
 
 def isolated_app():

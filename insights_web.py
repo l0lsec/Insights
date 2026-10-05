@@ -176,6 +176,7 @@ from database import (
     set_standalone_post_media,
     set_standalone_post_user_tags,
     set_standalone_post_reel_options,
+    set_standalone_post_ig_people,
     delete_standalone_post,
     delete_standalone_posts_bulk,
     mark_standalone_post_used,
@@ -318,6 +319,10 @@ from twitter_client import (
 )
 from instagram_client import (
     InstagramClient,
+    InstagramInputError,
+    MAX_COLLABORATORS,
+    MAX_REEL_TAGS,
+    normalize_handles,
     get_instagram_client,
     calculate_token_expiry as instagram_calculate_token_expiry,
     is_token_expired as instagram_is_token_expired,
@@ -4730,6 +4735,17 @@ def _scheduled_entry_view(row):
     entry['content_preview'] = content[:100] + ('...' if len(content) > 100 else '')
     # Only pending entries can be dragged to a new place in the queue.
     entry['is_draggable'] = entry.get('status') == 'pending'
+    # Collaborators and Reel tags live on the saved post and are read from it when
+    # the entry publishes; the queue shows what will go out. Reel tags only count
+    # when the post goes out as a Reel.
+    if entry.get('platform') == 'instagram':
+        entry['ig_collaborators'] = _json_list_column(entry, 'standalone_ig_collaborators')
+        reel = _ig_effective_format(
+            entry.get('standalone_ig_post_type'), entry.get('standalone_video_url')) == 'reel'
+        entry['ig_tags'] = _json_list_column(entry, 'standalone_ig_reel_tags') if reel else []
+    else:
+        entry['ig_collaborators'] = []
+        entry['ig_tags'] = []
     return entry
 
 
@@ -4785,6 +4801,12 @@ def _scheduled_queue_groups(rows):
         group['ids'] = [entry['id'] for entry in entries]
         group['members'] = slim
         group['platforms'] = platforms
+        # The row stands for every platform it goes to, so it shows the people
+        # on any of its Instagram entries (the group copies the first entry's
+        # fields, which may be another platform's).
+        for field in ('ig_collaborators', 'ig_tags'):
+            group[field] = list(dict.fromkeys(
+                handle for entry in entries for handle in entry.get(field, [])))
         group['source_type'] = (
             'social' if group.get('social_post_id')
             else 'standalone' if group.get('standalone_post_id') else None
@@ -5592,6 +5614,61 @@ def _row_video(row):
     return (row['video_url'] if 'video_url' in row.keys() else None) or ''
 
 
+def _ig_effective_format(ig_post_type, video_url):
+    """What an Instagram row actually publishes as.
+
+    A row left on the default feed format but carrying a video goes out as a
+    Reel (feed video no longer exists), and Reel-only things like people tags
+    follow that, not the stored format.
+    """
+    ig_post_type = ig_post_type or 'feed'
+    return 'reel' if ig_post_type == 'feed' and video_url else ig_post_type
+
+
+def _requested_ig_people(payload=None):
+    """The Instagram collaborators and Reel tags a request carries, cleaned.
+
+    Reads ``ig_collaborators`` and ``ig_reel_tags`` from a form or a JSON body,
+    each as a list, a JSON list in a string, or text with one username per comma
+    or line. A field the request does not carry comes back as None ("leave it
+    alone"); one it carries empty comes back as [] ("clear it"). The cleaning is
+    the client's own (``normalize_handles``), so a handle the API would refuse
+    is refused here, with the same words, before anything is saved.
+
+    Returns ``(collaborators, reel_tags, error)``; ``error`` is a ready-to-return
+    response when the input is not usable.
+    """
+    payload = payload if payload is not None else (request.get_json(silent=True) or request.form)
+
+    def read(field):
+        if hasattr(payload, 'getlist'):
+            values = payload.getlist(field)
+            if not values:
+                return None
+            raw = values if len(values) > 1 else values[0]
+        else:
+            raw = payload.get(field)
+            if raw is None:
+                return None
+        if isinstance(raw, str) and raw.strip().startswith('['):
+            try:
+                raw = json.loads(raw)
+            except ValueError:
+                pass
+        return raw
+
+    try:
+        raw_collaborators = read('ig_collaborators')
+        raw_tags = read('ig_reel_tags')
+        collaborators = (None if raw_collaborators is None else normalize_handles(
+            raw_collaborators, what='collaborator', limit=MAX_COLLABORATORS))
+        reel_tags = (None if raw_tags is None else normalize_handles(
+            raw_tags, what='tagged account', limit=MAX_REEL_TAGS))
+    except InstagramInputError as exc:
+        return None, None, (jsonify({"error": str(exc)}), 400)
+    return collaborators, reel_tags, None
+
+
 def _row_target_key(row):
     """The (platform, account) a saved post row publishes to.
 
@@ -5712,7 +5789,7 @@ def _inject_publish_targets():
     after a tick), so the target list comes from the environment rather than
     each caller remembering to pass it.
     """
-    return {'PUBLISH_TARGETS': _publish_target_options()}
+    return {'PUBLISH_TARGETS': _publish_target_options(), 'IG_MAX_COLLABORATORS': MAX_COLLABORATORS}
 
 
 def _row_account_label(row):
@@ -5792,6 +5869,13 @@ def _enrich_post_group(group, scheduled_info, posted_info, brief_names):
             'ig_post_type': (ig_row['ig_post_type'] if 'ig_post_type' in ig_row.keys() else None) or 'feed',
             'media_items': _json_list_column(ig_row, 'media_items'),
             'ig_user_tags': _json_list_column(ig_row, 'ig_user_tags'),
+            'ig_collaborators': _json_list_column(ig_row, 'ig_collaborators'),
+            'ig_reel_tags': _json_list_column(ig_row, 'ig_reel_tags'),
+            # What the post goes out as: a video makes the default format a Reel,
+            # and Reel tags only apply there.
+            'ig_effective_format': _ig_effective_format(
+                (ig_row['ig_post_type'] if 'ig_post_type' in ig_row.keys() else None),
+                _row_video(ig_row)),
         }
     return card
 
@@ -7060,6 +7144,18 @@ def compose_create_post():
     if not content:
         return jsonify({"error": "Content is required"}), 400
 
+    # Collaborators and Reel tags belong to the Instagram rows. They are read and
+    # refused here, before any row exists, so a bad handle leaves nothing behind;
+    # and sent without an Instagram target they are refused rather than dropped.
+    collaborators, reel_tags, people_error = _requested_ig_people()
+    if people_error:
+        return people_error
+    if (collaborators or reel_tags) and not any(t['platform'] == 'instagram' for t in targets):
+        return jsonify({
+            "error": "Collaborators and tags are Instagram features: tick an Instagram "
+                     "account for this post, or clear them."
+        }), 400
+
     # Last, so a request that was going to be refused anyway never uploads a
     # video; and before any row is written, so a video that cannot be used
     # leaves no half-made post behind.
@@ -7076,6 +7172,8 @@ def compose_create_post():
             image_url=image_url,
             video_url=video_url,
             account_id=target['account_id'],
+            **({'ig_collaborators': collaborators, 'ig_reel_tags': reel_tags}
+               if target['platform'] == 'instagram' else {}),
         )
         for target in targets
     ]
@@ -7100,6 +7198,8 @@ def compose_create_post():
         "targets": targets,
         "warnings": target_errors,
         "video_warnings": video_report.get('warnings', []),
+        "ig_collaborators": collaborators or [],
+        "ig_reel_tags": reel_tags or [],
     })
 
 
@@ -7339,14 +7439,30 @@ def _find_target_row(rows, platform, account_id):
     return None
 
 
-def _copy_post_to_target(post, platform, account_id):
+def _card_ig_people(rows):
+    """The (collaborators, reel tags) the card's Instagram rows already carry."""
+    for row in rows or ():
+        if row['platform'] == 'instagram':
+            return _json_list_column(row, 'ig_collaborators'), _json_list_column(row, 'ig_reel_tags')
+    return [], []
+
+
+def _copy_post_to_target(post, platform, account_id, siblings=()):
     """Save ``post``'s copy, image, video and brief as a new row for one target.
 
     This is what "also post it there" means in the database: the row per
     (platform, copy) is the only record that a card goes to that platform.
+    A new Instagram row joins whatever collaborators and Reel tags the card's
+    other Instagram rows already carry (``siblings`` are the card's rows), or a
+    second Instagram account would publish the same card without them.
     Returns the new row's id.
     """
+    ig_collaborators, ig_reel_tags = (
+        _card_ig_people([post, *siblings]) if platform == 'instagram' else ([], [])
+    )
     return add_standalone_post(
+        ig_collaborators=ig_collaborators or None,
+        ig_reel_tags=ig_reel_tags or None,
         source_type=post['source_type'],
         source_content=post['source_content'],
         platform=platform,
@@ -7416,7 +7532,7 @@ def compose_toggle_post_platform(post_id: int):
         if existing:
             return jsonify({"error": f"This post already goes to {target_name}"}), 400
 
-        new_id = _copy_post_to_target(post, platform, account_id)
+        new_id = _copy_post_to_target(post, platform, account_id, siblings=rows)
         ids = [row['id'] for row in rows] + [new_id]
         return jsonify({
             "success": True,
@@ -7599,7 +7715,8 @@ def compose_bulk_add_platform():
             is_new = row is None
             if is_new:
                 row = get_standalone_post(
-                    _copy_post_to_target(head, target['platform'], target['account_id']))
+                    _copy_post_to_target(head, target['platform'], target['account_id'],
+                                         siblings=card_rows))
                 card_rows.append(row)
                 stats['added'] += 1
                 changed = True
@@ -8118,6 +8235,13 @@ def compose_set_post_media(post_id: int):
         return jsonify({"error": "Carousels need between 2 and 10 items."}), 400
     if ig_post_type in ('reel', 'story') and len(clean) > 1:
         return jsonify({"error": f"A {ig_post_type} takes a single media item."}), 400
+    if ig_post_type == 'story':
+        held = _json_list_column(post, 'ig_collaborators')
+        if held:
+            return jsonify({
+                "error": "Instagram Stories cannot have collaborators. Clear "
+                         + ", ".join('@' + c for c in held) + " first."
+            }), 400
 
     set_standalone_post_media(post_id, ig_post_type, clean)
     return jsonify({"success": True, "ig_post_type": ig_post_type, "media_items": clean})
@@ -8128,10 +8252,14 @@ def compose_set_post_reel_options(post_id: int):
     """Set an Instagram Reel's cover frame and collaborators.
 
     JSON/Form: ``thumb_offset_ms`` (milliseconds into the video) and
-    ``collaborators`` (a list, or a comma/space separated string, of up to three
+    ``collaborators`` (a list, or a comma separated string, of up to three
     usernames). Instagram cannot change either once the Reel is published, so
     they are stored on the post and sent when it publishes, now or from the
-    queue. An empty body clears them.
+    queue. An empty body clears them; a key left out stays as it is.
+
+    The cover frame belongs to this post's row. The collaborators are the same
+    list the Compose card shows for every Instagram format, so they are written
+    to every Instagram row of the card (``post_ids``), not kept in a second place.
     """
     post = get_standalone_post(post_id)
     if not post:
@@ -8142,8 +8270,37 @@ def compose_set_post_reel_options(post_id: int):
     options, error = _clean_reel_options(payload)
     if error:
         return jsonify({"error": error}), 400
-    set_standalone_post_reel_options(post_id, options or None)
-    return jsonify({"success": True, "reel_options": options})
+
+    # An empty body clears both; otherwise only the keys sent are changed
+    # (collaborators of None means "leave them as they are").
+    sent = {'thumb_offset_ms', 'collaborators'} & set(payload)
+    if not sent:
+        thumb, collaborators = None, []
+    else:
+        thumb = (options.get('thumb_offset_ms') if 'thumb_offset_ms' in sent
+                 else _reel_publish_kwargs(post['ig_reel_options']).get('thumb_offset_ms'))
+        collaborators = options.get('collaborators', []) if 'collaborators' in sent else None
+
+    rows = []
+    if collaborators is not None:
+        rows = [row for row in _card_rows(post, _requested_post_ids(post_id))
+                if row['platform'] == 'instagram']
+        if collaborators and not rows:
+            return jsonify({"error": "This post does not go to Instagram."}), 400
+        if collaborators and any(
+                _ig_effective_format(row['ig_post_type'], _row_video(row)) == 'story' for row in rows):
+            return jsonify({"error": "Instagram Stories cannot have collaborators."}), 400
+
+    set_standalone_post_reel_options(post_id, {'thumb_offset_ms': thumb} if thumb is not None else None)
+    for row in rows:
+        set_standalone_post_ig_people(row['id'], collaborators, _json_list_column(row, 'ig_reel_tags'))
+    saved = {}
+    if thumb is not None:
+        saved['thumb_offset_ms'] = thumb
+    final = collaborators if collaborators is not None else _json_list_column(post, 'ig_collaborators')
+    if final:
+        saved['collaborators'] = final
+    return jsonify({"success": True, "reel_options": saved})
 
 
 @app.route('/compose/post/<int:post_id>/user-tags', methods=['POST'])
@@ -8189,6 +8346,55 @@ def compose_set_post_user_tags(post_id: int):
 
     set_standalone_post_user_tags(post_id, clean)
     return jsonify({"success": True, "user_tags": clean})
+
+
+@app.route('/compose/post/<int:post_id>/ig-people', methods=['POST'])
+def compose_set_post_ig_people(post_id: int):
+    """Set an Instagram post's collaborators and Reel tags, on its whole card.
+
+    JSON/Form: ``ig_collaborators`` (up to 3 usernames: they are invited and
+    appear on the post only once they accept) and ``ig_reel_tags`` (usernames to
+    tag when the post is a Reel). Each is a list, a JSON list, or text with one
+    username per comma or line; one left out stays as it is, one sent empty is
+    cleared. The values go on every Instagram row of the card (``post_ids``), so
+    a second Instagram account cannot publish the same card without them.
+    """
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    collaborators, reel_tags, error = _requested_ig_people()
+    if error:
+        return error
+    if collaborators is None and reel_tags is None:
+        return jsonify({"error": "Send ig_collaborators and/or ig_reel_tags."}), 400
+
+    rows = [row for row in _card_rows(post, _requested_post_ids(post_id))
+            if row['platform'] == 'instagram']
+    if not rows:
+        return jsonify({"error": "This post does not go to Instagram."}), 400
+
+    if collaborators:
+        for row in rows:
+            if _ig_effective_format(row['ig_post_type'], _row_video(row)) == 'story':
+                return jsonify({
+                    "error": "Instagram Stories cannot have collaborators. Change the "
+                             "format first, or clear them."
+                }), 400
+
+    for row in rows:
+        set_standalone_post_ig_people(
+            row['id'],
+            collaborators if collaborators is not None else _json_list_column(row, 'ig_collaborators'),
+            reel_tags if reel_tags is not None else _json_list_column(row, 'ig_reel_tags'),
+        )
+    saved = get_standalone_post(rows[0]['id'])
+    return jsonify({
+        "success": True,
+        "ig_collaborators": _json_list_column(saved, 'ig_collaborators'),
+        "ig_reel_tags": _json_list_column(saved, 'ig_reel_tags'),
+        "updated_ids": [row['id'] for row in rows],
+    })
 
 
 @app.route('/compose/post/<int:post_id>/stock-image', methods=['GET'])
@@ -8618,16 +8824,13 @@ def _ensure_instagram_media(
     return None, f"Unknown Instagram post type: {ig_post_type}"
 
 
-IG_USERNAME_RE = re.compile(r'[A-Za-z0-9._]{1,30}')
-REEL_MAX_COLLABORATORS = 3  # Instagram's limit for a Reel
-
-
 def _clean_reel_options(raw) -> tuple[dict | None, str | None]:
     """Validate Reel options from a request: ``(options, error)``.
 
     ``thumb_offset_ms`` is where the cover frame is taken (milliseconds into the
-    video); ``collaborators`` is up to three usernames. Missing keys are left
-    out, so an empty object clears both.
+    video); ``collaborators`` is up to three usernames, cleaned by the same
+    ``normalize_handles`` every other path uses. Missing keys are left out of the
+    result.
     """
     if not isinstance(raw, dict):
         return None, "Reel options must be an object"
@@ -8641,22 +8844,11 @@ def _clean_reel_options(raw) -> tuple[dict | None, str | None]:
         if offset < 0:
             return None, "thumb_offset_ms cannot be negative"
         options['thumb_offset_ms'] = offset
-    names = raw.get('collaborators') or []
-    if isinstance(names, str):
-        names = [n for n in re.split(r'[\s,]+', names) if n]
-    if not isinstance(names, list):
-        return None, "collaborators must be a list of usernames"
-    clean: list[str] = []
-    for name in names:
-        username = str(name or '').strip().lstrip('@')
-        if not username:
-            continue
-        if not IG_USERNAME_RE.fullmatch(username):
-            return None, f"Invalid Instagram username: {name!r}"
-        if username.lower() not in {c.lower() for c in clean}:
-            clean.append(username)
-    if len(clean) > REEL_MAX_COLLABORATORS:
-        return None, f"A Reel can have at most {REEL_MAX_COLLABORATORS} collaborators."
+    try:
+        clean = normalize_handles(raw.get('collaborators'), what='collaborator',
+                                  limit=MAX_COLLABORATORS)
+    except InstagramInputError as exc:
+        return None, str(exc)
     if clean:
         options['collaborators'] = clean
     return options, None
@@ -8704,12 +8896,16 @@ def _instagram_publish_for_post(
     media_items: list = []
     user_tags: list = []
     reel_options: dict = {}
+    collaborators: list = []
+    reel_tags: list = []
     if standalone_post_id:
         row = get_standalone_post(standalone_post_id)
         if row:
             row = dict(row)
             video_url = video_url or row.get('video_url')
             ig_post_type = row.get('ig_post_type') or 'feed'
+            collaborators = _json_list_column(row, 'ig_collaborators')
+            reel_tags = _json_list_column(row, 'ig_reel_tags')
             raw = row.get('media_items')
             if raw:
                 try:
@@ -8732,16 +8928,45 @@ def _instagram_publish_for_post(
     if err:
         return {"success": False, "error": {"message": err}, "friendly": err, "guard_error": True}
 
+    # The people on the post are checked before any request is made, and a post
+    # is refused rather than published without them: collaborators that cannot
+    # be sent (a Story takes none) or are not valid handles fail the post.
+    effective = _ig_effective_format(ig_post_type, video_url)
+    # A Reel's collaborators were first stored inside its options; init_db moves them
+    # to ig_collaborators, and until it has they still go out.
+    legacy_collaborators = reel_options.pop('collaborators', None) or []
+    if not collaborators and effective == 'reel':
+        collaborators = legacy_collaborators
+    try:
+        collaborators = normalize_handles(collaborators, limit=MAX_COLLABORATORS)
+        # Reel tags saved on a post that is not a Reel are not sent, so they are
+        # not checked either.
+        reel_tags = (normalize_handles(reel_tags, what='tagged account', limit=MAX_REEL_TAGS)
+                     if effective == 'reel' else [])
+    except InstagramInputError as exc:
+        err = str(exc)
+        return {"success": False, "error": {"message": err}, "friendly": err, "guard_error": True}
+    if collaborators and effective == 'story':
+        err = ("Instagram Stories cannot have collaborators. Remove "
+               + ", ".join('@' + c for c in collaborators)
+               + " or change the format, then post again.")
+        return {"success": False, "error": {"message": err}, "friendly": err, "guard_error": True}
+
     client = get_instagram_client()
     caption = (content or "")[:2200]
+    # Only what is set is passed on, so a post without people calls the client
+    # exactly as it always did.
+    people = {'collaborators': collaborators} if collaborators else {}
+    # A Reel also carries its cover frame (thumb_offset_ms) when one was set.
+    reel_people = dict(reel_options, **people, **({'user_tags': reel_tags} if reel_tags else {}))
 
     if ig_post_type == 'feed' and video_url:
-        return client.publish_reel_post(access_token, caption, resolved[0]["url"], **reel_options)
+        return client.publish_reel_post(access_token, caption, resolved[0]["url"], **reel_people)
 
     if ig_post_type == 'carousel':
-        return client.publish_carousel_post(access_token, caption, resolved)
+        return client.publish_carousel_post(access_token, caption, resolved, **people)
     if ig_post_type == 'reel':
-        return client.publish_reel_post(access_token, caption, resolved[0]["url"], **reel_options)
+        return client.publish_reel_post(access_token, caption, resolved[0]["url"], **reel_people)
     if ig_post_type == 'story':
         item = resolved[0]
         if item.get("kind") == "video":
@@ -8750,6 +8975,7 @@ def _instagram_publish_for_post(
     # feed (default)
     return client.publish_image_post(
         access_token, caption, resolved[0]["url"], user_tags=user_tags or None,
+        **people,
     )
 
 

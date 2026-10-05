@@ -696,6 +696,12 @@ th[onclick]:hover {
                             {% if group.standalone_video_url %}
                             <span class="badge bg-dark ms-1 video-badge" title="This post goes out with a video">🎬 Video</span>
                             {% endif %}
+                            {% if group.ig_collaborators %}
+                            <span class="badge bg-light text-dark border ms-1 ig-people-badge ig-collaborators-badge" title="Invited as collaborators on Instagram. They appear on the post once they accept.">🤝 {% for h in group.ig_collaborators %}@{{ h }}{% if not loop.last %}, {% endif %}{% endfor %}</span>
+                            {% endif %}
+                            {% if group.ig_tags %}
+                            <span class="badge bg-light text-dark border ms-1 ig-people-badge ig-tags-badge" title="Tagged in the Instagram Reel">🏷️ {% for h in group.ig_tags %}@{{ h }}{% if not loop.last %}, {% endif %}{% endfor %}</span>
+                            {% endif %}
                         </td>
                         <td>
                             <span class="queue-platforms">{% for m in group.members %}{{ queue_platform_badge(m) }}{% endfor %}</span>
@@ -1353,7 +1359,7 @@ function rebuildQueueTable(groups) {
                     ${group.posted_at ? `<br><small class="text-muted">Posted: ${escapeHtml(group.posted_at)}</small>` : ''}
                 </td>
                 <td>${getTypeBadge(group.post_type)}</td>
-                <td class="description-cell" style="max-width: 300px;">${contentPreview}${group.standalone_video_url ? ' <span class="badge bg-dark ms-1 video-badge" title="This post goes out with a video">🎬 Video</span>' : ''}</td>
+                <td class="description-cell" style="max-width: 300px;">${contentPreview}${group.standalone_video_url ? ' <span class="badge bg-dark ms-1 video-badge" title="This post goes out with a video">🎬 Video</span>' : ''}${(group.ig_collaborators || []).length ? ' <span class="badge bg-light text-dark border ms-1 ig-people-badge ig-collaborators-badge" title="Invited as collaborators on Instagram. They appear on the post once they accept.">🤝 ' + group.ig_collaborators.map(h => '@' + escapeHtml(h)).join(', ') + '</span>' : ''}${(group.ig_tags || []).length ? ' <span class="badge bg-light text-dark border ms-1 ig-people-badge ig-tags-badge" title="Tagged in the Instagram Reel">🏷️ ' + group.ig_tags.map(h => '@' + escapeHtml(h)).join(', ') + '</span>' : ''}</td>
                 <td>
                     <span class="queue-platforms">${group.members.map(getPlatformBadge).join('')}</span>${multi ? `
                     <button type="button" class="btn btn-sm btn-link p-0 ms-1 queue-expand-btn" data-group-id="${group.id}" aria-expanded="false" title="Show each platform separately">▸ By platform</button>` : ''}

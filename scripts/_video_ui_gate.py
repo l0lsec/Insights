@@ -118,6 +118,9 @@ async function run(scenario) {
       createElement: () => new El('li'),
     },
     cardIdsParam: () => '4,5,6',
+    // renderPostVideo tells the Instagram people block the card's video changed
+    // (a Reel takes tags); that block is covered by check_ig_people.py js.
+    igRefreshPeople: () => {},
     showToast: (message, type) => log.toast.push([type, message]),
     confirm: () => { log.confirm++; return scenario.confirm !== false; },
     fetch: async (url, init) => {

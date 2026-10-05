@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import logging
+import re
 import secrets
 import time
 from datetime import datetime, timedelta
@@ -58,6 +59,176 @@ _ERROR_SUBCODE_MESSAGES = {
     2207042: "Instagram publishing rate limit reached (max API posts per 24 hours).",
 }
 _RATE_LIMIT_CODES = {4, 9, 17}
+
+
+# People on a post. Meta's reference for POST /{ig-user-id}/media says
+# `collaborators` takes "up to 3" usernames (Feed image, Reels and Carousel only,
+# not Stories); its read-side edge for the same data says 5, and some publishing
+# tools repeat that. The write-side parameter is the one this client sends, so
+# 3 is the limit enforced here. It is one constant so it is one edit if Meta's
+# two pages are ever reconciled.
+MAX_COLLABORATORS = 3
+# People tags on a Reel. Instagram's own limit on tagged accounts per post.
+MAX_REEL_TAGS = 20
+
+# Letters, numbers, periods and underscores, 1 to 30 characters.
+_HANDLE_RE = re.compile(r"^[a-z0-9._]{1,30}$")
+
+
+class InstagramInputError(ValueError):
+    """A collaborator or tag the Instagram API would never accept.
+
+    Raised before any request is made, so a bad handle never costs a container
+    and never reaches Instagram as a vaguer error.
+    """
+
+
+def normalize_handles(values, *, what: str = "collaborator", limit: int | None = None) -> list[str]:
+    """Clean a list of Instagram usernames: trim, drop one "@", lowercase, dedupe.
+
+    ``values`` is a list of strings (or ``{"username": ...}`` dicts), or one
+    string whose entries are separated by commas or new lines. Spaces do NOT
+    separate entries: "jane doe" is one entry, and an invalid one, so a typo is
+    refused instead of silently becoming two accounts. Blank entries are ignored
+    (an empty row in a form); anything else that is not a valid handle raises
+    ``InstagramInputError`` naming it. Order is kept, first spelling wins.
+
+    ``limit`` is the most handles allowed once cleaned; going over raises too,
+    rather than quietly keeping the first few.
+    """
+    if values is None:
+        return []
+    if isinstance(values, str):
+        values = re.split(r"[,\n]", values)
+    elif isinstance(values, dict):
+        values = [values]
+    elif not isinstance(values, (list, tuple, set)):
+        raise InstagramInputError(f"{values!r} is not a list of Instagram usernames.")
+    clean: list[str] = []
+    for raw in values:
+        if isinstance(raw, dict):
+            raw = raw.get("username")
+        if raw is None:
+            continue
+        if not isinstance(raw, str):
+            raise InstagramInputError(f"Invalid Instagram username {raw!r} for a {what}.")
+        entry = raw.strip()
+        if not entry:
+            continue
+        handle = entry[1:] if entry.startswith("@") else entry
+        handle = handle.lower()
+        if not _HANDLE_RE.match(handle):
+            raise InstagramInputError(
+                f"Invalid Instagram username {entry!r} for a {what}: use letters, "
+                "numbers, periods and underscores only (up to 30 characters, no spaces)."
+            )
+        if handle not in clean:
+            clean.append(handle)
+    if limit is not None and len(clean) > limit:
+        raise InstagramInputError(
+            f"Instagram allows at most {limit} {what}{'' if limit == 1 else 's'} on a post; "
+            f"this one has {len(clean)} ({', '.join('@' + h for h in clean)})."
+        )
+    return clean
+
+
+def _people_refusal(error: InstagramInputError) -> dict:
+    """The failure result for input refused before any request was made."""
+    message = str(error)
+    return {
+        "success": False,
+        "error": {"message": message},
+        "friendly": message,
+        # Retrying the same input can only fail the same way.
+        "guard_error": True,
+    }
+
+
+def _encode_handles(handles: list[str]) -> str:
+    """A handle list as the JSON array string the API takes (compact, as proven live)."""
+    return json.dumps(handles, separators=(",", ":"))
+
+
+def _encode_reel_tags(handles: list[str]) -> str:
+    """Reel people-tags. Reels take usernames only: x/y positions apply to images."""
+    return json.dumps([{"username": h} for h in handles], separators=(",", ":"))
+
+
+# Sub-codes that are about the media or the rate limit, never the people on it.
+_PEOPLE_HINTS = ("collaborator", "invalid user id", "user not visible", "not visible", "invite")
+# "User not visible": Meta's answer for an account that is private, age-restricted
+# or otherwise cannot be added. Reported by users of the API; not in Meta's docs.
+_PEOPLE_SUBCODES = {2207066}
+
+
+def _explain_people_rejection(
+    error_data: dict, collaborators: list[str], tagged: list[str]
+) -> dict | None:
+    """If a container refusal is about the people on the post, say so by name.
+
+    Returns None when the error is about something else (the media, the rate
+    limit), so the usual message stands. Otherwise returns the failure fields to
+    merge into the result. When Meta's payload names a handle, only that handle
+    is blamed; when it says only that a user was invalid, every account sent is
+    listed, because guessing which one would be wrong half the time.
+    """
+    if not (collaborators or tagged):
+        return None
+    err = error_data.get("error", error_data) if isinstance(error_data, dict) else {}
+    if not isinstance(err, dict):
+        return None
+    if err.get("error_subcode") in _ERROR_SUBCODE_MESSAGES or err.get("code") in _RATE_LIMIT_CODES:
+        return None
+    detail = (err.get("error_user_msg") or err.get("message") or "").strip()
+    haystack = " ".join(
+        str(err.get(k) or "") for k in ("error_user_msg", "error_user_title", "message")
+    ).lower()
+
+    def mentioned(handle):
+        return re.search(rf"(?<![a-z0-9._]){re.escape(handle)}(?![a-z0-9._])", haystack)
+
+    named_collab = [h for h in collaborators if mentioned(h)]
+    named_tag = [h for h in tagged if mentioned(h)]
+    about_people = (
+        err.get("error_subcode") in _PEOPLE_SUBCODES
+        or any(hint in haystack for hint in _PEOPLE_HINTS)
+        or bool(named_collab or named_tag)
+    )
+    if not about_people:
+        return None
+
+    def at(handles):
+        return ", ".join("@" + h for h in handles)
+
+    if named_collab or named_tag:
+        parts = []
+        if named_collab:
+            parts.append(f"collaborator {at(named_collab)}" if len(named_collab) == 1
+                         else f"collaborators {at(named_collab)}")
+        if named_tag:
+            parts.append(f"tagged account {at(named_tag)}" if len(named_tag) == 1
+                         else f"tagged accounts {at(named_tag)}")
+        subject = " and ".join(parts)
+        fix = at(named_collab + named_tag)
+    else:
+        parts = []
+        if collaborators:
+            parts.append(f"collaborators {at(collaborators)}")
+        if tagged:
+            parts.append(f"tagged accounts {at(tagged)}")
+        subject = "one of the accounts on this post (" + "; ".join(parts) + "), and did not say which"
+        fix = "each of " + at(collaborators + tagged)
+        if len(collaborators) + len(tagged) == 1:
+            only = (collaborators or tagged)[0]
+            subject = ("collaborator @" if collaborators else "tagged account @") + only
+            fix = "@" + only
+    message = (
+        f"Instagram rejected {subject}"
+        + (f" ({detail})" if detail else "")
+        + ". A collaborator or tagged account must be an existing public account. "
+        f"Nothing was published; remove or correct {fix} and try again."
+    )
+    return {"friendly": message, "people_error": True, "guard_error": True}
 
 
 def _friendly_error(error_data: dict) -> str:
@@ -234,11 +405,20 @@ class InstagramClient:
             return caption[:INSTAGRAM_CAPTION_LIMIT - 3] + "..."
         return caption
 
-    def _create_container(self, params: dict) -> tuple[Optional[str], Optional[dict]]:
+    def _create_container(
+        self,
+        params: dict,
+        collaborators: Optional[list] = None,
+        tagged: Optional[list] = None,
+    ) -> tuple[Optional[str], Optional[dict]]:
         """POST /me/media to create a media container.
 
         Returns (container_id, None) on success, or (None, error_result) where
         error_result is the standard failure dict.
+
+        ``collaborators`` and ``tagged`` are the handles already inside
+        ``params``; they change nothing about the request. They let a refusal be
+        explained by name, and the post is never retried without them.
         """
         try:
             response = requests.post(
@@ -265,12 +445,16 @@ class InstagramClient:
                 response.status_code,
                 error_data,
             )
-            return None, {
+            failure = {
                 "success": False,
                 "status_code": response.status_code,
                 "error": error_data,
                 "friendly": _friendly_error(error_data),
             }
+            people = _explain_people_rejection(error_data, collaborators or [], tagged or [])
+            if people:
+                failure.update(people)
+            return None, failure
 
         container_id = response.json().get("id")
         if not container_id:
@@ -421,6 +605,7 @@ class InstagramClient:
         caption: str,
         image_url: str,
         user_tags: Optional[list] = None,
+        collaborators: Optional[list] = None,
     ) -> dict:
         """Publish a single-image feed post to Instagram.
 
@@ -435,6 +620,9 @@ class InstagramClient:
             user_tags: Optional list of {"username": str, "x": float, "y": float}
                 people-tags (x/y are 0..1 positions on the photo). Feed photos
                 only — the API ignores/rejects tags elsewhere.
+            collaborators: Optional Instagram usernames to invite as collaborators
+                (at most MAX_COLLABORATORS). They receive an invite and the post
+                shows them only once they accept.
 
         Returns:
             Dict with success status and post details
@@ -445,6 +633,10 @@ class InstagramClient:
                 "error": {"message": "Instagram posts require an image"},
                 "friendly": "Instagram posts require an image.",
             }
+        try:
+            collaborators = normalize_handles(collaborators, limit=MAX_COLLABORATORS)
+        except InstagramInputError as exc:
+            return _people_refusal(exc)
 
         caption = self._truncate_caption(caption)
         logger.info("Creating Instagram image container with image: %s", image_url)
@@ -453,8 +645,8 @@ class InstagramClient:
             "image_url": image_url,
             "access_token": access_token,
         }
+        clean_tags = []
         if user_tags:
-            clean_tags = []
             for tag in user_tags:
                 username = (tag or {}).get("username", "").strip().lstrip("@")
                 if not username:
@@ -466,7 +658,12 @@ class InstagramClient:
                 })
             if clean_tags:
                 params["user_tags"] = json.dumps(clean_tags)
-        container_id, error = self._create_container(params)
+        if collaborators:
+            params["collaborators"] = _encode_handles(collaborators)
+        container_id, error = self._create_container(
+            params, collaborators=collaborators,
+            tagged=[t["username"].lower() for t in clean_tags],
+        )
         if error:
             return error
         return self._poll_and_publish(container_id, access_token)
@@ -476,6 +673,7 @@ class InstagramClient:
         access_token: str,
         caption: str,
         media_items: list,
+        collaborators: Optional[list] = None,
     ) -> dict:
         """Publish a carousel (2-10 images and/or videos) feed post.
 
@@ -483,6 +681,9 @@ class InstagramClient:
             access_token: Valid Instagram access token
             caption: The post caption (max 2200 characters)
             media_items: list of {"url": str, "kind": "image"|"video"}
+            collaborators: Optional Instagram usernames to invite (at most
+                MAX_COLLABORATORS). Sent on the carousel container itself: the
+                child items do not take collaborators.
 
         Returns:
             Dict with success status and post details
@@ -494,6 +695,10 @@ class InstagramClient:
                 "error": {"message": "carousel needs 2-10 items"},
                 "friendly": "Instagram carousels need between 2 and 10 items.",
             }
+        try:
+            collaborators = normalize_handles(collaborators, limit=MAX_COLLABORATORS)
+        except InstagramInputError as exc:
+            return _people_refusal(exc)
 
         caption = self._truncate_caption(caption)
 
@@ -530,12 +735,15 @@ class InstagramClient:
             child_ids.append(container_id)
 
         # Step 1b: create the parent carousel container
-        parent_id, error = self._create_container({
+        parent_params = {
             "media_type": "CAROUSEL",
             "children": ",".join(child_ids),
             "caption": caption,
             "access_token": access_token,
-        })
+        }
+        if collaborators:
+            parent_params["collaborators"] = _encode_handles(collaborators)
+        parent_id, error = self._create_container(parent_params, collaborators=collaborators)
         if error:
             return error
 
@@ -552,6 +760,7 @@ class InstagramClient:
         share_to_feed: bool = True,
         thumb_offset_ms: Optional[int] = None,
         collaborators: Optional[list] = None,
+        user_tags: Optional[list] = None,
     ) -> dict:
         """Publish a Reel (single video) to Instagram.
 
@@ -563,8 +772,13 @@ class InstagramClient:
             share_to_feed: Also show the reel on the main feed grid
             thumb_offset_ms: Where in the video the cover frame is taken, in
                 milliseconds (Instagram uses the first frame when absent)
-            collaborators: Up to 3 Instagram usernames invited as collaborators;
-                the post shows on their profiles once they accept
+            collaborators: Optional Instagram usernames to invite (at most
+                MAX_COLLABORATORS). They receive an invite and the post shows on
+                their profiles once they accept. Proven against the live API on
+                2026-10-05.
+            user_tags: Optional people to tag, as usernames (or {"username": ...}
+                dicts). A Reel has no photo to position them on, so only the
+                username is sent; Meta documents x/y for images and stories only.
 
         Returns:
             Dict with success status and post details
@@ -575,6 +789,11 @@ class InstagramClient:
                 "error": {"message": "reel requires a video"},
                 "friendly": "Instagram Reels require a video.",
             }
+        try:
+            collaborators = normalize_handles(collaborators, limit=MAX_COLLABORATORS)
+            tagged = normalize_handles(user_tags, what="tagged account", limit=MAX_REEL_TAGS)
+        except InstagramInputError as exc:
+            return _people_refusal(exc)
 
         caption = self._truncate_caption(caption)
         logger.info("Creating Instagram reel container with video: %s", video_url)
@@ -588,8 +807,12 @@ class InstagramClient:
         if thumb_offset_ms is not None:
             params["thumb_offset"] = str(int(thumb_offset_ms))
         if collaborators:
-            params["collaborators"] = json.dumps(list(collaborators))
-        container_id, error = self._create_container(params)
+            params["collaborators"] = _encode_handles(collaborators)
+        if tagged:
+            params["user_tags"] = _encode_reel_tags(tagged)
+        container_id, error = self._create_container(
+            params, collaborators=collaborators, tagged=tagged,
+        )
         if error:
             return error
         return self._poll_and_publish(container_id, access_token, max_retries=VIDEO_MAX_RETRIES)

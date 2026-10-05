@@ -641,6 +641,24 @@
                         🎬 The video posts instead of any image; Instagram sends it as a Reel.
                     </div>
                 </div>
+                {# Instagram only: shown while an Instagram account is ticked below. #}
+                <div class="mb-2 d-none" id="manual-ig-people">
+                    <div class="row g-2">
+                        <div class="col-md-6">
+                            <label class="form-label small mb-1" for="manual-ig-collaborators">🤝 Instagram collaborators <span class="text-muted">(optional, up to {{ IG_MAX_COLLABORATORS }})</span></label>
+                            <input type="text" class="form-control form-control-sm" id="manual-ig-collaborators"
+                                   placeholder="@username, @username" autocomplete="off" spellcheck="false">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small mb-1" for="manual-ig-reel-tags">🏷️ Tag people in a Reel <span class="text-muted">(optional)</span></label>
+                            <input type="text" class="form-control form-control-sm" id="manual-ig-reel-tags"
+                                   placeholder="@username, @username" autocomplete="off" spellcheck="false">
+                        </div>
+                    </div>
+                    <div class="small text-muted mt-1">
+                        Collaborators receive an invite and only appear on the post once they accept. They must be public accounts. Tags are used when the post goes out as a Reel.
+                    </div>
+                </div>
             </div>
 
             <!-- Freeform Tab -->
@@ -2286,7 +2304,15 @@ function clearManualVideo() {
     refreshManualVideoUI();
 }
 
+// The collaborators and tag fields belong to Instagram, so they show while an
+// Instagram account is ticked.
+function refreshManualIgPeople() {
+    const box = document.getElementById('manual-ig-people');
+    if (box) box.classList.toggle('d-none', !tickedPlatforms().includes('instagram'));
+}
+
 function updateManualComposerCount() {
+    refreshManualIgPeople();
     const input = document.getElementById('manual-input');
     const out = document.getElementById('manual-charcount');
     if (!input || !out) return;
@@ -2346,6 +2372,15 @@ function saveManualPost() {
     if (videoFile) formData.append('video', videoFile);
     else if (videoUrl) formData.append('video_url', videoUrl);
     else if (imageUrl) formData.append('image_url', imageUrl);
+    // Instagram's people, sent only while Instagram is ticked (the server refuses
+    // them otherwise). A bad handle or too many collaborators comes back as the
+    // error below and nothing is saved.
+    if (tickedPlatforms().includes('instagram')) {
+        const collaborators = document.getElementById('manual-ig-collaborators').value.trim();
+        const reelTags = document.getElementById('manual-ig-reel-tags').value.trim();
+        if (collaborators) formData.append('ig_collaborators', collaborators);
+        if (reelTags) formData.append('ig_reel_tags', reelTags);
+    }
 
     const btn = document.getElementById('manual-save-btn');
     const original = btn.innerHTML;
@@ -3475,6 +3510,7 @@ function renderPostVideo(postId, videoUrl, warnings) {
     const els = postVideoEls(postId);
     if (!els.section) return;
     els.section.dataset.videoUrl = videoUrl || '';
+    igRefreshPeople(postId);
     const player = els.preview.querySelector('video');
     if (videoUrl) {
         player.src = videoUrl;
@@ -3956,6 +3992,62 @@ function igSaveMedia(postId) {
         .catch(() => showToast('Could not save media', 'error'));
 }
 
+// What the card's Instagram post goes out as: a video makes the default format a
+// Reel, which is the only format that takes people tags.
+function igEffectiveFormat(postId) {
+    const type = igCurrentType(postId);
+    const section = document.getElementById('video-section-' + postId);
+    const hasVideo = !!(section && section.dataset.videoUrl);
+    return (type === 'feed' && hasVideo) ? 'reel' : type;
+}
+
+// Show the Reel tag field only where it applies. Called when the format or the
+// card's video changes.
+function igRefreshPeople(postId) {
+    const col = document.querySelector(`#ig-people-${postId} .ig-reel-tags-col`);
+    if (col) col.classList.toggle('d-none', igEffectiveFormat(postId) !== 'reel');
+}
+
+function igHandleList(value) {
+    return value.split(/[,\n]/).map(h => h.trim()).filter(Boolean);
+}
+
+// Save the card's collaborators and Reel tags. The server applies them to every
+// Instagram account on the card and answers with the cleaned lists, which replace
+// what was typed (so "@Jane, jane" reads back as "@jane"). A refusal (a handle with
+// a space, a fourth collaborator) is shown under the fields and nothing changes.
+function saveIgPeople(postId) {
+    const collaborators = document.getElementById('ig-collaborators-' + postId);
+    const reelTags = document.getElementById('ig-reel-tags-' + postId);
+    const error = document.getElementById('ig-people-error-' + postId);
+    const body = new FormData();
+    body.append('ig_collaborators', collaborators ? collaborators.value : '');
+    if (reelTags) body.append('ig_reel_tags', reelTags.value);
+    body.append('post_ids', cardIdsParam(postId));
+    const showError = (message) => {
+        if (!error) return;
+        error.textContent = message;
+        error.classList.toggle('d-none', !message);
+    };
+    return fetch(`/compose/post/${postId}/ig-people`, { method: 'POST', body: body })
+        .then(r => r.json().then(d => ({ ok: r.ok, d: d })))
+        .then(({ ok, d }) => {
+            if (!ok || !d.success) {
+                showError(d.error || 'Could not save collaborators');
+                return false;
+            }
+            showError('');
+            const show = (list) => list.map(h => '@' + h).join(', ');
+            if (collaborators) collaborators.value = show(d.ig_collaborators || []);
+            if (reelTags) reelTags.value = show(d.ig_reel_tags || []);
+            showToast(d.ig_collaborators.length
+                ? 'Collaborators saved. They are invited when the post goes out.'
+                : 'Saved', 'success');
+            return true;
+        })
+        .catch(() => { showError('Could not save collaborators'); return false; });
+}
+
 function igAddItem(postId, url, kind) {
     if (!url) return;
     const type = igCurrentType(postId);
@@ -4010,7 +4102,21 @@ function igUploadMedia(postId, input, kind) {
         .finally(() => { if (spinner) spinner.classList.add('d-none'); input.value = ''; });
 }
 
+window._igLastType = window._igLastType || {};   // postId -> format as last saved
+
 function switchIgType(postId, type) {
+    // A Story cannot carry collaborators, and silently dropping them would post
+    // without the people the user asked for, so the switch is refused until the
+    // field is cleared.
+    const held = document.getElementById('ig-collaborators-' + postId);
+    if (type === 'story' && held && igHandleList(held.value).length) {
+        showToast('Instagram Stories cannot have collaborators. Clear them first.', 'warning');
+        const select = document.getElementById('ig-type-' + postId);
+        if (select) select.value = window._igLastType[postId] || 'feed';
+        return;
+    }
+    window._igLastType[postId] = type;
+    igRefreshPeople(postId);
     const builder = document.getElementById('ig-media-builder-' + postId);
     const feedBlock = document.getElementById('ig-feed-block-' + postId);
     const isFeed = (type === 'feed');
@@ -4038,6 +4144,7 @@ function initIgMediaBuilders(root) {
         let tags = [];
         try { tags = JSON.parse(el.getAttribute('data-ig-tags') || '[]'); } catch (e) { tags = []; }
         window._igTags[postId] = Array.isArray(tags) ? tags : [];
+        window._igLastType[postId] = el.getAttribute('data-ig-type') || 'feed';
         renderIgStrip(postId);
     });
 }
