@@ -76,7 +76,8 @@ check("Post to all 3 accounts" in compose,
       "the card does not offer publishing to every account at once")
 check("Queue all 3 accounts" in compose,
       "the card does not offer queueing every account at once")
-check(re.search(r"/compose/post/\$\{postItem\.dataset\.postId\}/publish", compose),
+check(re.search(r"/compose/post/\$\{postId\}/publish", compose)
+      and "publishCardToAll(postItem.dataset.postId, cardPostIds(postItem, false), postItem)" in compose,
       "the publish-to-all button is not wired to the fan-out endpoint")
 check("body.append('all', '1')" in compose,
       "the queue-all button does not ask the server for a card-wide queue")

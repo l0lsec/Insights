@@ -6299,10 +6299,11 @@ def compose_posts_search():
     pattern = _post_search_pattern(find_text, case_sensitive, whole_word)
 
     posts = []
+    shown_groups = []
     matched_posts = 0
     total_matches = 0
     excluded_posts = 0
-    for group in groups:
+    for position, group in enumerate(groups):
         rows = _rows_for_groups([group], platform)
         if not rows:
             continue
@@ -6330,8 +6331,31 @@ def compose_posts_search():
                 'platforms': [row['platform'] for row in rows],
                 'content': content,
                 'index': group.get('display_index'),
+                # Where the card sits in the list the page is showing (same
+                # filters, same sort), 0-based: "Go to post" loads that far.
+                'position': position,
                 'match_count': count,
             })
+            shown_groups.append(group)
+
+    # The result's actions (delete, used, post now, schedule, queue) act on the
+    # whole card the way the card's own buttons do, so each result carries the
+    # card as the page would draw it: every row, every target, the used state.
+    if shown_groups:
+        ids = [row['id'] for group in shown_groups for row in group['platforms'].values()]
+        scheduled_info = get_pending_schedules_for_standalone_posts(ids)
+        posted_info = get_posted_info_for_standalone_posts(ids)
+        brief_names = {brief['id']: brief['name'] for brief in list_content_briefs()}
+        for post, group in zip(posts, shown_groups):
+            card = _enrich_post_group(group, scheduled_info, posted_info, brief_names)
+            post['card'] = {
+                'id': card['id'],
+                'post_ids': card['post_ids'],
+                'targets': card['targets'],
+                'used': card['used'],
+                'queued': [entry['platform'] for entry in card['platforms'] if entry['queued']],
+                'posted': [entry['platform'] for entry in card['platforms'] if entry['posted']],
+            }
 
     return jsonify({
         "success": True,

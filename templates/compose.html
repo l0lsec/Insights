@@ -447,6 +447,27 @@
         display: inline-block;
     }
     .ig-color-swatch.selected { border-color: #0d6efd; box-shadow: 0 0 0 2px rgba(13,110,253,0.35); }
+
+    /* Find & Replace: the card a result jumped to, and the way back to the results */
+    @keyframes jump-highlight-pulse {
+        0%   { box-shadow: 0 0 0 0 rgba(118, 75, 162, 0.55); }
+        70%  { box-shadow: 0 0 0 12px rgba(118, 75, 162, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(118, 75, 162, 0); }
+    }
+    .post-item.jump-highlight {
+        outline: 3px solid #764ba2;
+        outline-offset: 2px;
+        animation: jump-highlight-pulse 1.2s ease-out 2;
+    }
+    .search-back-pill {
+        position: fixed;
+        right: 24px;
+        bottom: 24px;
+        z-index: 1040;
+        border-radius: 999px;
+    }
+    .search-goto-badge { cursor: pointer; }
+    .search-goto-badge:hover { background-color: #495057 !important; }
 </style>
 
 <!-- Platform Connections: summary strip, full cards fold away behind it -->
@@ -1708,6 +1729,14 @@
     </div>
 </div>
 
+<!-- Back to the Find & Replace results after "Go to post" -->
+<div class="search-back-pill btn-group shadow d-none" id="search-back-pill" role="group">
+    <button type="button" class="btn btn-primary" onclick="reopenSearchResults()" title="Reopen Find & Replace with the same search">
+        🔍 Back to results
+    </button>
+    <button type="button" class="btn btn-primary" onclick="hideBackToSearchResults()" title="Dismiss" aria-label="Dismiss">✕</button>
+</div>
+
 <!-- Search and Replace Modal -->
 <div class="modal fade" id="searchReplaceModal" tabindex="-1">
     <div class="modal-dialog modal-lg">
@@ -1762,7 +1791,8 @@
                 </div>
                 <div class="text-muted small mb-2 d-none" id="search-click-hint">
                     💡 Click on highlighted text to exclude individual matches from replacement &middot;
-                    Use <strong>✏️ Edit</strong> to rewrite a post right here
+                    Use <strong>✏️ Edit</strong> to rewrite a post right here &middot;
+                    <strong>↗ Go to post</strong> jumps to it in the list, and <strong>⋯</strong> deletes, posts or schedules it
                 </div>
                 <div id="search-results-container" style="max-height: 400px; overflow-y: auto;">
                     <div class="text-center text-muted py-4" id="search-empty-state">
@@ -3661,57 +3691,66 @@ function savePostEdit(postId) {
     });
 }
 
+// Flip a card's used state on every row; resolves to the new state.
+async function requestToggleUsed(postId, postIds) {
+    const body = new FormData();
+    body.append('post_ids', postIds.join(','));
+    const res = await fetch(`/compose/post/${postId}/toggle-used`, { method: 'POST', body: body });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Could not update');
+    return data.used;
+}
+
 function toggleUsed(postId, btn) {
-    const usedBody = new FormData();
-    usedBody.append('post_ids', cardIdsParam(postId));
-    fetch(`/compose/post/${postId}/toggle-used`, { method: 'POST', body: usedBody })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                const postItem = btn.closest('.post-item');
-                const usedBadge = postItem.querySelector('.used-badge');
-                
-                if (data.used) {
-                    btn.innerHTML = '✓';
-                    btn.classList.remove('btn-outline-secondary');
-                    btn.classList.add('btn-outline-success');
-                    if (!usedBadge) {
-                        const badgeContainer = postItem.querySelector('.d-flex.align-items-center.gap-2');
-                        const newBadge = document.createElement('span');
-                        newBadge.className = 'badge bg-success used-badge';
-                        newBadge.textContent = '✓ Used';
-                        badgeContainer.appendChild(newBadge);
-                    }
-                } else {
-                    btn.innerHTML = '○';
-                    btn.classList.remove('btn-outline-success');
-                    btn.classList.add('btn-outline-secondary');
-                    if (usedBadge) usedBadge.remove();
-                }
-            }
-        });
+    const postItem = btn.closest('.post-item');
+    requestToggleUsed(postId, cardPostIds(postItem, false))
+        .then(used => setCardUsedUI(postItem, used))
+        .catch(e => showToast('Could not update: ' + e.message, 'error'));
+}
+
+// What "delete" asks before it takes a post off every platform it goes to.
+function deleteConfirmText(platforms) {
+    const unique = [...new Set(platforms)];
+    const where = unique.length > 1
+        ? ` It goes to ${unique.map(p => PLATFORM_LABELS[p] || p).join(', ')} — all of them will be deleted.`
+        : '';
+    return `Delete this post?${where}`;
+}
+
+// Delete every row of a card.
+async function requestDeleteCard(postId, postIds) {
+    const body = new FormData();
+    body.append('post_ids', postIds.join(','));
+    const res = await fetch(`/compose/post/${postId}/delete`, { method: 'POST', body: body });
+    const data = await res.json();
+    if (!res.ok || !data.success) throw new Error(data.error || 'Could not delete');
+    return data;
+}
+
+// A deleted card leaves the list one shorter. When it was on the page, the
+// next "Load more" must start one earlier too, or the card that moves up into
+// its place is skipped; when it was further down, only the total shrinks.
+function noteCardDeleted(wasLoaded) {
+    adjustPostCountBadge(-1);
+    const controls = loadMoreControls();
+    if (!controls) return;
+    const shown = parseInt(controls.more.dataset.offset || '0', 10);
+    const total = parseInt(controls.wrap.dataset.total || '0', 10);
+    setLoadMoreLabels(Math.max(0, shown - (wasLoaded ? 1 : 0)), Math.max(0, total - 1));
 }
 
 // Deletes the post everywhere it goes — untick a platform to drop just one.
 function deletePost(postId, btn) {
     const postItem = btn.closest('.post-item');
-    const platforms = Object.keys(cardPlatforms(postItem));
-    const where = platforms.length > 1
-        ? ` It goes to ${platforms.map(p => PLATFORM_LABELS[p] || p).join(', ')} — all of them will be deleted.`
-        : '';
-    if (!confirm(`Delete this post?${where}`)) return;
+    if (!confirm(deleteConfirmText(Object.keys(cardPlatforms(postItem))))) return;
 
-    const body = new FormData();
-    body.append('post_ids', cardIdsParam(postId));
-    fetch(`/compose/post/${postId}/delete`, { method: 'POST', body: body })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                postItem.remove();
-                adjustPostCountBadge(-1);
-                showToast('Post deleted', 'success');
-            }
-        });
+    requestDeleteCard(postId, cardPostIds(postItem, false))
+        .then(() => {
+            postItem.remove();
+            noteCardDeleted(true);
+            showToast('Post deleted', 'success');
+        })
+        .catch(e => showToast('Could not delete: ' + e.message, 'error'));
 }
 
 function toggleShowMore(btn, platform) {
@@ -3822,12 +3861,17 @@ async function refreshCardUsedState(postItem) {
     setCardUsedUI(postItem, states.every(Boolean));
 }
 
-async function postNowFromCard(btn, postId, platform, accountId) {
-    const label = PLATFORM_LABELS[platform] || platform;
+// What "post now" asks before one platform goes out.
+function postNowConfirmText(platform, label) {
     const extra = platform === 'instagram'
         ? ' An image is required and will be auto-attached if the post has none.'
         : '';
-    if (!confirm(`Post to ${label} now?${extra}`)) return;
+    return `Post to ${label} now?${extra}`;
+}
+
+async function postNowFromCard(btn, postId, platform, accountId) {
+    const label = PLATFORM_LABELS[platform] || platform;
+    if (!confirm(postNowConfirmText(platform, label))) return;
 
     const postItem = btn.closest('.post-item');
     const original = btn.innerHTML;
@@ -3845,22 +3889,19 @@ async function postNowFromCard(btn, postId, platform, accountId) {
 // Publish the same copy to every account on the card. The fan-out happens on
 // the server in one request, so a target failing does not abandon the ones
 // after it and the reply says exactly which landed.
-async function postNowAllFromCard(btn) {
-    const postItem = btn.closest('.post-item');
-    const targets = cardTargets(postItem);
-    if (!targets.length) return;
+function publishAllConfirmText(targets) {
     const labels = targets.map(t => t.account_label || PLATFORM_LABELS[t.platform] || t.platform).join(', ');
-    if (!confirm(`Publish this post to ${labels} now? This cannot be undone.`)) return;
+    return `Publish this post to ${labels} now? This cannot be undone.`;
+}
 
-    const original = btn.innerHTML;
-    btn.innerHTML = '⏳ Posting...';
-    btn.disabled = true;
+// Publish a card to every account it goes to, in one request, and say which
+// landed. Marks the posted chips on `postItem` when the card is on the page.
+// Resolves to the server's reply, or null when the request itself failed.
+async function publishCardToAll(postId, postIds, postItem) {
     try {
         const body = new FormData();
-        body.append('post_ids', cardPostIds(postItem, false).join(','));
-        const res = await fetch(`/compose/post/${postItem.dataset.postId}/publish`, {
-            method: 'POST', body: body,
-        });
+        body.append('post_ids', postIds.join(','));
+        const res = await fetch(`/compose/post/${postId}/publish`, { method: 'POST', body: body });
         const data = await res.json();
         if (!res.ok && !data.results) throw new Error(data.error || 'Could not publish');
 
@@ -3872,9 +3913,23 @@ async function postNowAllFromCard(btn) {
             alert(failed.map(r => `${r.account_label}: ${r.error}`).join('\n'));
         }
         showToast(data.message, data.success ? 'success' : (data.published ? 'warning' : 'error'));
+        return data;
     } catch (e) {
         showToast('Could not publish: ' + e.message, 'error');
+        return null;
     }
+}
+
+async function postNowAllFromCard(btn) {
+    const postItem = btn.closest('.post-item');
+    const targets = cardTargets(postItem);
+    if (!targets.length) return;
+    if (!confirm(publishAllConfirmText(targets))) return;
+
+    const original = btn.innerHTML;
+    btn.innerHTML = '⏳ Posting...';
+    btn.disabled = true;
+    await publishCardToAll(postItem.dataset.postId, cardPostIds(postItem, false), postItem);
     btn.innerHTML = original;
     btn.disabled = false;
     refreshCardUsedState(postItem);
@@ -3889,13 +3944,22 @@ async function queueAllFromCard(btn) {
     const original = btn.innerHTML;
     btn.innerHTML = '⏳ Queueing...';
     btn.disabled = true;
+    if (await queueCardToAll(postItem.dataset.postId, cardPostIds(postItem, false))) {
+        await refreshCard(postItem);
+    }
+    btn.innerHTML = original;
+    btn.disabled = false;
+}
+
+// Queue a card for every account it goes to, each in its own next slot, and
+// say what went in. Resolves to the server's reply, or null when the request
+// itself failed.
+async function queueCardToAll(postId, postIds) {
     try {
         const body = new FormData();
         body.append('all', '1');
-        body.append('post_ids', cardPostIds(postItem, false).join(','));
-        const res = await fetch(`/compose/post/${postItem.dataset.postId}/queue`, {
-            method: 'POST', body: body,
-        });
+        body.append('post_ids', postIds.join(','));
+        const res = await fetch(`/compose/post/${postId}/queue`, { method: 'POST', body: body });
         const data = await res.json();
         // A reply carrying a `queued` list is the queue answering, even when the
         // list is empty. Anything else is the request itself failing.
@@ -3910,12 +3974,11 @@ async function queueAllFromCard(btn) {
         } else {
             showToast(data.message || 'Queued', data.success && !data.partial ? 'success' : 'warning');
         }
-        await refreshCard(postItem);
+        return data;
     } catch (e) {
         showToast('Could not queue: ' + e.message, 'error');
+        return null;
     }
-    btn.innerHTML = original;
-    btn.disabled = false;
 }
 
 // ============ Instagram media builder (carousel / reel / story) ============
@@ -5132,10 +5195,21 @@ function replaceCard(postItem, html) {
     if (selectModeActive) updateSelectedCount();
 }
 
+// The badge reads "N saved posts", or "N of M posts" under a filter; a card
+// coming or going changes both numbers. (Stripping the non-digits, as this
+// once did, read "120 of 120 posts" as 120120.)
 function adjustPostCountBadge(delta) {
     const badge = document.getElementById('posts-count');
     if (!badge) return;
-    const current = parseInt((badge.textContent || '').replace(/[^0-9]/g, ''), 10);
+    const text = (badge.textContent || '').trim();
+    const filtered = /^(\d+) of (\d+) posts$/.exec(text);
+    if (filtered) {
+        const shown = Math.max(0, parseInt(filtered[1], 10) + delta);
+        const total = Math.max(0, parseInt(filtered[2], 10) + delta);
+        badge.textContent = `${shown} of ${total} posts`;
+        return;
+    }
+    const current = parseInt(text, 10);
     if (isNaN(current)) return;
     const next = Math.max(0, current + delta);
     badge.textContent = `${next} saved post${next !== 1 ? 's' : ''}`;
@@ -7538,8 +7612,10 @@ function openSearchReplaceModal() {
     document.getElementById('search-truncated-notice').classList.add('d-none');
     excludedMatches = {}; // Reset excluded matches
     openSearchEdits = {}; // Reset any inline editors
+    hideBackToSearchResults();  // a fresh search replaces the one it led back to
 
-    new bootstrap.Modal(document.getElementById('searchReplaceModal')).show();
+    // One instance for the modal: it is reopened from "Back to results" too.
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('searchReplaceModal')).show();
 }
 
 function performLiveSearch() {
@@ -7632,6 +7708,9 @@ async function doSearch(preserveState = false) {
     const matchingPosts = data.posts.map(post => {
         const content = post.content || '';
         const id = String(post.id);
+        // The whole card the result stands for, as the page would draw it: the
+        // result's actions reach every row and account of it, like the card's own.
+        const card = post.card || {};
         return {
             id: id,
             postIds: (post.post_ids || [post.id]).join(','),
@@ -7640,15 +7719,23 @@ async function doSearch(preserveState = false) {
             // Every platform this one card goes to — the edit covers all of them.
             platforms: post.platforms || [post.platform || 'unknown'],
             index: post.index != null ? String(post.index) : '?',
+            // Where the card sits in the filtered list, for "Go to post".
+            position: Number.isInteger(post.position) ? post.position : null,
+            cardId: String(card.id || post.id),
+            cardPostIds: (card.post_ids || post.post_ids || [post.id]).map(Number),
+            targets: card.targets || [],
+            used: !!card.used,
             matchCount: post.match_count,
             highlightedContent: highlightMatches(content, findText, caseSensitive, wholeWord, id),
             previewContent: replaceText ? showReplacementPreview(content, findText, replaceText, caseSensitive, wholeWord, id) : null
         };
     });
-    // The inline editor and preview helpers read from here.
+    // The inline editor, preview helpers and result actions read from here.
     searchReplacePostData = matchingPosts.map(p => ({
         id: p.id, postIds: p.postIds, content: p.content,
-        platform: p.platform, platforms: p.platforms, index: p.index
+        platform: p.platform, platforms: p.platforms, index: p.index,
+        position: p.position, cardId: p.cardId, cardPostIds: p.cardPostIds,
+        targets: p.targets, used: p.used
     }));
     searchResultInfo = {
         matchedPosts: data.matched_posts,
@@ -7693,42 +7780,61 @@ async function doSearch(preserveState = false) {
         truncatedNotice.classList.add('d-none');
     }
 
-    let html = '';
-    matchingPosts.forEach(post => {
-        const platformColor = PLATFORM_CHIP_COLORS[post.platform] || '#6c757d';
-        // One badge per platform the card covers, so it's clear what a replace touches.
-        const platformBadges = post.platforms.map(p =>
-            `<span class="badge" style="background-color: ${PLATFORM_CHIP_COLORS[p] || '#6c757d'};">` +
-            `${PLATFORM_CHIP_ICONS[p] || '📱'} ${PLATFORM_LABELS[p] || p}</span>`).join(' ');
-        
-        const editRows = Math.min(14, Math.max(4, post.content.split('\n').length + 1));
+    const html = matchingPosts.map(searchResultCardHtml).join('');
+    resultsList.innerHTML = html;
 
-        html += `
+    if (priorState) {
+        restoreSearchResultState(priorState);
+    } else {
+        // Reset select-all checkbox for a fresh search
+        document.getElementById('search-select-all').checked = true;
+    }
+    updateSearchSelectedCount();
+}
+
+// One Find & Replace result: the card's platforms, a "Post N" that jumps to it,
+// the highlighted copy, an inline editor, and the card's actions. The copy is
+// shown pre-wrap, so it sits flush against its tags or the indent shows too.
+function searchResultCardHtml(post) {
+    const platformColor = PLATFORM_CHIP_COLORS[post.platform] || '#6c757d';
+    // One badge per platform the card covers, so it's clear what a replace touches.
+    const platformBadges = post.platforms.map(p =>
+        `<span class="badge" style="background-color: ${PLATFORM_CHIP_COLORS[p] || '#6c757d'};">` +
+        `${PLATFORM_CHIP_ICONS[p] || '📱'} ${PLATFORM_LABELS[p] || p}</span>`).join(' ');
+
+    const editRows = Math.min(14, Math.max(4, post.content.split('\n').length + 1));
+
+    return `
             <div class="card mb-2 search-result-card" data-post-id="${post.id}">
-                <div class="card-header py-2 d-flex justify-content-between align-items-center" style="background-color: ${platformColor}15;">
-                    <div class="d-flex align-items-center gap-2">
+                <div class="card-header py-2 d-flex justify-content-between align-items-center flex-wrap gap-2" style="background-color: ${platformColor}15;">
+                    <div class="d-flex align-items-center gap-2 flex-wrap">
                         <input type="checkbox" class="form-check-input search-post-checkbox"
                                data-post-id="${post.id}" checked onchange="updateSearchSelectedCount()">
                         ${platformBadges}
-                        <span class="badge bg-secondary">Post ${post.index}</span>
+                        <button type="button" class="badge bg-secondary border-0 search-goto-badge"
+                                onclick="jumpToSearchResult('${post.id}')" title="Go to this post in the list">Post ${post.index} ↗</button>
+                        ${post.used ? '<span class="badge bg-success search-used-badge">✓ Used</span>' : ''}
                         <span class="badge bg-warning text-dark">${post.matchCount} match${post.matchCount !== 1 ? 'es' : ''}</span>
                     </div>
-                    <button type="button" class="btn btn-sm btn-outline-secondary search-edit-btn"
-                            onclick="startSearchResultEdit('${post.id}')" title="Edit this post inline">
-                        ✏️ Edit
-                    </button>
+                    <div class="btn-group btn-group-sm search-result-actions">
+                        <button type="button" class="btn btn-outline-secondary search-edit-btn"
+                                onclick="startSearchResultEdit('${post.id}')" title="Edit this post inline">
+                            ✏️ Edit
+                        </button>
+                        <button type="button" class="btn btn-outline-primary search-goto-btn"
+                                onclick="jumpToSearchResult('${post.id}')" title="Close this and scroll to the post in the list">
+                            ↗ Go to post
+                        </button>
+                        ${searchResultMenuHtml(post)}
+                    </div>
                 </div>
                 <div class="card-body py-2">
                     <div class="search-result-view">
-                        <div class="search-content-preview" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; word-break: break-word;">
-                            ${post.highlightedContent}
-                        </div>
+                        <div class="search-content-preview" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; word-break: break-word;">${post.highlightedContent}</div>
                         ${post.previewContent ? `
                         <hr class="my-2">
                         <div class="text-muted small mb-1">After replacement:</div>
-                        <div class="replacement-preview" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; word-break: break-word; background-color: #f8f9fa; padding: 8px; border-radius: 4px;">
-                            ${post.previewContent}
-                        </div>
+                        <div class="replacement-preview" style="font-family: monospace; font-size: 0.85rem; white-space: pre-wrap; word-break: break-word; background-color: #f8f9fa; padding: 8px; border-radius: 4px;">${post.previewContent}</div>
                         ` : ''}
                     </div>
                     <div class="search-result-edit d-none">
@@ -7754,17 +7860,42 @@ async function doSearch(preserveState = false) {
                 </div>
             </div>
         `;
-    });
-    
-    resultsList.innerHTML = html;
+}
 
-    if (priorState) {
-        restoreSearchResultState(priorState);
-    } else {
-        // Reset select-all checkbox for a fresh search
-        document.getElementById('search-select-all').checked = true;
+// The ⋯ menu on a result: what the card's own buttons do, for the whole card.
+// The results scroll inside the modal, so the menu is positioned against the
+// viewport (`strategy: fixed`) or the scroll box would clip it.
+function searchResultMenuHtml(post) {
+    const targets = post.targets || [];
+    const label = t => escapeHtml(t.account_label || PLATFORM_LABELS[t.platform] || t.platform);
+    const icon = t => PLATFORM_CHIP_ICONS[t.platform] || '📱';
+    const item = (onclick, text, cls = '') =>
+        `<li><button type="button" class="dropdown-item ${cls}" onclick="${onclick}">${text}</button></li>`;
+    const many = targets.length > 1;
+
+    const parts = [
+        item(`copySearchResult('${post.id}')`, '📋 Copy text', 'search-copy-item'),
+        item(`toggleSearchResultUsed('${post.id}')`, post.used ? '○ Mark as not used' : '✓ Mark as used', 'search-used-item'),
+    ];
+    if (targets.length) {
+        parts.push('<li><hr class="dropdown-divider"></li>', '<li><h6 class="dropdown-header">Post now</h6></li>');
+        targets.forEach((t, i) => parts.push(
+            item(`postNowFromSearchResult('${post.id}', ${i})`, `${icon(t)} Post to ${label(t)} now`, 'search-postnow-item')));
+        if (many) parts.push(item(`postAllFromSearchResult('${post.id}')`,
+            `🚀 Post to all ${targets.length} accounts`, 'fw-semibold search-postall-item'));
+        parts.push('<li><hr class="dropdown-divider"></li>', '<li><h6 class="dropdown-header">Schedule</h6></li>');
+        targets.forEach((t, i) => parts.push(
+            item(`scheduleFromSearchResult('${post.id}', ${i})`, `${icon(t)} Schedule for ${label(t)}…`, 'search-schedule-item')));
+        parts.push(item(`queueAllFromSearchResult('${post.id}')`,
+            many ? `📅 Queue all ${targets.length} accounts` : '📅 Add to queue', 'fw-semibold search-queueall-item'));
     }
-    updateSearchSelectedCount();
+    parts.push('<li><hr class="dropdown-divider"></li>',
+        item(`deleteSearchResult('${post.id}')`, '🗑️ Delete post', 'text-danger search-delete-item'));
+
+    return `<button type="button" class="btn btn-outline-secondary dropdown-toggle search-actions-toggle"
+                    data-bs-toggle="dropdown" data-bs-popper-config='{"strategy":"fixed"}'
+                    aria-expanded="false" title="More actions for this post">⋯</button>
+            <ul class="dropdown-menu dropdown-menu-end search-actions-menu">${parts.join('')}</ul>`;
 }
 
 function captureSearchResultState() {
@@ -8043,6 +8174,225 @@ function syncPostContentOnPage(postId, content) {
     }
     const editTextarea = document.getElementById(`edit-textarea-${cardId}`);
     if (editTextarea) editTextarea.value = content;
+}
+
+// ============ Find & Replace: going to a result, and acting on it ============
+// A result stands for one card. "Go to post" closes the modal and brings that
+// card up in the list, paging as far down as it is; the ⋯ menu does what the
+// card's own buttons do without leaving the results.
+
+function searchResultPost(resultId) {
+    return searchReplacePostData.find(p => p.id === String(resultId)) || null;
+}
+
+// The card on the page holding any of these rows, or null when it isn't loaded.
+function loadedCardFor(ids) {
+    for (const id of ids || []) {
+        const card = cardForPostId(id);
+        if (card) return card;
+    }
+    return null;
+}
+
+// Let a load already under way finish (a scroll load, or "Load all", which may
+// bring the card itself), rather than giving up because only one runs at once.
+async function waitForPostsIdle(ids, timeoutMs = 120000) {
+    const started = Date.now();
+    while (postsLoading && !loadedCardFor(ids) && Date.now() - started < timeoutMs) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+    }
+}
+
+// Page the list until the card holding `ids` is on it. Resolves to
+// `{ card, complete }`: `card` is null when it never turned up, and `complete`
+// says whether that is because the whole list is loaded without it (the
+// filters don't cover it) rather than a load failing part-way. `position` is
+// where the search saw the card in the filtered list, so the first request
+// asks for that many at once instead of 20 at a time; each batch is still
+// checked, because an edit or delete since then can move it a place or two.
+async function ensureCardLoaded(ids, position) {
+    let card = loadedCardFor(ids);
+    if (card) return { card, complete: false };
+    await waitForPostsIdle(ids);
+    card = loadedCardFor(ids);
+    if (card || postsLoading) return { card, complete: false };
+
+    let complete = false;
+    await withPostsLoad(async () => {
+        while (!card) {
+            const controls = loadMoreControls();
+            if (!controls) { complete = true; break; }
+            const shown = parseInt(controls.more.dataset.offset || '0', 10);
+            const wanted = Number.isInteger(position) ? position + 1 - shown : 0;
+            const limit = Math.min(POSTS_MAX_BATCH, Math.max(POSTS_PAGE_SIZE, wanted));
+            controls.more.disabled = true;
+            controls.all.disabled = true;
+            controls.more.innerHTML = '⏳ Finding post…';
+            const data = await loadPostsBatch(limit);
+            if (!data) break;   // failed, or the filters changed under it
+            showBatchResult(data);
+            card = loadedCardFor(ids);
+            if (!data.has_more) { complete = !card; break; }
+        }
+    });
+    return { card, complete };
+}
+
+// Scroll a card to the middle of the screen and make it pulse for a moment.
+function revealCard(card) {
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    card.classList.remove('jump-highlight');
+    void card.offsetWidth;   // restart the animation when it is already showing
+    card.classList.add('jump-highlight');
+    clearTimeout(card._jumpHighlightTimer);
+    card._jumpHighlightTimer = setTimeout(() => card.classList.remove('jump-highlight'), 4000);
+}
+
+// Close the Find & Replace modal and resolve once it is gone, so the page can
+// scroll again. Resolves anyway after a moment in case it was mid-transition.
+function hideSearchModal() {
+    const el = document.getElementById('searchReplaceModal');
+    const modal = bootstrap.Modal.getInstance(el);
+    if (!modal || !el.classList.contains('show')) return Promise.resolve();
+    return new Promise(resolve => {
+        const timer = setTimeout(resolve, 800);
+        el.addEventListener('hidden.bs.modal', () => { clearTimeout(timer); resolve(); }, { once: true });
+        modal.hide();
+    });
+}
+
+async function jumpToSearchResult(resultId) {
+    const post = searchResultPost(resultId);
+    if (!post) return;
+    await hideSearchModal();
+    showBackToSearchResults();
+
+    let card = loadedCardFor(post.cardPostIds);
+    if (!card) {
+        showToast(`Finding Post ${post.index}…`, 'info');
+        const found = await ensureCardLoaded(post.cardPostIds, post.position);
+        card = found.card;
+        if (!card) {
+            // A failed load has already said why; this says what it means.
+            showToast(found.complete
+                ? `Post ${post.index} isn't in the list under the current filters`
+                : `Couldn't bring up Post ${post.index} — try Go to post again`, 'warning');
+            return;
+        }
+    }
+    revealCard(card);
+}
+
+function showBackToSearchResults() {
+    const pill = document.getElementById('search-back-pill');
+    if (pill) pill.classList.remove('d-none');
+}
+
+function hideBackToSearchResults() {
+    const pill = document.getElementById('search-back-pill');
+    if (pill) pill.classList.add('d-none');
+}
+
+// Reopen the modal on the search it was left with, re-run so anything changed
+// on the page since (an edit, a delete) shows; ticks, drafts and the scroll
+// position are kept.
+function reopenSearchResults() {
+    hideBackToSearchResults();
+    bootstrap.Modal.getOrCreateInstance(document.getElementById('searchReplaceModal')).show();
+    if (document.getElementById('search-find-input').value.trim()) doSearch(true);
+}
+
+function copySearchResult(resultId) {
+    const post = searchResultPost(resultId);
+    if (!post) return;
+    navigator.clipboard.writeText(post.content)
+        .then(() => showToast('Copied to clipboard', 'success'))
+        .catch(() => showToast('Could not copy', 'error'));
+}
+
+async function toggleSearchResultUsed(resultId) {
+    const post = searchResultPost(resultId);
+    if (!post) return;
+    try {
+        const used = await requestToggleUsed(post.cardId, post.cardPostIds);
+        setCardUsedUI(loadedCardFor(post.cardPostIds), used);
+        showToast(used ? 'Marked as used' : 'Marked as not used', 'success');
+    } catch (e) {
+        showToast('Could not update: ' + e.message, 'error');
+        return;
+    }
+    await doSearch(true);
+}
+
+async function postNowFromSearchResult(resultId, index) {
+    const post = searchResultPost(resultId);
+    const target = post && (post.targets || [])[index];
+    if (!target) return;
+    const label = target.account_label || PLATFORM_LABELS[target.platform] || target.platform;
+    if (!confirm(postNowConfirmText(target.platform, label))) return;
+
+    const pageCard = loadedCardFor(post.cardPostIds);
+    showToast(`Posting to ${label}…`, 'info');
+    const posted = await publishCardPlatform(pageCard, target.post_id, target.platform, target.account_id);
+    if (!posted) return;
+    showToast(`Posted to ${label}!`, 'success');
+    refreshCardUsedState(pageCard);
+    await doSearch(true);
+}
+
+async function postAllFromSearchResult(resultId) {
+    const post = searchResultPost(resultId);
+    if (!post || !(post.targets || []).length) return;
+    if (!confirm(publishAllConfirmText(post.targets))) return;
+
+    const pageCard = loadedCardFor(post.cardPostIds);
+    showToast('Posting…', 'info');
+    await publishCardToAll(post.cardId, post.cardPostIds, pageCard);
+    refreshCardUsedState(pageCard);
+    await doSearch(true);
+}
+
+async function queueAllFromSearchResult(resultId) {
+    const post = searchResultPost(resultId);
+    if (!post || !(post.targets || []).length) return;
+    if (!(await queueCardToAll(post.cardId, post.cardPostIds))) return;
+    const pageCard = loadedCardFor(post.cardPostIds);
+    if (pageCard) await refreshCard(pageCard);
+}
+
+// Scheduling needs its own modal: step out of the results for it, and come
+// back to them when it closes, whether or not anything was scheduled.
+async function scheduleFromSearchResult(resultId, index) {
+    const post = searchResultPost(resultId);
+    const target = post && (post.targets || [])[index];
+    if (!target) return;
+    if (!platformConnected(target.platform)) {
+        alert(`Please connect ${PLATFORM_LABELS[target.platform] || target.platform} first`);
+        return;
+    }
+    await hideSearchModal();
+    document.getElementById('scheduleModal').addEventListener('hidden.bs.modal', reopenSearchResults, { once: true });
+    openScheduleModal(target.post_id, 'standalone', target.platform);
+}
+
+async function deleteSearchResult(resultId) {
+    const post = searchResultPost(resultId);
+    if (!post) return;
+    const platforms = (post.targets || []).length ? post.targets.map(t => t.platform) : post.platforms;
+    if (!confirm(deleteConfirmText(platforms))) return;
+
+    try {
+        await requestDeleteCard(post.cardId, post.cardPostIds);
+    } catch (e) {
+        showToast('Could not delete: ' + e.message, 'error');
+        return;
+    }
+    const pageCard = loadedCardFor(post.cardPostIds);
+    if (pageCard) pageCard.remove();
+    noteCardDeleted(!!pageCard);
+    showToast('Post deleted', 'success');
+    delete openSearchEdits[post.id];
+    await doSearch(true);
 }
 
 function toggleMatchSelection(element) {

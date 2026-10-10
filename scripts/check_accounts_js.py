@@ -349,6 +349,8 @@ COMPOSE_FUNCTIONS = (
     "cardTargets", "cardPostIds", "selectedAccountTargets", "newPostTargets",
     "newPostPlatforms", "publishCardPlatform", "postNowAllFromCard",
     "queueAllFromCard", "markChipPosted", "postedUrlFrom", "togglePostPlatform",
+    # the requests the card's publish-all and queue-all share with Find & Replace
+    "publishAllConfirmText", "publishCardToAll", "queueCardToAll",
 )
 
 

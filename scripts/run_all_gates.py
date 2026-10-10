@@ -251,13 +251,34 @@ IG_PEOPLE_GATES = [
      ("queue",)),
 ]
 
+# Find & Replace results on Compose: "Go to post" and the result's actions menu.
+# One script, one gate per claim, picked by argument. Three run the page's own
+# functions under node against a fake page; the others drive the real routes.
+FIND_RESULTS_GATES = [
+    ("check_find_results.py", "FIND_RESULTS_ROUTE_OK",
+     "each search result says where its card sits in the list, and the list pages it exactly there",
+     ("route",)),
+    ("check_find_results.py", "FIND_RESULTS_WIRING_OK",
+     "a result has Go to post and a menu of the card's actions, bound to declared functions, under node",
+     ("wiring",)),
+    ("check_find_results.py", "FIND_JUMP_OK",
+     "Go to post pages only as far as the card, waits for a load in flight, and says when it is not there, under node",
+     ("jump",)),
+    ("check_find_results.py", "FIND_ACTIONS_OK",
+     "a result's delete, used, post, schedule and queue reach the whole card and keep page and results in step, under node",
+     ("actions",)),
+    ("check_find_results.py", "FIND_ACTIONS_SERVER_OK",
+     "the result actions' requests reach every row of the card on the real routes",
+     ("server",)),
+]
+
 # check_*.py files that are deliberately not gates, with the reason. Empty is the
 # healthy state: a script that is not a gate should not carry the check_ prefix.
 NOT_GATES = {}
 
 ALL_GATES = (ACCOUNT_GATES + ACCOUNT_JS_GATES + LIBRARY_GATES + COMPOSE_GATES
              + VIDEO_GATES + MANUAL_POST_GATES + QUEUE_GATES + PAGING_GATES
-             + IG_PEOPLE_GATES)
+             + IG_PEOPLE_GATES + FIND_RESULTS_GATES)
 
 
 def _unpack(entry):
