@@ -74,6 +74,15 @@
         font-size: 0.9rem;
     }
     .account-actions { flex: 0 0 auto; display: flex; gap: 0.35rem; }
+    .account-option {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-size: 0.85rem;
+        color: #495057;
+        margin: 0.25rem 0 0;
+        cursor: pointer;
+    }
     .account-warn {
         font-size: 0.82rem;
         color: #b8860b;
@@ -132,6 +141,16 @@
             <div class="account-handle">
                 {% if account.handle %}{{ account.handle }}{% else %}{{ account.display_name or account.external_id }}{% endif %}
             </div>
+            {% if entry.platform == 'linkedin' %}
+            {# LinkedIn holds back posts that link out. With this on, a post's link goes out as
+               its first comment instead; any one post can still choose otherwise in Compose. #}
+            <label class="account-option" title="LinkedIn holds back posts that link out. With this on, each post's link is posted as its first comment instead. A post can still choose otherwise.">
+                <input type="checkbox" class="link-in-comment-toggle"
+                       {% if account.link_in_comment %}checked{% endif %}
+                       onchange="setLinkInComment({{ account.id }}, this)">
+                Post links as the first comment
+            </label>
+            {% endif %}
             {% if account.needs_attention %}
             <div class="account-warn">
                 ⚠ {{ account.needs_attention }}
@@ -208,6 +227,21 @@ async function makeAccountDefault(accountId, btn) {
         accountsFlash(e.message, 'danger');
         btn.disabled = false;
     }
+}
+
+async function setLinkInComment(accountId, box) {
+    box.disabled = true;
+    try {
+        const body = new FormData();
+        body.append('enabled', box.checked ? 'true' : 'false');
+        const data = await accountsPost(`/accounts/${accountId}/link-in-comment`, body);
+        accountsFlash(data.message, 'success');
+    } catch (e) {
+        // The server did not take it, so the box must not go on claiming it did.
+        box.checked = !box.checked;
+        accountsFlash(e.message, 'danger');
+    }
+    box.disabled = false;
 }
 
 async function renameAccount(accountId, btn) {

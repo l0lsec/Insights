@@ -320,6 +320,16 @@ def init_db(db_path: str = DB_PATH) -> None:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN ig_collaborators TEXT")
         if "ig_reel_tags" not in standalone_columns:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN ig_reel_tags TEXT")
+        # Where a LinkedIn post carries its link. link_comment is NULL (follow the
+        # account's setting), 1 (the link leaves the post and goes out as its first
+        # comment) or 0 (the link stays in the post). LinkedIn holds back posts that
+        # link out, so the comment is how a link gets there without that cost.
+        # link_comment_state is a JSON note on what became of that comment, kept so a
+        # comment LinkedIn refused can be retried on the post that is already live.
+        if "link_comment" not in standalone_columns:
+            conn.execute("ALTER TABLE standalone_posts ADD COLUMN link_comment INTEGER")
+        if "link_comment_state" not in standalone_columns:
+            conn.execute("ALTER TABLE standalone_posts ADD COLUMN link_comment_state TEXT")
         # A Reel's collaborators were first kept inside ig_reel_options. They now share
         # ig_collaborators with every other format, so one list is what Compose shows
         # and what publishes. Move any still in the old place; a row is touched only
@@ -796,6 +806,15 @@ def init_db(db_path: str = DB_PATH) -> None:
             cols = [row[1] for row in cur.fetchall()]
             if cols and column not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} INTEGER")
+
+        # An account's standing choice about links: 1 sends the link of every
+        # post it publishes as the post's first comment. Only LinkedIn reads it;
+        # a post can still override it either way (standalone_posts.link_comment).
+        cur = conn.execute("PRAGMA table_info(social_accounts)")
+        if "link_in_comment" not in [row[1] for row in cur.fetchall()]:
+            conn.execute(
+                "ALTER TABLE social_accounts ADD COLUMN link_in_comment INTEGER DEFAULT 0"
+            )
 
         # A token table may only ever hold one row per account, or "which token
         # is this account's" stops having an answer. The partial index leaves
@@ -3694,6 +3713,7 @@ def add_standalone_post(
     video_url: Optional[str] = None,
     ig_collaborators: Optional[list] = None,
     ig_reel_tags: Optional[list] = None,
+    link_comment: Optional[bool] = None,
 ) -> int:
     """Save a standalone post (not tied to an article) and return its id.
     
@@ -3708,6 +3728,9 @@ def add_standalone_post(
         ig_collaborators / ig_reel_tags: usernames already cleaned by the caller
             (see instagram_client.normalize_handles); stored as JSON, and only
             meaningful on an Instagram row.
+        link_comment: LinkedIn only. None follows the account's setting; True
+            or False is this post's own choice about sending its link as the
+            first comment.
         repost: If True, marks this as an intentional duplicate that bypassed
             the import-time duplicate check so the same content can be posted
             again.
@@ -3725,12 +3748,13 @@ def add_standalone_post(
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
             """
-            INSERT INTO standalone_posts (source_type, source_content, platform, content, image_url, created_at, used, repost, brief_id, brief_run_id, account_id, video_url, ig_collaborators, ig_reel_tags)
-            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO standalone_posts (source_type, source_content, platform, content, image_url, created_at, used, repost, brief_id, brief_run_id, account_id, video_url, ig_collaborators, ig_reel_tags, link_comment)
+            VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (source_type, source_content, platform, content, image_url, created_at, 1 if repost else 0, brief_id, brief_run_id, account_id, video_url,
              json.dumps(ig_collaborators) if ig_collaborators else None,
-             json.dumps(ig_reel_tags) if ig_reel_tags else None),
+             json.dumps(ig_reel_tags) if ig_reel_tags else None,
+             None if link_comment is None else (1 if link_comment else 0)),
         )
         conn.commit()
         return cur.lastrowid
@@ -4083,6 +4107,69 @@ def set_standalone_post_ig_people(
              post_id),
         )
         conn.commit()
+
+
+def set_standalone_post_link_comment(
+    post_id: int,
+    enabled: Optional[bool],
+    db_path: str = DB_PATH,
+) -> None:
+    """Set whether a LinkedIn post sends its link as the first comment.
+
+    ``None`` clears the post's own choice so the account's setting applies
+    again; ``True`` and ``False`` are the post's choice and beat the account.
+    """
+    value = None if enabled is None else (1 if enabled else 0)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE standalone_posts SET link_comment = ? WHERE id = ?",
+            (value, post_id),
+        )
+        conn.commit()
+
+
+def set_standalone_post_link_comment_state(
+    post_id: int,
+    state: Optional[dict],
+    db_path: str = DB_PATH,
+) -> None:
+    """Record what became of a post's first comment, or clear the record.
+
+    ``state`` is a dict with a ``status`` of ``posted`` or ``failed``. A failed
+    one carries the comment ``text``, the ``post_urn`` it was meant for and the
+    ``error``, which is everything a retry needs without trusting the copy to be
+    unchanged since.
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE standalone_posts SET link_comment_state = ? WHERE id = ?",
+            (json.dumps(state) if state else None, post_id),
+        )
+        conn.commit()
+
+
+def link_comment_state(row) -> Optional[dict]:
+    """A post row's first-comment record, or None. Tolerates NULL and bad JSON."""
+    raw = row["link_comment_state"] if row is not None and "link_comment_state" in row.keys() else None
+    try:
+        state = json.loads(raw) if raw else None
+    except (ValueError, TypeError):
+        return None
+    return state if isinstance(state, dict) and state.get("status") else None
+
+
+def link_in_comment_enabled(post_row, account_row) -> bool:
+    """Whether a LinkedIn post sends its link as the first comment.
+
+    The post's own choice wins, whichever way it points; a post that has not
+    made one follows its account; with neither the link stays in the post, which
+    is what every post did before this existed.
+    """
+    if post_row is not None and "link_comment" in post_row.keys() and post_row["link_comment"] is not None:
+        return bool(post_row["link_comment"])
+    if account_row is not None and "link_in_comment" in account_row.keys():
+        return bool(account_row["link_in_comment"])
+    return False
 
 
 def update_social_post_image(
@@ -6391,6 +6478,24 @@ def set_social_account_label(
         cur = conn.execute(
             "UPDATE social_accounts SET label = ?, updated_at = ? WHERE id = ?",
             ((label or "").strip() or None,
+             datetime.utcnow().isoformat(timespec="seconds"), account_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def set_social_account_link_in_comment(
+    account_id: int, enabled: bool, db_path: str = DB_PATH
+) -> bool:
+    """Make an account send its posts' links as first comments (or stop).
+
+    False if the id is unknown. Whether the platform can do it is the caller's
+    question: the column exists on every account but only LinkedIn reads it.
+    """
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE social_accounts SET link_in_comment = ?, updated_at = ? WHERE id = ?",
+            (1 if enabled else 0,
              datetime.utcnow().isoformat(timespec="seconds"), account_id),
         )
         conn.commit()

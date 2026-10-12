@@ -27,11 +27,16 @@ feed photo, so this module stays importable and testable on its own.
 
 from __future__ import annotations
 
+import logging
+from datetime import datetime
+
 import database
 from linkedin_client import (
+    COMMENT_MAX_CHARS as LINKEDIN_COMMENT_MAX_CHARS,
     get_linkedin_client,
     calculate_token_expiry as linkedin_expiry,
     is_token_expired as linkedin_expired,
+    split_link_for_comment,
 )
 from threads_client import (
     get_threads_client,
@@ -52,6 +57,8 @@ from instagram_client import (
     calculate_token_expiry as instagram_expiry,
     is_token_expired as instagram_expired,
 )
+
+logger = logging.getLogger(__name__)
 
 PLATFORMS = ("linkedin", "threads", "twitter", "facebook", "instagram")
 
@@ -118,6 +125,8 @@ def account_summary(account) -> dict:
         "is_default": bool(account["is_default"]),
         "status": account["status"],
         "external_id": account["external_id"],
+        "link_in_comment": bool(
+            account["link_in_comment"] if "link_in_comment" in account.keys() else 0),
     }
 
 
@@ -178,6 +187,7 @@ def publish(
     article_title: str | None = None,
     db_path: str | None = None,
     video_url: str | None = None,
+    link_in_comment: bool | None = None,
 ) -> dict:
     """Publish one piece of copy to one account, in one normalized result.
 
@@ -185,6 +195,13 @@ def publish(
     as a Reel) and the image, if any, is ignored. A video that cannot be
     delivered fails the post; it is never quietly swapped for a text or image
     post, because the copy was written to go with the video.
+
+    ``link_in_comment`` is LinkedIn's alone, because LinkedIn holds back posts
+    that link out. True takes the post's links out of the copy and posts them as
+    its first comment, False keeps them in the copy, and None (what every caller
+    passes) lets the saved post's own choice and then the account's decide. A
+    comment LinkedIn refuses does not fail the post: it reports ``first_comment``
+    on the result and keeps what a retry needs (see ``retry_first_comment``).
 
     Every step that can fail (no token, an expired token that will not refresh,
     the platform rejecting the post) comes back as ``success: False`` with a
@@ -210,11 +227,16 @@ def publish(
                        error=f"{platform_name(platform)} cannot be published to",
                        permanent=True)
 
+    # Only LinkedIn takes it, and only when a caller names one, so every other
+    # platform (and a LinkedIn post nobody overrides) is called exactly as before.
+    extra = {"link_in_comment": link_in_comment} \
+        if platform == "linkedin" and link_in_comment is not None else {}
+
     try:
         return handler(
             resolved_id, account, text, image_url,
             standalone_post_id, social_post_id, article_title, db_path,
-            video_url,
+            video_url, **extra,
         )
     except Exception as exc:  # noqa: BLE001 - a target's failure must not end the fan-out
         return _result(platform, resolved_id, account, False, error=str(exc))
@@ -240,6 +262,7 @@ def publish_targets(targets, *, content, image_url=None, db_path=None, video_url
             social_post_id=target.get("social_post_id"),
             article_title=target.get("article_title"),
             db_path=db_path,
+            link_in_comment=target.get("link_in_comment"),
         ))
     return results
 
@@ -253,23 +276,30 @@ def publish_targets(targets, *, content, image_url=None, db_path=None, video_url
 # ---------------------------------------------------------------------------
 
 
-def _linkedin(account_id, account, text, image_url, standalone_id, social_id,
-              article_title, db_path, video_url=None):
+def _linkedin_session(account_id, account, db_path):
+    """The LinkedIn client and a usable token for an account.
+
+    Returns ``(client, token, failure)``; ``failure`` is a ready-made result when
+    there is no connection, no Member ID, or an expired token that will not
+    refresh. Posting and retrying a comment need exactly the same thing, so they
+    share this rather than carrying two copies of the token refresh.
+    """
     token = database.get_linkedin_token(account_id, db_path=db_path)
     if not token:
-        return _result("linkedin", account_id, account, False,
-                       error="LinkedIn is not connected", needs_reconnect=True)
+        return None, None, _result("linkedin", account_id, account, False,
+                                   error="LinkedIn is not connected", needs_reconnect=True)
     if not token["user_urn"]:
-        return _result("linkedin", account_id, account, False,
-                       error="This LinkedIn account still needs its Member ID configured",
-                       permanent=True)
+        return None, None, _result(
+            "linkedin", account_id, account, False,
+            error="This LinkedIn account still needs its Member ID configured",
+            permanent=True)
 
     client = get_linkedin_client()
     if linkedin_expired(token["expires_at"]):
         if not token["refresh_token"]:
-            return _result("linkedin", account_id, account, False,
-                           error="LinkedIn token expired. Please reconnect.",
-                           needs_reconnect=True)
+            return None, None, _result("linkedin", account_id, account, False,
+                                       error="LinkedIn token expired. Please reconnect.",
+                                       needs_reconnect=True)
         try:
             fresh = client.refresh_access_token(token["refresh_token"])
             database.update_linkedin_token(
@@ -281,8 +311,49 @@ def _linkedin(account_id, account, text, image_url, standalone_id, social_id,
             )
             token = database.get_linkedin_token(account_id, db_path=db_path)
         except Exception as exc:  # noqa: BLE001
-            return _result("linkedin", account_id, account, False,
-                           error=f"LinkedIn token expired: {exc}", needs_reconnect=True)
+            return None, None, _result("linkedin", account_id, account, False,
+                                       error=f"LinkedIn token expired: {exc}",
+                                       needs_reconnect=True)
+    return client, token, None
+
+
+def _link_comment_wanted(override, account, standalone_id, db_path) -> bool:
+    """Whether this LinkedIn post sends its link as the first comment.
+
+    A caller's explicit answer wins; otherwise the saved post's own choice, then
+    its account's, then no (see ``database.link_in_comment_enabled``).
+    """
+    if override is not None:
+        return bool(override)
+    row = database.get_standalone_post(standalone_id, db_path=db_path) if standalone_id else None
+    return database.link_in_comment_enabled(row, account)
+
+
+def _linkedin(account_id, account, text, image_url, standalone_id, social_id,
+              article_title, db_path, video_url=None, link_in_comment=None):
+    # A post whose link is going to the comment is checked before anything is
+    # sent: a refusal after the post is live would leave it without its link.
+    comment_text = None
+    if _link_comment_wanted(link_in_comment, account, standalone_id, db_path):
+        text, links = split_link_for_comment(text)
+        if links:
+            comment_text = "\n".join(links)
+            if len(comment_text) > LINKEDIN_COMMENT_MAX_CHARS:
+                return _result(
+                    "linkedin", account_id, account, False, permanent=True,
+                    error=(f"The link comment would be {len(comment_text)} characters and "
+                           f"LinkedIn allows {LINKEDIN_COMMENT_MAX_CHARS}. Remove some of the links."))
+            if not text.strip():
+                # LinkedIn posts here always carry words (publish() refuses an
+                # empty one), and a link-only post would be left with none.
+                return _result(
+                    "linkedin", account_id, account, False, permanent=True,
+                    error=("Nothing is left to post once the link moves to the comment. "
+                           "Add some words to the post."))
+
+    client, token, failure = _linkedin_session(account_id, account, db_path)
+    if failure:
+        return failure
 
     body = text[:CHAR_LIMITS["linkedin"]]
     if video_url:
@@ -306,7 +377,98 @@ def _linkedin(account_id, account, text, image_url, standalone_id, social_id,
             text=body,
             article_title=article_title,
         )
-    return _from_client("linkedin", account_id, account, result, urn_key="post_urn")
+    outcome = _from_client("linkedin", account_id, account, result, urn_key="post_urn")
+
+    if comment_text and outcome["success"]:
+        # The post is live. Whatever happens to the comment is reported beside
+        # that fact and never instead of it: an exception here would make
+        # publish() call the post failed, and the scheduler would post it again.
+        outcome["first_comment"] = _post_first_comment(
+            client, token, comment_text, result.get("post_urn"), standalone_id, db_path)
+    return outcome
+
+
+def _post_first_comment(client, token, comment_text, post_urn, standalone_id, db_path) -> dict:
+    """Comment on a live post and keep the record. Never raises.
+
+    Returns the note ``{"status": "posted" | "failed", "text", "error",
+    "comment_id", "post_urn", "at"}``. It is also saved on the post's row, which
+    is what lets a failed comment be retried later, on the same post, with the
+    same words, without trusting the copy to be unchanged since.
+    """
+    note = {"status": "failed", "text": comment_text, "error": None,
+            "comment_id": None, "post_urn": post_urn,
+            "at": datetime.utcnow().isoformat(timespec="seconds")}
+    if not post_urn:
+        note["error"] = ("LinkedIn did not say which post this is, so the link could "
+                         "not be added as a comment. Add it by hand.")
+    else:
+        try:
+            reply = client.create_comment(
+                access_token=token["access_token"],
+                actor_urn=token["user_urn"],
+                post_urn=post_urn,
+                text=comment_text,
+            )
+        except Exception as exc:  # noqa: BLE001
+            reply = {"success": False, "friendly": f"The link comment failed: {exc}"}
+        if reply and reply.get("success"):
+            note["status"] = "posted"
+            note["comment_id"] = reply.get("comment_id")
+        else:
+            raw = (reply or {}).get("error")
+            note["error"] = str(
+                (reply or {}).get("friendly")
+                or (raw.get("message") if isinstance(raw, dict) else raw)
+                or "LinkedIn gave no reason"
+            )
+    if note["status"] == "failed":
+        logger.warning("LinkedIn link comment failed for %s: %s", post_urn, note["error"])
+
+    if standalone_id:
+        try:
+            database.set_standalone_post_link_comment_state(
+                standalone_id, note, db_path=db_path)
+        except Exception:  # noqa: BLE001 - the record is a convenience, the post is live
+            logger.exception("Could not save the link comment record for post %s", standalone_id)
+    return note
+
+
+def retry_first_comment(standalone_id, *, db_path: str | None = None) -> dict:
+    """Post again a link comment LinkedIn refused, on the post that is live.
+
+    Only the comment is sent; the post is never touched. It uses the words and
+    the post id saved when the comment failed and the token of the account the
+    post was published as. The reply is a normal publish result (``success`` is
+    whether the comment landed) with ``first_comment`` carrying the new note, and
+    a post with nothing to retry says so instead of commenting.
+    """
+    db_path = db_path or database.DB_PATH
+    row = database.get_standalone_post(standalone_id, db_path=db_path)
+    state = database.link_comment_state(row)
+    if not state or state.get("status") != "failed":
+        return _result("linkedin", None, None, False, permanent=True,
+                       error="There is no failed link comment to retry for this post")
+    if not state.get("post_urn") or not state.get("text"):
+        return _result("linkedin", None, None, False, permanent=True,
+                       error="The post's id was not recorded, so the comment cannot be "
+                             "retried. Add the link to the post by hand.")
+
+    account, error = resolve_target("linkedin", row["account_id"], db_path=db_path)
+    if error:
+        return _result("linkedin", row["account_id"], None, False, error=error, permanent=True)
+    account_id = account["id"] if account is not None else None
+
+    client, token, failure = _linkedin_session(account_id, account, db_path)
+    if failure:
+        return failure
+
+    note = _post_first_comment(
+        client, token, state["text"], state["post_urn"], standalone_id, db_path)
+    outcome = _result("linkedin", account_id, account, note["status"] == "posted",
+                      error=note["error"])
+    outcome["first_comment"] = note
+    return outcome
 
 
 def _threads(account_id, account, text, image_url, standalone_id, social_id,

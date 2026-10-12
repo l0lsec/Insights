@@ -75,6 +75,7 @@ Catalogue a large media archive and sort it by **year** and **category** — bui
 - **X/Twitter Integration** - OAuth 2.0 with PKCE for posting text, images and videos (pay-per-use media uploads)
 - **Instagram Integration** - OAuth-based publishing of feed posts, **carousels** (2–10 images/videos), **Reels**, and **Stories** (image or video). Requires a professional (Business/Creator) account
 - **Instagram Collaborators and Tags** - Add up to 3 collaborators to a feed photo, carousel or Reel, and tag people in a Reel, from Write Manually or any saved card. They are saved on the post, shown on the Schedule queue, and sent by Post now, the whole-card publish and the scheduler. Collaborators receive an invite and only appear on the post once they accept; a collaborator Instagram rejects (private, unknown) fails the post by name instead of publishing it without them
+- **LinkedIn Link in First Comment** - LinkedIn holds back posts that link out, so a LinkedIn post can send its link as its first comment instead: the post goes out without the link and the link follows as a comment once the post is live. Choose it per card (the **🔗 LinkedIn link** control on the Compose card) or once per LinkedIn account (**Accounts**); Post now, the whole-card publish and the scheduler all honour it. A comment LinkedIn refuses never fails or repeats the post: the card shows why, keeps the link to paste by hand, and offers **Retry comment**
 - **Consolidated Queue** - A post queued to several platforms for the same moment is one row on the Schedule page, with a badge per platform. Its buttons (time, content, Post Now, Cancel, retry, delete), drag-to-reorder and bulk actions act on every platform at once, and "By platform" opens the per-platform rows to act on one alone
 - **Time Slot Management** - Configure recurring posting times by day of week and platform
 - **Auto-Queue** - Posts automatically slot into the next available time
@@ -315,7 +316,7 @@ The Library reuses `OLLAMA_BASE_URL`, `OLLAMA_TEXT_MODEL`, and `OLLAMA_VISION_MO
 | `LINKEDIN_CLIENT_ID` | Client ID from the [LinkedIn Developer Portal](https://www.linkedin.com/developers/) |
 | `LINKEDIN_CLIENT_SECRET` | Client Secret from your LinkedIn app |
 | `LINKEDIN_REDIRECT_URI` | OAuth callback URL (default: `http://localhost:5001/linkedin/callback`) |
-| `LINKEDIN_SCOPES` | OAuth scopes (default: `openid profile w_member_social`) |
+| `LINKEDIN_SCOPES` | OAuth scopes (default: `openid profile w_member_social`). Add `w_member_social_feed` to let the app post a link as a first comment (see below), then reconnect LinkedIn |
 
 ### Threads Integration
 
@@ -572,6 +573,18 @@ one connected.
 5. Click **Connect LinkedIn** in the web UI
 
 Posts containing URLs automatically include rich link previews with title, description, and thumbnail.
+
+#### Putting the link in the first comment
+
+LinkedIn holds back the reach of posts that link out. To keep the link without that cost, a LinkedIn post can send its link as its **first comment**: the post goes out as plain text, an image or a video with no link in it, then the link is posted under it as a comment, as the same member.
+
+- **Per card:** the **🔗 LinkedIn link** control on a Compose card with a LinkedIn target. *Account setting* follows the account (and says what that is), *In the first comment* and *In the post* are this post's own choice and win either way. It applies to every LinkedIn account on the card, and a LinkedIn account ticked onto the card later publishes the same way.
+- **Per account:** the **Post links as the first comment** switch on a LinkedIn account on the **Accounts** page. It applies to every post of that account that has not chosen for itself.
+- **What changes in the copy:** every link is taken out and posted in the comment, in order, each once. Only the lines that held a link are touched (a line that was only a link goes; a link mid-sentence closes up), so write the copy to read without it, for example "Link in the first comment". A post with no link just posts. A post that is only a link has nothing left to post and is refused before anything is sent, as is a comment longer than 1,250 characters.
+- **No preview card:** a post that keeps its link in the body gets LinkedIn's link-preview card; one that moves it to the comment does not. With an image attached it goes out as an image post.
+- **Permission:** LinkedIn's Comments API lists `w_member_social_feed` for commenting as a member, which is more than the `w_member_social` posting needs and is granted with LinkedIn's *Community Management API* product. Add it to `LINKEDIN_SCOPES`, and reconnect LinkedIn on the Accounts page. Until then LinkedIn answers 403, which the card shows with LinkedIn's own words. The request follows LinkedIn's published Comments API; it has not been run against a live account from this codebase.
+- **When the comment fails:** the post stays live and is reported as posted exactly once (a failed comment never makes the scheduler post it again). The card shows why, the link to paste by hand, and **Retry comment**, which sends only the comment, with the words and post id kept at the time, as the account the post was published as. A rate limit (429) and a post LinkedIn has not finished creating (404) are tried once more automatically; nothing else is repeated, because a dropped connection may have created the comment.
+- **Routes:** `POST /compose/post/<id>/link-comment` with `mode` = `on`, `off` or `default` (and `post_ids` for the card) sets the card's choice; `POST /compose/post/<id>/link-comment/retry` retries a failed comment; `POST /accounts/<id>/link-in-comment` with `enabled` = `true` or `false` sets a LinkedIn account's default. The Post now and whole-card publish replies carry a `first_comment` outcome (`status` `posted` or `failed`, with the reason).
 
 ### Posting to Threads
 

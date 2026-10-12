@@ -135,6 +135,33 @@
                             {% endfor %}
                         </div>
 
+                        {# Where a LinkedIn post carries its link. LinkedIn holds back posts that link
+                           out, so "first comment" takes the link out of the post and posts it as the
+                           post's first comment once the post is live. It applies to every LinkedIn
+                           account on the card, and "Account setting" always says what that setting is.
+                           The markup is drawn once, here: the page script only toggles and fills it. #}
+                        {% if group.li %}
+                        {% set failed = group.li.state and group.li.state.status == 'failed' %}
+                        {% set posted = group.li.state and group.li.state.status == 'posted' %}
+                        <div class="li-link-comment small mb-2" id="li-link-comment-{{ group.id }}">
+                            <label class="text-muted mb-0" for="li-link-mode-{{ group.id }}">🔗 LinkedIn link</label>
+                            <select class="form-select form-select-sm d-inline-block w-auto ms-1" id="li-link-mode-{{ group.id }}"
+                                    onchange="saveLinkComment({{ group.id }})">
+                                <option value="default" {% if group.li.mode == 'default' %}selected{% endif %}>Account setting ({{ 'first comment' if group.li.account_default else 'in the post' }})</option>
+                                <option value="on" {% if group.li.mode == 'on' %}selected{% endif %}>In the first comment</option>
+                                <option value="off" {% if group.li.mode == 'off' %}selected{% endif %}>In the post</option>
+                            </select>
+                            <span class="text-muted ms-1 li-link-hint">{% if group.li.effective %}The link is posted as the first comment, not in the post.{% else %}The link stays in the post.{% endif %}</span>
+                            <div class="text-danger mt-1 d-none li-link-error" role="alert"></div>
+                            <div class="alert alert-warning py-1 px-2 mt-1 mb-0 li-link-failed{% if not failed %} d-none{% endif %}" role="alert">
+                                ⚠ The post is live, but its link comment did not post: <span class="li-link-error-text">{{ group.li.state.error if failed else '' }}</span>
+                                <div>Link: <code class="li-link-text">{{ group.li.state.text if failed else '' }}</code></div>
+                                <button type="button" class="btn btn-sm btn-outline-secondary mt-1" onclick="retryLinkComment({{ group.id }}, this)">Retry comment</button>
+                            </div>
+                            <div class="text-success mt-1 li-link-posted{% if not posted %} d-none{% endif %}">✓ Link posted as the first comment</div>
+                        </div>
+                        {% endif %}
+
                         <div class="post-content-wrapper">
                             <pre class="social-copy-text" id="saved-post-{{ group.id }}" contenteditable="true" onfocus="enablePostEdit(this)" onblur="autoSavePost({{ group.id }}, this, 'standalone')">{{ group.content }}</pre>
                             <!-- Image attachment section -->

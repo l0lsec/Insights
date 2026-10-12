@@ -127,6 +127,7 @@ from database import (
     get_social_account,
     set_default_social_account,
     set_social_account_label,
+    set_social_account_link_in_comment,
     identity_in_use,
     account_id_for_token,
     delete_social_account,
@@ -177,6 +178,9 @@ from database import (
     set_standalone_post_user_tags,
     set_standalone_post_reel_options,
     set_standalone_post_ig_people,
+    set_standalone_post_link_comment,
+    link_comment_state,
+    link_in_comment_enabled,
     delete_standalone_post,
     delete_standalone_posts_bulk,
     mark_standalone_post_used,
@@ -3400,6 +3404,50 @@ def accounts_set_label(account_id: int):
     })
 
 
+def _requested_flag(field):
+    """A yes/no a request carries: True, False, or None when absent or unclear."""
+    payload = request.get_json(silent=True) or {}
+    raw = request.form.get(field)
+    if raw is None:
+        raw = payload.get(field)
+    if isinstance(raw, bool):
+        return raw
+    text = str(raw).strip().lower() if raw is not None else ''
+    if text in ('1', 'true', 'on', 'yes'):
+        return True
+    if text in ('0', 'false', 'off', 'no'):
+        return False
+    return None
+
+
+@app.route('/accounts/<int:account_id>/link-in-comment', methods=['POST'])
+def accounts_set_link_in_comment(account_id: int):
+    """Make a LinkedIn account send each post's link as the post's first comment.
+
+    LinkedIn holds back posts that link out, so this moves the link into a
+    comment on the post once it is live. It is the account's standing choice:
+    a post can still say otherwise either way (see ``compose_set_post_link_comment``).
+    Only LinkedIn accounts take it; ``enabled`` must be a clear yes or no.
+    """
+    account = get_social_account(account_id)
+    if not account:
+        return jsonify({"error": "Account not found"}), 404
+    if account['platform'] != 'linkedin':
+        return jsonify({"error": "Only a LinkedIn account can send its links as comments"}), 400
+    enabled = _requested_flag('enabled')
+    if enabled is None:
+        return jsonify({"error": "Send enabled as true or false"}), 400
+    set_social_account_link_in_comment(account_id, enabled)
+    label = account_label(account)
+    return jsonify({
+        "success": True,
+        "account_id": account_id,
+        "link_in_comment": enabled,
+        "message": (f"{label} will post links as the first comment" if enabled
+                    else f"{label} will keep links in the post"),
+    })
+
+
 @app.route('/accounts/<int:account_id>/disconnect', methods=['POST'])
 def accounts_disconnect(account_id: int):
     """Disconnect one account, leaving the platform's other logins alone.
@@ -5084,10 +5132,15 @@ def schedule_post_now(scheduled_id: int):
         return jsonify({"error": str(e)}), 500
 
     if result['success']:
+        message = f"Posted to {result['account_label']}!"
+        comment = result.get('first_comment')
+        if comment and comment['status'] == 'failed':
+            message += f" The link comment did not post: {comment['error']}"
         return jsonify({
             "success": True,
-            "message": f"Posted to {result['account_label']}!",
+            "message": message,
             "permalink": result['permalink'],
+            "first_comment": comment,
         })
     return jsonify({"error": f"Failed: {result['error']}"}), 400
 
@@ -5860,7 +5913,12 @@ def _enrich_post_group(group, scheduled_info, posted_info, brief_names):
         'brief_name': brief_names.get(brief_id) if brief_id else None,
         'display_index': group.get('display_index'),
         'ig': None,
+        'li': None,
     }
+
+    li_row = _group_row_for_platform(group, 'linkedin')
+    if li_row is not None:
+        card['li'] = _linkedin_link_comment_card(li_row)
 
     ig_row = _group_row_for_platform(group, 'instagram')
     if ig_row is not None:
@@ -7463,6 +7521,39 @@ def _find_target_row(rows, platform, account_id):
     return None
 
 
+def _linkedin_link_comment_card(row):
+    """What the Compose card needs to draw a LinkedIn row's link choice.
+
+    ``mode`` is the post's own choice (``default`` when it has made none),
+    ``account_default`` is what its account does, and ``effective`` is the
+    answer the publisher will act on, so the card can say what will happen
+    rather than only what was ticked. ``state`` is the record of a comment
+    already attempted: ``posted``, or ``failed`` with the reason and the words.
+    """
+    account_id = (row['account_id'] if 'account_id' in row.keys() else None) \
+        or _default_account_for('linkedin')
+    account = _account_lookup().get(account_id) if account_id else None
+    own = row['link_comment'] if 'link_comment' in row.keys() else None
+    state = link_comment_state(row)
+    return {
+        'id': row['id'],
+        'mode': 'default' if own is None else ('on' if own else 'off'),
+        'account_default': bool(account and account['link_in_comment']),
+        'effective': link_in_comment_enabled(row, account),
+        'state': ({k: state.get(k) for k in ('status', 'error', 'text', 'comment_id')}
+                  if state else None),
+    }
+
+
+def _card_link_comment(rows):
+    """The explicit link choice a card's LinkedIn rows carry, or None for "follow the account"."""
+    for row in rows or ():
+        if row['platform'] == 'linkedin' and 'link_comment' in row.keys() \
+                and row['link_comment'] is not None:
+            return bool(row['link_comment'])
+    return None
+
+
 def _card_ig_people(rows):
     """The (collaborators, reel tags) the card's Instagram rows already carry."""
     for row in rows or ():
@@ -7487,6 +7578,9 @@ def _copy_post_to_target(post, platform, account_id, siblings=()):
     return add_standalone_post(
         ig_collaborators=ig_collaborators or None,
         ig_reel_tags=ig_reel_tags or None,
+        # A LinkedIn row ticked onto a card publishes the way the card's other
+        # LinkedIn rows do, when they have been told how.
+        link_comment=_card_link_comment([post, *siblings]) if platform == 'linkedin' else None,
         source_type=post['source_type'],
         source_content=post['source_content'],
         platform=platform,
@@ -8419,6 +8513,82 @@ def compose_set_post_ig_people(post_id: int):
         "ig_reel_tags": _json_list_column(saved, 'ig_reel_tags'),
         "updated_ids": [row['id'] for row in rows],
     })
+
+
+_LINK_COMMENT_MODES = {'default': None, 'on': True, 'off': False}
+
+
+@app.route('/compose/post/<int:post_id>/link-comment', methods=['POST'])
+def compose_set_post_link_comment(post_id: int):
+    """Choose where a card's link goes on LinkedIn: the post, or its first comment.
+
+    JSON/Form: ``mode`` is ``on`` (the link leaves the post and is posted as its
+    first comment), ``off`` (it stays in the post) or ``default`` (follow the
+    LinkedIn account's setting). The choice goes on every LinkedIn row of the
+    card (``post_ids``), so a second LinkedIn account publishes the same card
+    the same way. Nothing else on the card is touched.
+    """
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    payload = request.get_json(silent=True) or request.form
+    mode = str(payload.get('mode') or '').strip().lower()
+    if mode not in _LINK_COMMENT_MODES:
+        return jsonify({"error": "mode must be 'default', 'on' or 'off'"}), 400
+
+    rows = [row for row in _card_rows(post, _requested_post_ids(post_id))
+            if row['platform'] == 'linkedin']
+    if not rows:
+        return jsonify({"error": "This post does not go to LinkedIn."}), 400
+
+    for row in rows:
+        set_standalone_post_link_comment(row['id'], _LINK_COMMENT_MODES[mode])
+    return jsonify({
+        "success": True,
+        "mode": mode,
+        "updated_ids": [row['id'] for row in rows],
+        "link_comment": _linkedin_link_comment_card(get_standalone_post(rows[0]['id'])),
+    })
+
+
+@app.route('/compose/post/<int:post_id>/link-comment/retry', methods=['POST'])
+def compose_retry_post_link_comment(post_id: int):
+    """Post again the link comment LinkedIn refused, on the post that is live.
+
+    Only the comment is sent, never the post. Every LinkedIn row of the card that
+    has a failed comment is retried with the words and the post id kept when it
+    failed. A card with nothing to retry answers 400 and sends nothing, so a
+    double click cannot comment twice.
+    """
+    post = get_standalone_post(post_id)
+    if not post:
+        return jsonify({"error": "Post not found"}), 404
+
+    rows = [row for row in _card_rows(post, _requested_post_ids(post_id))
+            if row['platform'] == 'linkedin'
+            and (link_comment_state(row) or {}).get('status') == 'failed']
+    if not rows:
+        return jsonify({"error": "There is no failed link comment to retry for this post"}), 400
+
+    results = [(row, social_publisher.retry_first_comment(row['id'])) for row in rows]
+    failed = [(row, result) for row, result in results if not result['success']]
+    status = 200
+    if failed:
+        status = 401 if any(result['needs_reconnect'] for _, result in failed) else 400
+    return jsonify({
+        "success": not failed,
+        "message": ("The link comment was posted" if not failed else
+                    f"The link comment still did not post: {failed[0][1]['error']}"),
+        "needs_reconnect": any(result['needs_reconnect'] for _, result in failed),
+        "results": [
+            {"post_id": row['id'], "success": result['success'], "error": result['error'],
+             "first_comment": result.get('first_comment'),
+             "account_label": result['account_label']}
+            for row, result in results
+        ],
+        "link_comment": _linkedin_link_comment_card(get_standalone_post(rows[0]['id'])),
+    }), status
 
 
 @app.route('/compose/post/<int:post_id>/stock-image', methods=['GET'])
@@ -9986,6 +10156,7 @@ def _publish_response(result):
             "permalink": result['permalink'],
             "post_urn": result['permalink'],
             "message": f"Posted to {result['account_label']}!",
+            "first_comment": result.get('first_comment'),
         })
     status = 401 if result['needs_reconnect'] else 400
     return jsonify({
@@ -10137,6 +10308,7 @@ def compose_publish_card(post_id: int):
                 "post_urn": result['permalink'],
                 "error": result['error'],
                 "needs_reconnect": result['needs_reconnect'],
+                "first_comment": result.get('first_comment'),
             }
             for row, result in zip(rows, results)
         ],
@@ -11206,6 +11378,14 @@ def scheduled_post_worker() -> None:
                             "Published scheduled post %d to %s",
                             post['id'], result['account_label'],
                         )
+                        comment = result.get('first_comment')
+                        if comment and comment['status'] == 'failed':
+                            # The post is out and stays out; only the comment is
+                            # missing, and Compose offers a retry for it.
+                            app.logger.warning(
+                                "Scheduled post %d is live on %s but its link comment failed: %s",
+                                post['id'], result['account_label'], comment['error'],
+                            )
                         continue
 
                     error_msg = str(result['error'] or 'Unknown error')[:500]

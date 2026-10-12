@@ -817,6 +817,7 @@ def actions_functions(source):
              "requestToggleUsed", "toggleUsed", "deleteConfirmText", "requestDeleteCard", "noteCardDeleted",
              "deletePost", "postNowConfirmText", "publishAllConfirmText", "publishCardToAll", "queueCardToAll",
              "publishCardPlatform", "markChipPosted", "postedUrlFrom", "platformConnected",
+             "noteFirstComment", "renderLinkCommentState",
              "adjustPostCountBadge", "loadMoreControls", "setLoadMoreLabels", "cardPostIds", "cardPlatforms"]
     return (platform_tables(source) + "\n" + lift(source, names)
             + "\nvar searchReplacePostData = [];\nvar openSearchEdits = {};\n")

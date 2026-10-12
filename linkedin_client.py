@@ -99,6 +99,28 @@ LINKEDIN_USERINFO_URL = "https://api.linkedin.com/v2/userinfo"
 LINKEDIN_POSTS_URL = "https://api.linkedin.com/rest/posts"
 LINKEDIN_IMAGES_URL = "https://api.linkedin.com/rest/images"
 LINKEDIN_VIDEOS_URL = "https://api.linkedin.com/rest/videos"
+LINKEDIN_SOCIAL_ACTIONS_URL = "https://api.linkedin.com/rest/socialActions"
+
+# The longest comment LinkedIn's own app takes. The API documentation gives no
+# figure of its own, so this is the conservative bound: a link comment longer
+# than this is refused before the post goes out instead of after.
+COMMENT_MAX_CHARS = 1250
+
+# A comment made the instant its post exists can meet a LinkedIn that has not
+# caught up (404), and the per-member comment throttle answers 429. Both mean
+# the comment was not created, so one more try is safe; any other failure, and
+# above all a dropped connection, might have created it and is never repeated.
+COMMENT_RETRY_DELAY = 3.0
+_COMMENT_RETRY_STATUSES = (404, 429)
+
+# What extract_first_url has always used to find a post's link, kept as it was.
+_URL_RE = re.compile(r'https?://[^\s<>"\')\]]+(?:\([^\s<>"\')\]]*\)[^\s<>"\')\]]*)*')
+# What lifts links out of a post for its comment. The same, except that a closing
+# bracket belongs to a link only when the link opened it: "(https://a.test/x)" gives
+# the link without the bracket, and ".../Foo_(bar)" gives the whole address where the
+# pattern above stops at the first ")", which would post a truncated link.
+_LINK_RE = re.compile(r'https?://(?:[^\s<>"\')\]()]|\([^\s<>"\')\]()]*\))+')
+_LINK_TRAILING_PUNCTUATION = ".,;:!?"
 
 # LinkedIn finishes processing a video some seconds to a few minutes after the
 # upload is finalized, and a post that points at a video that is not AVAILABLE
@@ -295,14 +317,11 @@ class LinkedInClient:
         
         Returns the first http/https URL found, or None if no URL is found.
         """
-        import re
-        # Match http/https URLs
-        url_pattern = r'https?://[^\s<>"\')\]]+(?:\([^\s<>"\')\]]*\)[^\s<>"\')\]]*)*'
-        match = re.search(url_pattern, text)
+        match = _URL_RE.search(text)
         if match:
             url = match.group(0)
             # Clean up trailing punctuation that might have been captured
-            url = url.rstrip('.,;:!?')
+            url = url.rstrip(_LINK_TRAILING_PUNCTUATION)
             return url
         return None
 
@@ -937,6 +956,150 @@ class LinkedInClient:
             timeout=30,
         )
         return response.status_code == 204
+
+    def create_comment(
+        self,
+        access_token: str,
+        actor_urn: str,
+        post_urn: str,
+        text: str,
+    ) -> dict:
+        """Comment on a post as the member who owns ``actor_urn``.
+
+        This is how a post's link reaches LinkedIn without being in the post:
+        the post goes out with no link in it, and the link follows as its first
+        comment. The reply is ``{"success": True, "comment_id": ...}`` or
+        ``{"success": False, "friendly": <what to tell a person>, ...}``; it
+        never raises, because the post it belongs to is already live and the
+        caller has to report the comment on its own.
+
+        LinkedIn answers 404 for a post it has not finished creating and 429
+        when a member comments too fast. Those mean nothing was created, so the
+        call waits a moment and tries once more. Nothing else is repeated: a
+        timeout or a 5xx might have created the comment, and a second one under
+        the same post would be worse than a missing one.
+        """
+        url = f"{LINKEDIN_SOCIAL_ACTIONS_URL}/{quote(post_urn, safe='')}/comments"
+        payload = {
+            "actor": actor_urn,
+            "object": post_urn,
+            "message": {"text": text},
+        }
+
+        retried = False
+        while True:
+            try:
+                response = requests.post(
+                    url,
+                    json=payload,
+                    headers=self._get_api_headers(access_token),
+                    timeout=30,
+                )
+            except requests.RequestException as exc:
+                logger.error("LinkedIn comment request failed: %s", exc)
+                return {
+                    "success": False,
+                    "error": {"raw": str(exc)},
+                    "friendly": f"Could not reach LinkedIn to post the comment: {exc}",
+                }
+            if response.status_code in _COMMENT_RETRY_STATUSES and not retried:
+                retried = True
+                _sleep(COMMENT_RETRY_DELAY)
+                continue
+            break
+
+        if response.status_code in (200, 201):
+            body = _error_json(response)
+            comment_id = response.headers.get("x-restli-id") or (
+                body.get("id") if isinstance(body, dict) else None
+            )
+            return {
+                "success": True,
+                "comment_id": str(comment_id) if comment_id else None,
+                "status_code": response.status_code,
+            }
+
+        error_data = _error_json(response)
+        logger.error("LinkedIn comment failed: %s - %s", response.status_code, error_data)
+        return {
+            "success": False,
+            "status_code": response.status_code,
+            "error": error_data,
+            "friendly": _comment_failure_text(response),
+            "needs_reconnect": response.status_code == 401,
+        }
+
+
+def split_link_for_comment(text: str) -> tuple[str, list[str]]:
+    """Take every link out of a post's copy, for the first comment.
+
+    Returns ``(body, links)``: ``body`` is the copy without the links and
+    ``links`` are the links in the order they appeared, each once. Copy with no
+    link comes back untouched, the same object, so a post that does not use this
+    is not even rewritten.
+
+    Only the lines that held a link are touched. A line that was nothing but a
+    link disappears (and the blank line it leaves behind does not double up), a
+    link in the middle of a sentence closes up the gap it leaves, and brackets
+    left empty go with it. Punctuation that was stuck to the end of a link
+    ("see https://x.com.") stays in the copy. Nothing else is reworded, so write
+    the copy to read without the link, for example "Link in the first comment".
+    """
+    text = text or ""
+    if not _LINK_RE.search(text):
+        return text, []
+
+    links: list[str] = []
+
+    def take(match: "re.Match[str]") -> str:
+        found = match.group(0)
+        link = found.rstrip(_LINK_TRAILING_PUNCTUATION)
+        if link not in links:
+            links.append(link)
+        return found[len(link):]
+
+    kept: list[str] = []
+    gap_left = False
+    for line in text.split("\n"):
+        if not _LINK_RE.search(line):
+            if gap_left and not line.strip() and kept and not kept[-1].strip():
+                gap_left = False
+                continue
+            gap_left = False
+            kept.append(line)
+            continue
+        indent = line[: len(line) - len(line.lstrip(" \t"))]
+        carriage_return = "\r" if line.endswith("\r") else ""
+        line = _LINK_RE.sub(take, line)
+        line = re.sub(r"\(\s*\)|\[\s*\]", "", line)
+        line = re.sub(r"(?<=\S)[ \t]{2,}(?=\S)", " ", line).strip(" \t\r")
+        if line:
+            gap_left = False
+            kept.append(indent + line + carriage_return)
+        else:
+            gap_left = True
+
+    return "\n".join(kept).strip(), links
+
+
+def _comment_failure_text(response: requests.Response) -> str:
+    """Why LinkedIn refused a comment, in words for the person who posted."""
+    status = response.status_code
+    said = _error_text(response)
+    if status == 401:
+        return ("LinkedIn no longer accepts this connection. Reconnect LinkedIn, "
+                "then retry the comment.")
+    if status == 403:
+        return ("LinkedIn would not let this connection comment. Commenting needs the "
+                "w_member_social_feed permission (the Community Management API "
+                "product); reconnect LinkedIn once it is granted, then retry the "
+                f"comment. LinkedIn said: {said}")
+    if status == 404:
+        return "LinkedIn could not find the post to comment on."
+    if status == 429:
+        return ("LinkedIn is limiting how fast this account can comment. "
+                "Retry the comment in a minute.")
+    return f"LinkedIn refused the comment ({status}): {said}"
 
 
 def _error_json(response: requests.Response) -> dict:

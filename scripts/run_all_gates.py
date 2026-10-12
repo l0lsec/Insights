@@ -272,13 +272,63 @@ FIND_RESULTS_GATES = [
      ("server",)),
 ]
 
+# A LinkedIn post's link sent as its first comment. One script, one gate per claim,
+# picked by argument. The client one reads the HTTP the client would send; the rest
+# drive the real routes, database, publisher and scheduler entry point with a
+# recording LinkedIn client, and two read the rendered pages or run the page's
+# functions under node. Nothing posts anywhere.
+LINK_COMMENT_GATES = [
+    ("check_link_comment.py", "LINK_COMMENT_CLIENT_OK",
+     "the LinkedIn comment request is the documented one, each refusal is explained, and only 404 and 429 are tried again",
+     ("client",)),
+    ("check_link_comment.py", "LINK_COMMENT_SPLIT_OK",
+     "taking links out of a post moves every one in order and leaves the rest of the copy as written",
+     ("split",)),
+    ("check_link_comment.py", "LINK_COMMENT_PUBLISH_OK",
+     "a LinkedIn text, image or video post goes out without its link and the link follows once as the first comment",
+     ("publish",)),
+    ("check_link_comment.py", "LINK_COMMENT_OFF_OK",
+     "a post that does not use the first comment makes the same LinkedIn calls and returns the same result as before",
+     ("off",)),
+    ("check_link_comment.py", "LINK_COMMENT_FAILURE_OK",
+     "a refused comment never fails or repeats the post, and the reason and link are kept on the row",
+     ("failure",)),
+    ("check_link_comment.py", "LINK_COMMENT_REFUSE_OK",
+     "a post that cannot carry its comment is refused before anything is sent, and a post with no link just posts",
+     ("refuse",)),
+    ("check_link_comment.py", "LINK_COMMENT_RETRY_OK",
+     "retrying a failed comment sends only the comment, as the row's own account, and never twice",
+     ("retry",)),
+    ("check_link_comment.py", "LINK_COMMENT_PERSIST_OK",
+     "the new columns upgrade an old database, the setters round-trip, and post choice beats account beats off",
+     ("persist",)),
+    ("check_link_comment.py", "LINK_COMMENT_ROUTES_OK",
+     "the card and account routes set only what they should, refuse bad input unwritten, and a ticked LinkedIn target inherits the choice",
+     ("routes",)),
+    ("check_link_comment.py", "LINK_COMMENT_PATHS_OK",
+     "Post now, the whole-card publish and the scheduler each move the link and report a lost comment without failing the post",
+     ("paths",)),
+    ("check_link_comment.py", "LINK_COMMENT_UI_OK",
+     "the Compose card and the Accounts page show the choice, the failure with Retry and the posted note, only where they apply",
+     ("ui",)),
+    ("check_link_comment.py", "LINK_COMMENT_JS_OK",
+     "the page's link-comment functions send what the routes expect and announce a lost comment, under node",
+     ("js",)),
+    ("check_link_comment.py", "LINK_COMMENT_DOCS_OK",
+     "the README documents the feature, its routes and the permission it needs",
+     ("docs",)),
+    ("check_link_comment.py", "LINK_COMMENT_REGISTERED_OK",
+     "every section of the link-comment check is registered here under its token",
+     ("registered",)),
+]
+
 # check_*.py files that are deliberately not gates, with the reason. Empty is the
 # healthy state: a script that is not a gate should not carry the check_ prefix.
 NOT_GATES = {}
 
 ALL_GATES = (ACCOUNT_GATES + ACCOUNT_JS_GATES + LIBRARY_GATES + COMPOSE_GATES
              + VIDEO_GATES + MANUAL_POST_GATES + QUEUE_GATES + PAGING_GATES
-             + IG_PEOPLE_GATES + FIND_RESULTS_GATES)
+             + IG_PEOPLE_GATES + FIND_RESULTS_GATES + LINK_COMMENT_GATES)
 
 
 def _unpack(entry):

@@ -3840,6 +3840,8 @@ async function publishCardPlatform(postItem, postId, platform, accountId) {
             return false;
         }
         markChipPosted(postItem, platform, postedUrlFrom(platform, data), accountId);
+        const warning = noteFirstComment(postItem, data.account_label || label, data.first_comment);
+        if (warning) alert(warning);
         return true;
     } catch (e) {
         alert(`${label}: ${e.message}`);
@@ -3905,12 +3907,17 @@ async function publishCardToAll(postId, postIds, postItem) {
         const data = await res.json();
         if (!res.ok && !data.results) throw new Error(data.error || 'Could not publish');
 
+        const warnings = [];
         (data.results || []).forEach(r => {
-            if (r.success) markChipPosted(postItem, r.platform, postedUrlFrom(r.platform, r), r.account_id);
+            if (!r.success) return;
+            markChipPosted(postItem, r.platform, postedUrlFrom(r.platform, r), r.account_id);
+            const warning = noteFirstComment(postItem, r.account_label, r.first_comment);
+            if (warning) warnings.push(warning);
         });
         const failed = (data.results || []).filter(r => !r.success);
-        if (failed.length) {
-            alert(failed.map(r => `${r.account_label}: ${r.error}`).join('\n'));
+        const problems = failed.map(r => `${r.account_label}: ${r.error}`).concat(warnings);
+        if (problems.length) {
+            alert(problems.join('\n'));
         }
         showToast(data.message, data.success ? 'success' : (data.published ? 'warning' : 'error'));
         return data;
@@ -4109,6 +4116,108 @@ function saveIgPeople(postId) {
             return true;
         })
         .catch(() => { showError('Could not save collaborators'); return false; });
+}
+
+// ---- LinkedIn: the link in the first comment --------------------------------
+// LinkedIn holds back posts that link out, so a card can send its link as the
+// post's first comment instead. The card's markup is drawn once by the server;
+// these functions only toggle and fill it, from the same record the server keeps.
+
+function showLinkCommentError(box, message) {
+    const error = box && box.querySelector('.li-link-error');
+    if (!error) return;
+    error.textContent = message || '';
+    error.classList.toggle('d-none', !message);
+}
+
+// Show what became of a post's comment: nothing yet, posted, or failed (with the
+// reason, the link to paste by hand, and the Retry button). `state` is the
+// server's note {status, error, text}, or null.
+function renderLinkCommentState(box, state) {
+    if (!box) return;
+    const failed = box.querySelector('.li-link-failed');
+    const posted = box.querySelector('.li-link-posted');
+    const isFailed = !!(state && state.status === 'failed');
+    const isPosted = !!(state && state.status === 'posted');
+    if (failed) {
+        failed.classList.toggle('d-none', !isFailed);
+        const reason = failed.querySelector('.li-link-error-text');
+        const text = failed.querySelector('.li-link-text');
+        if (reason) reason.textContent = isFailed ? (state.error || '') : '';
+        if (text) text.textContent = isFailed ? (state.text || '') : '';
+    }
+    if (posted) posted.classList.toggle('d-none', !isPosted);
+}
+
+// Redraw a card's link control from the server's summary {mode, effective, state}.
+function renderLinkComment(box, link) {
+    if (!box || !link) return;
+    const select = box.querySelector('select');
+    if (select && link.mode) select.value = link.mode;
+    const hint = box.querySelector('.li-link-hint');
+    if (hint) {
+        hint.textContent = link.effective
+            ? 'The link is posted as the first comment, not in the post.'
+            : 'The link stays in the post.';
+    }
+    renderLinkCommentState(box, link.state);
+}
+
+// Save where the card's link goes. The server applies it to every LinkedIn
+// account on the card and answers with the card's new summary.
+function saveLinkComment(postId) {
+    const box = document.getElementById('li-link-comment-' + postId);
+    const select = document.getElementById('li-link-mode-' + postId);
+    if (!box || !select) return Promise.resolve(false);
+    const body = new FormData();
+    body.append('mode', select.value);
+    body.append('post_ids', cardIdsParam(postId));
+    return fetch(`/compose/post/${postId}/link-comment`, { method: 'POST', body: body })
+        .then(r => r.json().then(d => ({ ok: r.ok, d: d })))
+        .then(({ ok, d }) => {
+            if (!ok || !d.success) {
+                showLinkCommentError(box, d.error || 'Could not save');
+                return false;
+            }
+            showLinkCommentError(box, '');
+            renderLinkComment(box, d.link_comment);
+            return true;
+        })
+        .catch(() => { showLinkCommentError(box, 'Could not save'); return false; });
+}
+
+// Post the link comment LinkedIn refused again, on the post that is already live.
+// Only the comment is sent. A refusal is shown on the card with LinkedIn's reason.
+function retryLinkComment(postId, btn) {
+    const box = document.getElementById('li-link-comment-' + postId);
+    const body = new FormData();
+    body.append('post_ids', cardIdsParam(postId));
+    if (btn) btn.disabled = true;
+    return fetch(`/compose/post/${postId}/link-comment/retry`, { method: 'POST', body: body })
+        .then(r => r.json().then(d => ({ ok: r.ok, d: d })))
+        .then(({ ok, d }) => {
+            if (box && d.link_comment) renderLinkComment(box, d.link_comment);
+            if (!ok || !d.success) {
+                showLinkCommentError(box, d.message || d.error || 'The comment still did not post');
+                return false;
+            }
+            showLinkCommentError(box, '');
+            showToast('Link posted as the first comment', 'success');
+            return true;
+        })
+        .catch(() => { showLinkCommentError(box, 'Could not reach the server'); return false; })
+        .then(done => { if (btn) btn.disabled = false; return done; });
+}
+
+// A publish result's link comment, applied to the card it came from. Returns the
+// sentence to tell the person when the post went out without its comment, or ''.
+// The post itself still counts as published: only the comment is missing.
+function noteFirstComment(postItem, label, comment) {
+    if (!comment) return '';
+    const box = postItem && postItem.querySelector('.li-link-comment');
+    renderLinkCommentState(box, comment);
+    if (comment.status !== 'failed') return '';
+    return `${label}: posted, but the link comment did not post. ${comment.error || ''}`.trim();
 }
 
 function igAddItem(postId, url, kind) {
