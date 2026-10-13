@@ -374,7 +374,7 @@ const cardIds = (n) => [1000 + n, 5000 + n];
 function world(opts = {}) {
   const w = { total: opts.total ?? 300, fetches: [], toasts: [], gates: [], failures: [], alerts: [],
               confirms: [], confirmAnswer: opts.confirm ?? true, revealed: [], cards: [], usedUI: [],
-              refreshed: [], usedRefreshed: [], searches: [], scheduleOpened: [], clipboard: [],
+              refreshed: [], usedRefreshed: [], rechecked: [], searches: [], scheduleOpened: [], clipboard: [],
               modalShown: opts.modalShown ?? true, modalHides: 0, modalShows: 0, scheduleListeners: [],
               replies: opts.replies || {}, wrap: null, badge: { textContent: opts.badge || '300 saved posts' } };
 
@@ -451,6 +451,7 @@ function world(opts = {}) {
     initLoadedPosts: () => {}, updateSelectedCount: () => {}, clearSelectAllScope: () => {},
     setCardUsedUI: (card, used) => w.usedUI.push([card ? card.n : null, used]),
     refreshCard: async (card) => { w.refreshed.push(card ? card.n : null); },
+    recheckCardFilters: async (card) => { w.rechecked.push(card ? card.n : null); },
     refreshCardUsedState: async (card) => { w.usedRefreshed.push(card ? card.n : null); },
     doSearch: async (preserve) => { w.searches.push(preserve); },
     openScheduleModal: (id, type, platform) => w.scheduleOpened.push([id, type, platform]),
@@ -720,7 +721,8 @@ const posts = (w) => w.fetches.filter(f => f.method === 'POST').map(f => [f.path
   w.setResults([result(5)]);
   await w.run(`toggleSearchResultUsed('${cardIds(5)[1]}')`);
   await settle();
-  out.used = { posts: posts(w), usedUI: [...w.usedUI], searches: [...w.searches], toasts: [...w.toasts] };
+  out.used = { posts: posts(w), usedUI: [...w.usedUI], rechecked: [...w.rechecked], searches: [...w.searches],
+               toasts: [...w.toasts] };
 
   // post now, one account (the Threads one, index 1), card not loaded
   w = world({ replies: { '/threads': { success: true, permalink: 'https://threads.net/x' } } });
@@ -802,7 +804,7 @@ const posts = (w) => w.fetches.filter(f => f.method === 'POST').map(f => [f.path
   w.ctx.__card = card2;
   await w.run(`toggleUsed(1006, { closest: () => __card })`);
   await settle();
-  out.cardUsed = { posts: posts(w), usedUI: [...w.usedUI] };
+  out.cardUsed = { posts: posts(w), usedUI: [...w.usedUI], rechecked: [...w.rechecked] };
 
   console.log(JSON.stringify(out));
 })().catch(e => { console.error(e.stack); process.exit(1); });
@@ -815,6 +817,7 @@ def actions_functions(source):
              "copySearchResult", "toggleSearchResultUsed", "postNowFromSearchResult", "postAllFromSearchResult",
              "queueAllFromSearchResult", "scheduleFromSearchResult", "deleteSearchResult",
              "requestToggleUsed", "toggleUsed", "deleteConfirmText", "requestDeleteCard", "noteCardDeleted",
+             "noteCardLeftList",
              "deletePost", "postNowConfirmText", "publishAllConfirmText", "publishCardToAll", "queueCardToAll",
              "publishCardPlatform", "markChipPosted", "postedUrlFrom", "platformConnected",
              "noteFirstComment", "renderLinkCommentState",
@@ -857,7 +860,8 @@ def section_actions():
 
     s = r["used"]
     check(s["posts"] == [["/compose/post/1005/toggle-used", whole, None, None]]
-          and s["usedUI"] == [[5, True]] and s["searches"] == [True] and ["success", "Marked as used"] in s["toasts"],
+          and s["usedUI"] == [[5, True]] and s["rechecked"] == [5]
+          and s["searches"] == [True] and ["success", "Marked as used"] in s["toasts"],
           f"used toggles the whole card, the page card and the results follow: {s}")
 
     p = r["postNow"]
@@ -900,8 +904,9 @@ def section_actions():
           and cd["confirms"] == ["Delete this post? It goes to LinkedIn, Threads — all of them will be deleted."],
           f"the card's own delete still sends every row and now keeps Load more in step: {cd}")
     cu = r["cardUsed"]
-    check(cu["posts"] == [["/compose/post/1006/toggle-used", "1006,5006", None, None]] and cu["usedUI"] == [[6, False]],
-          f"the card's own used toggle still sends every row and redraws: {cu}")
+    check(cu["posts"] == [["/compose/post/1006/toggle-used", "1006,5006", None, None]] and cu["usedUI"] == [[6, False]]
+          and cu["rechecked"] == [6],
+          f"the card's own used toggle still sends every row, redraws, and re-checks the filters: {cu}")
 
     print("actions: delete, used, post now, post to all, queue all, schedule and copy send the whole card "
           "and keep the page and results in step")

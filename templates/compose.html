@@ -3704,7 +3704,10 @@ async function requestToggleUsed(postId, postIds) {
 function toggleUsed(postId, btn) {
     const postItem = btn.closest('.post-item');
     requestToggleUsed(postId, cardPostIds(postItem, false))
-        .then(used => setCardUsedUI(postItem, used))
+        .then(used => {
+            setCardUsedUI(postItem, used);
+            recheckCardFilters(postItem);
+        })
         .catch(e => showToast('Could not update: ' + e.message, 'error'));
 }
 
@@ -3727,11 +3730,24 @@ async function requestDeleteCard(postId, postIds) {
     return data;
 }
 
-// A deleted card leaves the list one shorter. When it was on the page, the
-// next "Load more" must start one earlier too, or the card that moves up into
-// its place is skipped; when it was further down, only the total shrinks.
+// A deleted card leaves the list one shorter.
 function noteCardDeleted(wasLoaded) {
     adjustPostCountBadge(-1);
+    noteCardLeftList(wasLoaded);
+}
+
+// A card the filters no longer match (queued while "Not Queued" is showing,
+// say) leaves the list as a deleted one does, but the post is still saved, so
+// only the count of matching posts drops.
+function noteCardFilteredOut() {
+    adjustPostCountBadge(-1, 0);
+    noteCardLeftList(true);
+}
+
+// The list is one card shorter. When the card was on the page, the next "Load
+// more" must start one earlier too, or the card that moves up into its place is
+// skipped; when it was further down, only the total shrinks.
+function noteCardLeftList(wasLoaded) {
     const controls = loadMoreControls();
     if (!controls) return;
     const shown = parseInt(controls.more.dataset.offset || '0', 10);
@@ -3783,6 +3799,10 @@ Object.entries(PLATFORM_META).forEach(([platform, meta]) => {
     PLATFORM_CHIP_ICONS[platform] = meta.icon;
     PLATFORM_CHIP_COLORS[platform] = meta.color;
 });
+
+function platformList(platforms) {
+    return platforms.map(p => PLATFORM_LABELS[p] || p).join(', ');
+}
 
 function platformConnected(platform) {
     return {
@@ -5148,11 +5168,15 @@ function cardTargets(postItem) {
 // platform filter took some of them: the redraw asks for those alone, and an
 // empty list means nothing is left, so the card goes. Left out, the card is
 // redrawn from every row the page holds for it.
+//
+// The server also says whether the card still matches the filters, and a card
+// that doesn't leaves the list: queued under "Not Queued", marked used under
+// "Unused", or left without the platform the list is filtered to.
 async function refreshCard(postItem, remainingIds) {
     if (!postItem) return;
     if (remainingIds && !remainingIds.length) {
         postItem.remove();
-        adjustPostCountBadge(-1);
+        noteCardDeleted(true);
         return;
     }
     const ids = remainingIds || cardPostIds(postItem, false);
@@ -5162,13 +5186,31 @@ async function refreshCard(postItem, remainingIds) {
         const body = new FormData();
         body.append('post_ids', ids.join(','));
         if (postItem.dataset.postIndex) body.append('display_index', postItem.dataset.postIndex);
+        body.append('filters', JSON.stringify(currentPostFilters()));
         const res = await fetch(`/compose/post/${anchorId}/card`, { method: 'POST', body: body });
         const data = await res.json();
-        if (res.ok && data.success) replaceCard(postItem, data.html);
+        if (!res.ok || !data.success) return;
+        // Detached: the list was redrawn while this was out, and the new one is right.
+        if (postItem.isConnected === false) return;
+        if (data.matches === false) {
+            postItem.remove();
+            noteCardFilteredOut();
+            if (selectModeActive) updateSelectedCount();
+        } else {
+            replaceCard(postItem, data.html);
+        }
     } catch (e) {
         // A card that fails to redraw is stale, not broken; the next page load
         // fixes it, and throwing here would swallow the action that succeeded.
     }
+}
+
+// After a change that can take a card out of the filtered list, redraw it from
+// the server, which drops it when the filters no longer match. With no filter on
+// every card belongs, and the change is already drawn on it.
+function recheckCardFilters(postItem) {
+    if (!postItem || !anyFilterActive(currentPostFilters())) return Promise.resolve();
+    return refreshCard(postItem);
 }
 
 // Every row behind a card. With a platform filter active the list is showing
@@ -5292,7 +5334,7 @@ async function togglePostPlatform(btn, platform) {
 function replaceCard(postItem, html) {
     if (!html) {
         postItem.remove();
-        adjustPostCountBadge(-1);
+        noteCardDeleted(true);
         return;
     }
     postItem.insertAdjacentHTML('afterend', html);
@@ -5304,17 +5346,24 @@ function replaceCard(postItem, html) {
     if (selectModeActive) updateSelectedCount();
 }
 
-// The badge reads "N saved posts", or "N of M posts" under a filter; a card
-// coming or going changes both numbers. (Stripping the non-digits, as this
-// once did, read "120 of 120 posts" as 120120.)
-function adjustPostCountBadge(delta) {
+// The badge reads "N saved posts", or "N of M posts" under a filter, and the
+// filter bar says "Showing N of M". A card deleted changes both numbers; a card
+// that stops matching the filters changes N alone (`savedDelta` 0). (Stripping
+// the non-digits, as this once did, read "120 of 120 posts" as 120120.)
+function adjustPostCountBadge(delta, savedDelta = delta) {
+    const results = document.getElementById('filter-results-count');
+    const showing = results && /^Showing (\d+) of (\d+)$/.exec((results.textContent || '').trim());
+    if (showing) {
+        results.textContent = `Showing ${Math.max(0, parseInt(showing[1], 10) + delta)}`
+            + ` of ${Math.max(0, parseInt(showing[2], 10) + savedDelta)}`;
+    }
     const badge = document.getElementById('posts-count');
     if (!badge) return;
     const text = (badge.textContent || '').trim();
     const filtered = /^(\d+) of (\d+) posts$/.exec(text);
     if (filtered) {
         const shown = Math.max(0, parseInt(filtered[1], 10) + delta);
-        const total = Math.max(0, parseInt(filtered[2], 10) + delta);
+        const total = Math.max(0, parseInt(filtered[2], 10) + savedDelta);
         badge.textContent = `${shown} of ${total} posts`;
         return;
     }
@@ -5588,6 +5637,7 @@ function toggleQueue(postId, postType, platform, btn, isQueued) {
             if (data.success) {
                 setChipQueuedUI(btn, !isQueued, data.scheduled_for);
                 showToast(data.message, 'success');
+                recheckCardFilters(btn.closest('.post-item'));
             } else {
                 btn.innerHTML = originalText;
                 alert('Error: ' + (data.error || (isQueued ? 'Failed to remove from queue' : 'Failed to add to queue')));
@@ -5669,6 +5719,7 @@ function schedulePost() {
                 ? card.querySelector(`.platform-chip[data-platform="${platform}"] .chip-queue`)
                 : null;
             if (queueBtn) setChipQueuedUI(queueBtn, true, data.scheduled_for_display);
+            recheckCardFilters(card);
         } else {
             alert('Error: ' + (data.error || 'Failed to schedule'));
         }
@@ -5686,7 +5737,9 @@ function schedulePost() {
 //   {filters: {platform, used, queued, image, source, brief}, total, byPlatform}
 let selectAllScope = null;
 
-const SCOPE_QUEUEABLE_PLATFORMS = ['linkedin', 'threads'];
+// The server's list, so a platform it can schedule is never left out of the
+// bulk queue (X, Facebook and Instagram once were).
+const SCOPE_QUEUEABLE_PLATFORMS = {{ schedulable_platforms | tojson }};
 const SCOPE_POSTABLE_PLATFORMS = ['linkedin', 'threads', 'facebook', 'twitter', 'instagram'];
 
 // The filter bar's current state. The server reproduces this exact predicate so
@@ -6124,7 +6177,7 @@ async function deleteSelectedPosts() {
                 const remaining = cardPostIds(card.postItem, false).filter(id => !card.ids.includes(id));
                 if (remaining.length === 0) {
                     card.postItem.remove();
-                    adjustPostCountBadge(-1);
+                    noteCardDeleted(true);
                 } else {
                     refreshCard(card.postItem, remaining);
                 }
@@ -6203,7 +6256,10 @@ async function markUsedSelectedPosts() {
         btn.disabled = false;
 
         if (data.success) {
-            cards.forEach(card => setCardUsedUI(card.postItem, markAsUsed));
+            cards.forEach(card => {
+                setCardUsedUI(card.postItem, markAsUsed);
+                recheckCardFilters(card.postItem);
+            });
             toggleSelectMode();
             const action = markAsUsed ? 'used' : 'unused';
             showToast(`Marked ${data.updated_count} post${data.updated_count !== 1 ? 's' : ''} as ${action}`, 'success');
@@ -6342,12 +6398,14 @@ async function queueSelectedPosts() {
             SCOPE_QUEUEABLE_PLATFORMS.includes(p) && (selectAllScope.byPlatform || {})[p] > 0);
 
         if (queueablePlatforms.length === 0) {
-            alert('No queueable posts selected (only LinkedIn and Threads posts can be queued)');
+            alert('Nothing in the selection can be queued');
             return;
         }
-        const missing = queueablePlatforms.filter(p => !platformConnected(p));
-        if (missing.length) {
-            alert('Please connect these platforms first: ' + missing.map(p => PLATFORM_LABELS[p] || p).join(', '));
+        // A platform that isn't connected is left out rather than holding up the rest.
+        const notConnected = queueablePlatforms.filter(p => !platformConnected(p));
+        const platformsToQueue = queueablePlatforms.filter(p => platformConnected(p));
+        if (!platformsToQueue.length) {
+            alert('Please connect these platforms first: ' + platformList(notConnected));
             return;
         }
 
@@ -6363,7 +6421,7 @@ async function queueSelectedPosts() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     filters: selectAllScope.filters,
-                    platforms: queueablePlatforms,
+                    platforms: platformsToQueue,
                 })
             });
             data = await res.json();
@@ -6384,19 +6442,21 @@ async function queueSelectedPosts() {
         let msg = `Queued ${queuedTotal} post${queuedTotal !== 1 ? 's' : ''}`;
         if (data.skipped) msg += `, skipped ${data.skipped}`;
         if (data.no_slots) msg += ' (ran out of time slots — add more)';
-        showToast(msg, data.no_slots ? 'warning' : 'success');
+        if (notConnected.length) msg += `; not connected, so not queued: ${platformList(notConnected)}`;
+        showToast(msg, data.no_slots || notConnected.length ? 'warning' : 'success');
         setTimeout(() => location.reload(), 1200);
         return;
     }
 
     // One queue entry per queueable, not-yet-queued platform of each card.
-    const postsToQueue = [];
-    selectedCards().forEach(card => {
+    const cards = selectedCards();
+    const candidates = [];
+    cards.forEach(card => {
         selectedChips(card).forEach(chip => {
             if (!SCOPE_QUEUEABLE_PLATFORMS.includes(chip.dataset.platform)) return;
             const queueChip = chip.querySelector('.chip-queue');
             if (queueChip && queueChip.dataset.queued === 'true') return;
-            postsToQueue.push({
+            candidates.push({
                 postId: parseInt(chip.dataset.platformPostId, 10),
                 platform: chip.dataset.platform,
                 btn: queueChip,
@@ -6404,14 +6464,16 @@ async function queueSelectedPosts() {
         });
     });
 
-    if (postsToQueue.length === 0) {
-        alert('No queueable posts selected (only LinkedIn and Threads posts can be queued)');
+    if (candidates.length === 0) {
+        alert('The selected posts are already queued on every platform they go to');
         return;
     }
 
-    const missing = [...new Set(postsToQueue.map(p => p.platform))].filter(p => !platformConnected(p));
-    if (missing.length) {
-        alert('Please connect these platforms first: ' + missing.map(p => PLATFORM_LABELS[p] || p).join(', '));
+    // A platform that isn't connected is left out rather than holding up the rest.
+    const notConnected = [...new Set(candidates.map(p => p.platform))].filter(p => !platformConnected(p));
+    const postsToQueue = candidates.filter(p => platformConnected(p.platform));
+    if (!postsToQueue.length) {
+        alert('Please connect these platforms first: ' + platformList(notConnected));
         return;
     }
 
@@ -6422,8 +6484,10 @@ async function queueSelectedPosts() {
 
     let successCount = 0;
     let errorCount = 0;
+    const errors = [];
 
     for (const post of postsToQueue) {
+        const label = PLATFORM_LABELS[post.platform] || post.platform;
         try {
             const formData = new FormData();
             formData.append('platform', post.platform);
@@ -6439,11 +6503,17 @@ async function queueSelectedPosts() {
                 if (post.btn) setChipQueuedUI(post.btn, true, data.scheduled_for);
             } else {
                 errorCount++;
+                errors.push(`${label}: ${data.error || 'Failed to add to queue'}`);
             }
         } catch (e) {
             errorCount++;
+            errors.push(`${label}: ${e.message}`);
         }
     }
+
+    // A queued card may no longer belong in the list ("Not Queued"), so the
+    // server redraws each one and says whether it still matches the filters.
+    await Promise.all(cards.map(card => recheckCardFilters(card.postItem)));
 
     queueBtn.innerHTML = originalText;
     queueBtn.disabled = false;
@@ -6453,13 +6523,19 @@ async function queueSelectedPosts() {
     } else {
         showToast(`Added ${successCount}, failed ${errorCount}`, errorCount > successCount ? 'error' : 'warning');
     }
+    // Say why: with every platform queueable, "no free slot" or "Instagram needs
+    // an image" is the likely answer, and a bare count hides it.
+    const problems = [...new Set(errors)];
+    if (notConnected.length) problems.push('Not connected, so not queued: ' + platformList(notConnected));
+    if (problems.length) alert(problems.join('\n'));
 
     toggleSelectMode();
 }
 
 async function unqueueSelectedPosts() {
+    const cards = selectedCards();
     const postsToUnqueue = [];
-    selectedCards().forEach(card => {
+    cards.forEach(card => {
         selectedChips(card).forEach(chip => {
             const queueChip = chip.querySelector('.chip-queue');
             if (!queueChip || queueChip.dataset.queued !== 'true') return;
@@ -6505,6 +6581,9 @@ async function unqueueSelectedPosts() {
             errorCount++;
         }
     }
+
+    // An unqueued card may no longer belong in the list ("Queued").
+    await Promise.all(cards.map(card => recheckCardFilters(card.postItem)));
 
     unqueueBtn.innerHTML = originalText;
     unqueueBtn.disabled = false;
@@ -8424,7 +8503,9 @@ async function toggleSearchResultUsed(resultId) {
     if (!post) return;
     try {
         const used = await requestToggleUsed(post.cardId, post.cardPostIds);
-        setCardUsedUI(loadedCardFor(post.cardPostIds), used);
+        const pageCard = loadedCardFor(post.cardPostIds);
+        setCardUsedUI(pageCard, used);
+        recheckCardFilters(pageCard);
         showToast(used ? 'Marked as used' : 'Marked as not used', 'success');
     } catch (e) {
         showToast('Could not update: ' + e.message, 'error');

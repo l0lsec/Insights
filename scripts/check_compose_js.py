@@ -76,8 +76,10 @@ function item(dataset) {
   return { dataset, removed: false, remove() { this.removed = true; } };
 }
 
+const FILTERS = { platform: '', used: 'unused', queued: 'not-queued', image: '', source: '', brief: '', sort: '' };
+
 async function run(args, opts) {
-  const calls = { fetch: [], replace: [], badge: [] };
+  const calls = { fetch: [], replace: [], deleted: [], filteredOut: 0, counted: 0 };
   const ctx = {
     FormData: class {
       constructor() { this.entries = []; }
@@ -86,9 +88,14 @@ async function run(args, opts) {
     },
     cardPostIds: (card) => (card.dataset.postIds || '').split(',').filter(Boolean).map(Number),
     replaceCard: (card, html) => calls.replace.push(html),
-    adjustPostCountBadge: (delta) => calls.badge.push(delta),
+    currentPostFilters: () => FILTERS,
+    noteCardDeleted: (wasLoaded) => calls.deleted.push(wasLoaded),
+    noteCardFilteredOut: () => { calls.filteredOut++; },
+    selectModeActive: true,
+    updateSelectedCount: () => { calls.counted++; },
     fetch: async (url, init) => {
-      calls.fetch.push({ url, post_ids: init.body.get('post_ids'), index: init.body.get('display_index') });
+      calls.fetch.push({ url, post_ids: init.body.get('post_ids'), index: init.body.get('display_index'),
+                         filters: init.body.get('filters') });
       if (opts.reject) throw new Error('offline');
       return { ok: opts.ok !== false, json: async () => opts.body };
     },
@@ -134,6 +141,24 @@ const results = {};
   // 6. Nothing to redraw.
   results.noCard = await run(() => [null], { body: { success: true, html: 'x' } });
 
+  // 7. The server says the card no longer matches the filters (queued while the
+  //    list shows "Not Queued"): it leaves the list instead of being redrawn.
+  card = item({ postId: '4', postIds: '4,5' });
+  results.filteredOut = await run(() => [card], { body: { success: true, html: '<div>q</div>', matches: false } });
+  results.filteredOut.removed = card.removed;
+
+  // 8. Still matching: redrawn in place.
+  card = item({ postId: '4', postIds: '4,5' });
+  results.stillMatches = await run(() => [card], { body: { success: true, html: '<div>m</div>', matches: true } });
+  results.stillMatches.removed = card.removed;
+
+  // 9. The list was redrawn (a filter change) while the request was out: the
+  //    old card is detached, so neither the card nor the counts are touched.
+  card = item({ postId: '4', postIds: '4,5' });
+  card.isConnected = false;
+  results.detached = await run(() => [card], { body: { success: true, html: '<div>d</div>', matches: false } });
+  results.detached.removed = card.removed;
+
   console.log(JSON.stringify(results));
 })();
 """
@@ -171,6 +196,10 @@ def section_refreshcard():
           f"refreshCard(card) asked for the wrong card: {fetch}")
     check(one["calls"]["replace"] == ["<div>card</div>"] and not one["removed"],
           "refreshCard(card) did not swap in the redrawn card")
+    check(json.loads(fetch["filters"] or "null") == {
+              "platform": "", "used": "unused", "queued": "not-queued", "image": "", "source": "", "brief": "",
+              "sort": ""},
+          f"refreshCard(card) must send the filter bar so the server can say whether the card still matches: {fetch}")
 
     left = results["remaining"]
     check(left["threw"] is None, f"refreshCard(card, ids) threw: {left['threw']}")
@@ -180,9 +209,9 @@ def section_refreshcard():
     check(left["calls"]["replace"] == ["<div>left</div>"], "refreshCard(card, ids) did not swap in the card")
 
     empty = results["empty"]
-    check(empty["threw"] is None and empty["removed"] and empty["calls"]["badge"] == [-1]
+    check(empty["threw"] is None and empty["removed"] and empty["calls"]["deleted"] == [True]
           and not empty["calls"]["fetch"],
-          f"an emptied card should be removed with no request and the count lowered: {empty}")
+          f"an emptied card should be removed with no request, counted as a deleted loaded card: {empty}")
 
     no_ids = results["noIds"]
     check(no_ids["threw"] is None and not no_ids["removed"]
@@ -197,8 +226,24 @@ def section_refreshcard():
     check(results["noCard"]["threw"] is None and not results["noCard"]["calls"]["fetch"],
           "refreshCard(null) should do nothing")
 
+    out = results["filteredOut"]
+    check(out["threw"] is None and out["removed"] and out["calls"]["filteredOut"] == 1
+          and not out["calls"]["replace"] and not out["calls"]["deleted"] and out["calls"]["counted"] == 1,
+          f"a card that no longer matches the filters must leave the list, counted as filtered out "
+          f"(not deleted), and the selection recounted: {out}")
+
+    kept = results["stillMatches"]
+    check(kept["threw"] is None and not kept["removed"] and kept["calls"]["replace"] == ["<div>m</div>"]
+          and kept["calls"]["filteredOut"] == 0,
+          f"a card that still matches is redrawn in place: {kept}")
+
+    gone = results["detached"]
+    check(gone["threw"] is None and not gone["removed"] and not gone["calls"]["replace"]
+          and gone["calls"]["filteredOut"] == 0 and not gone["calls"]["deleted"],
+          f"a card detached while the request was out must not touch the list or its counts: {gone}")
+
     print("refreshCard redraws from ids the page holds or from surviving rows, removes an emptied card, "
-          "and survives a failed request")
+          "drops a card the filters no longer match, and survives a failed request")
     print("REFRESH_CARD_OK")
 
 

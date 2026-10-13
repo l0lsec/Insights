@@ -6031,6 +6031,7 @@ def compose_page():
         group_total=len(groups),
         platform_totals=platform_totals,
         compose_platforms=list(COMPOSE_PLATFORMS),
+        schedulable_platforms=SCHEDULABLE_PLATFORMS,
         page_size=POSTS_PAGE_SIZE,
         max_batch=POSTS_MAX_BATCH,
         brief_filter_options=brief_filter_options,
@@ -6189,6 +6190,13 @@ def _group_matches_filters(rows, filters, scheduled_info):
     return True
 
 
+def _post_filters(args):
+    """The filter bar's state from ``args``, as _group_matches_filters reads it."""
+    filters = {key: (args.get(key) or '').strip() for key in _POST_FILTER_KEYS}
+    filters['platform'] = _valid_post_platform(args.get('platform'))
+    return filters
+
+
 def _filtered_post_groups(args):
     """Return (matching cards, index_by_id) for the Compose filters in ``args``.
 
@@ -6204,8 +6212,7 @@ def _filtered_post_groups(args):
 
     ``args`` is a request.args multidict or a plain dict of the same keys.
     """
-    filters = {key: (args.get(key) or '').strip() for key in _POST_FILTER_KEYS}
-    filters['platform'] = _valid_post_platform(args.get('platform'))
+    filters = _post_filters(args)
 
     groups = _group_standalone_posts(list_standalone_posts())
 
@@ -7456,6 +7463,32 @@ def _apply_card_video(post, video_url):
     return [row['id'] for row in rows]
 
 
+def _post_card_group(post_ids, display_index=None):
+    """The card for ``post_ids``, shaped as the grouper shapes one, or None if
+    none of them survive."""
+    rows = [row for row in (get_standalone_post(pid) for pid in post_ids) if row]
+    if not rows:
+        return None
+    return {
+        # Keyed by (platform, account) like the grouper does, so a card with two
+        # accounts on one platform re-renders with both chips rather than one.
+        'platforms': {_row_target_key(row): row for row in rows},
+        'head': rows[0],
+        'display_index': display_index,
+    }
+
+
+def _render_post_card(group, scheduled_info):
+    ids = [row['id'] for row in group['platforms'].values()]
+    card = _enrich_post_group(
+        group,
+        scheduled_info,
+        get_posted_info_for_standalone_posts(ids),
+        {brief['id']: brief['name'] for brief in list_content_briefs()},
+    )
+    return render_template('partials/post_items.html', groups=[card])
+
+
 def _post_card_html(post_ids, display_index=None):
     """Render one Compose card for ``post_ids``, or '' if none of them survive.
 
@@ -7463,25 +7496,11 @@ def _post_card_html(post_ids, display_index=None):
     toggle simple: ticking Instagram brings a whole set of Instagram-only
     controls with it, and re-rendering beats patching them in by hand.
     """
-    rows = [row for row in (get_standalone_post(pid) for pid in post_ids) if row]
-    if not rows:
+    group = _post_card_group(post_ids, display_index)
+    if not group:
         return ''
-
-    group = {
-        # Keyed by (platform, account) like the grouper does, so a card with two
-        # accounts on one platform re-renders with both chips rather than one.
-        'platforms': {_row_target_key(row): row for row in rows},
-        'head': rows[0],
-        'display_index': display_index,
-    }
-    ids = [row['id'] for row in rows]
-    card = _enrich_post_group(
-        group,
-        get_pending_schedules_for_standalone_posts(ids),
-        get_posted_info_for_standalone_posts(ids),
-        {brief['id']: brief['name'] for brief in list_content_briefs()},
-    )
-    return render_template('partials/post_items.html', groups=[card])
+    ids = [row['id'] for row in group['platforms'].values()]
+    return _render_post_card(group, get_pending_schedules_for_standalone_posts(ids))
 
 
 @app.route('/compose/post/<int:post_id>/card', methods=['POST'])
@@ -7491,16 +7510,31 @@ def compose_render_post_card(post_id: int):
     Used when a card loses some of its platforms but not all of them — a bulk
     delete run under a platform filter, say — where patching the leftover DOM
     is more error-prone than asking for the card again.
+
+    With ``filters`` (the filter bar's state, as JSON) the reply also says
+    whether the card still ``matches`` them. Queueing a card while the list
+    shows "Not Queued", or marking it used under "Unused", takes it out of the
+    list; the page asks here rather than keep a second copy of the predicate.
     """
     if not get_standalone_post(post_id):
         return jsonify({"error": "Post not found"}), 404
 
-    return jsonify({
-        "success": True,
-        "html": _post_card_html(
-            _requested_post_ids(post_id), request.form.get('display_index', type=int)
-        ),
-    })
+    group = _post_card_group(_requested_post_ids(post_id), request.form.get('display_index', type=int))
+    if not group:
+        return jsonify({"success": True, "html": ""})
+
+    ids = [row['id'] for row in group['platforms'].values()]
+    scheduled_info = get_pending_schedules_for_standalone_posts(ids)
+    reply = {"success": True, "html": _render_post_card(group, scheduled_info)}
+
+    try:
+        filters = json.loads(request.form.get('filters') or 'null')
+    except ValueError:
+        filters = None
+    if isinstance(filters, dict):
+        reply["matches"] = _group_matches_filters(
+            _ordered_group_rows(group), _post_filters(filters), scheduled_info)
+    return jsonify(reply)
 
 
 def _find_target_row(rows, platform, account_id):
