@@ -4869,11 +4869,12 @@ def _scheduled_queue_groups(rows):
 
 
 def _scheduled_queue_filters():
-    """The status, platform, date and sort filters of the queue, from the query string."""
+    """The status, platform, search, date and sort filters of the queue, from the query string."""
     sort_order = request.args.get('sort', 'asc')
     return {
         'status': request.args.get('status', 'pending'),
         'platform': request.args.get('platform', ''),
+        'search': request.args.get('q', '').strip()[:200],
         'date_from': request.args.get('date_from', '').strip(),
         'date_to': request.args.get('date_to', '').strip(),
         'sort_order': sort_order if sort_order in ('asc', 'desc') else 'asc',
@@ -4884,6 +4885,7 @@ def _list_scheduled_rows(filters):
     return list_scheduled_posts(
         status=filters['status'] if filters['status'] else None,
         platform=filters['platform'] if filters['platform'] else None,
+        search=filters['search'] or None,
         date_from=filters['date_from'] if filters['date_from'] else None,
         date_to=filters['date_to'] if filters['date_to'] else None,
         sort_order=filters['sort_order'],
@@ -4896,6 +4898,7 @@ def schedule_list():
     filters = _scheduled_queue_filters()
     status_filter = filters['status']
     platform_filter = filters['platform']
+    search_filter = filters['search']
     date_from = filters['date_from']
     date_to = filters['date_to']
     sort_order = filters['sort_order']
@@ -4960,6 +4963,7 @@ def schedule_list():
         entry_count=len(posts),
         status_filter=status_filter,
         platform_filter=platform_filter,
+        search_filter=search_filter,
         date_from=date_from,
         date_to=date_to,
         sort_order=sort_order,

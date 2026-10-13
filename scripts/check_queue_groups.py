@@ -7,6 +7,7 @@
     python scripts/check_queue_groups.py parity   QUEUE_PARITY_OK
     python scripts/check_queue_groups.py js       QUEUE_JS_OK
     python scripts/check_queue_groups.py syntax   QUEUE_SYNTAX_OK
+    python scripts/check_queue_groups.py search   QUEUE_SEARCH_OK
 
 The queue stores one entry per platform and account, so a post sent to three
 places is three rows. The schedule page shows it as one row with a badge per
@@ -1227,10 +1228,243 @@ def section_syntax():
     print("QUEUE_SYNTAX_OK")
 
 
+# ---------------------------------------------------------------------------
+# search: finding a post in the queue by its words
+# ---------------------------------------------------------------------------
+
+SEARCH_HARNESS = r"""
+const fs = require('fs');
+const vm = require('vm');
+const source = fs.readFileSync(process.argv[2], 'utf8');
+
+function world(initial) {
+  const log = { fetches: [], urls: [], rebuilt: [], alerts: [], timers: {} };
+  const field = (value) => ({ value });
+  const node = () => ({ style: {}, innerHTML: '', textContent: '', title: '', disabled: false, dataset: {} });
+  const ids = {};
+  for (const id of ['schedule-tbody', 'queue-linkedin-badge', 'queue-threads-badge',
+                    'queue-facebook-badge', 'queue-total-badge']) ids[id] = node();
+  ids['refresh-queue-btn'] = Object.assign(node(), { innerHTML: '🔄 Refresh' });
+  const fields = {
+    'select[name="status"]': field('pending'), 'select[name="platform"]': field(''),
+    'input[name="q"]': field(initial.q || ''), 'input[name="date_from"]': field(''),
+    'input[name="date_to"]': field(''), 'input[name="sort"]': field('asc'),
+  };
+  let timerId = 0;
+  const ctx = {
+    document: { getElementById: (id) => ids[id] || null, querySelector: (sel) => fields[sel] || null },
+    history: { replaceState: (a, b, url) => log.urls.push(url) },
+    fetch: (url) => new Promise((resolve) => log.fetches.push({ url, resolve })),
+    alert: (m) => log.alerts.push(m),
+    rebuildQueueTable: (groups) => log.rebuilt.push(groups),
+    refreshNextSlots: () => {},
+    setTimeout: (fn, ms) => { log.timers[++timerId] = { fn, ms }; return timerId; },
+    clearTimeout: (id) => { delete log.timers[id]; },
+    URLSearchParams,
+  };
+  vm.createContext(ctx);
+  vm.runInContext(source, ctx);
+  return { ctx, log, ids, fields };
+}
+
+const answer = (fetchEntry, groups) => fetchEntry.resolve({ json: () => Promise.resolve({
+  success: true, groups, linkedin_count: 0, threads_count: 0, facebook_count: 0,
+  total_count: groups.length, entry_count: groups.length }) });
+const settle = () => new Promise((r) => setImmediate(r));
+
+(async () => {
+  const out = {};
+
+  // the words in the box travel with the request and into the address bar
+  let w = world({ q: '  heart  rate ' });
+  w.ctx.refreshQueue();
+  out.sent = { fetch: w.log.fetches[0].url, bar: w.log.urls[0] };
+  answer(w.log.fetches[0], []);
+  await settle();
+
+  // an empty box sends no q at all
+  w = world({ q: '   ' });
+  w.ctx.refreshQueue();
+  out.empty = { fetch: w.log.fetches[0].url, bar: w.log.urls[0] };
+
+  // typing waits for a pause, then asks once
+  w = world({ q: 'he' });
+  w.ctx.queueSearchChanged(); w.ctx.queueSearchChanged(); w.ctx.queueSearchChanged();
+  const pending = Object.values(w.log.timers);
+  out.typing = { timers: pending.length, wait: pending[0] && pending[0].ms, fetchesBefore: w.log.fetches.length };
+  pending[0].fn();
+  out.typing.fetchesAfter = w.log.fetches.length;
+
+  // Enter asks at once and the debounce that was waiting is cancelled
+  w = world({ q: 'he' });
+  w.ctx.queueSearchChanged();
+  w.ctx.refreshQueue();
+  out.enter = { timers: Object.keys(w.log.timers).length, fetches: w.log.fetches.length };
+
+  // two requests in flight: the older answer arrives last and is ignored
+  w = world({ q: 'th' });
+  w.ctx.refreshQueue();
+  w.fields['input[name="q"]'].value = 'thread';
+  w.ctx.refreshQueue();
+  answer(w.log.fetches[1], [{ id: 2, name: 'thread' }]);
+  await settle();
+  answer(w.log.fetches[0], [{ id: 1, name: 'th' }, { id: 9, name: 'other' }]);
+  await settle();
+  out.stale = { rebuilt: w.log.rebuilt, label: w.ids['refresh-queue-btn'].innerHTML,
+                disabled: w.ids['refresh-queue-btn'].disabled, total: w.ids['queue-total-badge'].textContent,
+                dim: w.ids['schedule-tbody'].style.opacity };
+
+  // the button keeps its own label when a refresh starts during another one
+  w = world({ q: '' });
+  w.ctx.refreshQueue(); w.ctx.refreshQueue();
+  answer(w.log.fetches[0], []); answer(w.log.fetches[1], []);
+  await settle();
+  out.label = w.ids['refresh-queue-btn'].innerHTML;
+
+  // a failed request frees the button, and a stale failure does not
+  w = world({ q: 'a' });
+  w.ctx.refreshQueue(); w.ctx.refreshQueue();
+  w.log.fetches[0].resolve({ json: () => Promise.reject(new Error('old')) });
+  await settle();
+  out.staleFailure = { alerts: w.log.alerts.length, label: w.ids['refresh-queue-btn'].innerHTML };
+  w.log.fetches[1].resolve({ json: () => Promise.reject(new Error('offline')) });
+  await settle();
+  out.failure = { alerts: w.log.alerts, label: w.ids['refresh-queue-btn'].innerHTML,
+                  disabled: w.ids['refresh-queue-btn'].disabled };
+
+  console.log(JSON.stringify(out));
+})().catch((e) => { console.error(e.stack); process.exit(1); });
+"""
+
+
+def section_search():
+    w, s = standard_world()
+    pending = sorted(i for ids in s.values() for i in ids
+                     if w.database.get_scheduled_post(i, db_path=w.db)["status"] == "pending")
+
+    def found(**filters):
+        return sorted(r["id"] for r in w.rows(**filters))
+
+    # words, case, order
+    check(found(status="pending", search="heart") == sorted(s["alpha"]),
+          "searching a word finds the post that has it, on every platform it goes to")
+    check(found(status="pending", search="HEART Rate") == found(status="pending", search="heart"),
+          "a search ignores case")
+    check(found(status="pending", search="rate heart") == sorted(s["alpha"]),
+          "the words may come in any order")
+    check(found(status="pending", search="heart check") == [],
+          "every word must be in the post: no post has both heart and check")
+    check(found(status="pending", search="hea") == sorted(s["alpha"]),
+          "a fragment of a word finds the post (search while typing)")
+    check(found(status="pending", search="no such words") == [], "a search with no match lists nothing")
+    for blank in ("", "   ", None):
+        check(found(status="pending", search=blank) == pending,
+              f"a blank search ({blank!r}) is no search")
+    check(found(status="pending", search="post") == sorted(s["alpha"] + s["beta"] + s["gamma"] + s["delta"]),
+          "a word several posts share finds all of them")
+    check(found(status=None, search="went out") == sorted(s["zeta"]),
+          "a search looks in every status when no status is asked for")
+    check(found(status="pending", search="went out") == [],
+          "a search stays inside the status filter")
+    check(found(status="pending", platform="twitter", search="post") == sorted(
+          [s["alpha"][1], s["beta"][2], s["delta"][1]]),
+          "a search narrows the platform filter and does not replace it")
+    check(found(status="pending", date_from="2099-03-01", date_to="2099-03-01", search="delta") == sorted(s["delta"]),
+          "a search inside the date filter finds what is in range")
+    check(found(status="pending", date_from="2099-03-02", search="delta") == [],
+          "a search never reaches outside the date filter")
+
+    # copy that is not ASCII, and characters SQL would treat as wildcards
+    w.queue(w.post("Café au lait, 100% sure_thing"), "threads", T3)
+    check(len(found(status="pending", search="CAFÉ")) == 1, "case folding works beyond ASCII")
+    for needle in ("100%", "%", "_", "sure_thing"):
+        check(len(found(status="pending", search=needle)) == 1,
+              f"{needle!r} is matched as text, not as a wildcard")
+
+    # an article's topic is searchable too
+    art = w.database.add_article(None, "Quokka habitats", "style", "Body", db_path=w.db)
+    quokka = [w.database.add_scheduled_post(T2, "article", article_id=art, platform=p, db_path=w.db)
+              for p in ("linkedin", "threads")]
+    check(found(status="pending", search="quokka") == sorted(quokka),
+          "a scheduled article is found by its topic")
+
+    # the page and its JSON
+    client = w.client
+    rows = group_rows(page_rows(client, "?q=beta"))
+    check(len(rows) == 1 and rows[0]["attrs"].get("data-post-ids") == ",".join(map(str, s["beta"])),
+          f"a search for a post that goes to three platforms shows one row carrying all three ids: {rows}")
+    check([r["attrs"].get("data-post-ids") for r in group_rows(page_rows(client, "?q=post&platform=twitter"))]
+          == [str(s["alpha"][1]), str(s["beta"][2]), str(s["delta"][1])],
+          "a search and a platform filter work together on the page")
+
+    data = client.get("/schedule/list-json?status=pending&q=beta").get_json()
+    check(data["success"] and data["total_count"] == 1 and data["entry_count"] == 3
+          and [g["ids"] for g in data["groups"]] == [s["beta"]]
+          and (data["linkedin_count"], data["threads_count"]) == (1, 1),
+          f"the JSON counts what the search found: {data['total_count']} post, {data['entry_count']} entries")
+    everything = client.get("/schedule/list-json?status=pending").get_json()
+    spaced = client.get("/schedule/list-json?status=pending&q=%20%20").get_json()
+    check(spaced["entry_count"] == everything["entry_count"] and spaced["total_count"] == everything["total_count"],
+          "a search of only spaces is no search")
+    check(client.get("/schedule/list-json?status=pending&q=" + "a" * 500).status_code == 200,
+          "a very long search does not break the page")
+
+    html = client.get("/schedule?q=beta").get_data(as_text=True)
+    box = re.search(r'<input[^>]*name="q"[^>]*>', html)
+    check(box and 'value="beta"' in box.group(0) and 'type="search"' in box.group(0)
+          and 'oninput="queueSearchChanged()"' in box.group(0),
+          f"the page has a search box that keeps the search it was loaded with: {box and box.group(0)}")
+    hostile = client.get("/schedule?q=%22%3E%3Cscript%3Ealert(1)%3C/script%3E").get_data(as_text=True)
+    check("<script>alert(1)</script>" not in hostile,
+          "what was searched for is escaped where the page writes it back")
+    check('class="btn btn-sm btn-outline-secondary" title="Clear Filters"' in client.get("/schedule?q=beta&status=").get_data(as_text=True),
+          "a search alone is a filter, so the clear control shows")
+
+    missed = client.get("/schedule?q=nothing-like-this").get_data(as_text=True)
+    check("No scheduled posts match the current filters." in missed
+          and "Schedule posts from the article page" not in missed,
+          "a search with no match says so, and does not tell the user to schedule something")
+    check("Schedule posts from the article page" in World().client.get("/schedule").get_data(as_text=True),
+          "an empty queue with no filter still invites the first post")
+
+    # the script
+    _, html, script = schedule_script()
+    functions = lift(script, ["refreshQueue", "queueSearchChanged"])
+    for name in ("queueSearchTimer", "queueRefreshSeq"):
+        found_let = re.search(rf"^let {name} = [^;\n]+;\n", script, re.M)
+        check(found_let, f"{name} is not declared where the search expects it")
+        functions = found_let.group(0) + functions
+    r = run_node(SEARCH_HARNESS, functions)
+
+    check("q=heart+rate" in r["sent"]["fetch"] and "q=heart+rate" in r["sent"]["bar"]
+          and r["sent"]["bar"].startswith("/schedule?"),
+          f"the search is trimmed, sent to the feed and kept in the address: {r['sent']}")
+    check("q=" not in r["empty"]["fetch"] and "q=" not in r["empty"]["bar"],
+          f"a blank search sends no q: {r['empty']}")
+    t = r["typing"]
+    check(t["timers"] == 1 and t["wait"] >= 150 and t["fetchesBefore"] == 0 and t["fetchesAfter"] == 1,
+          f"three keystrokes make one pending request after a pause, not three: {t}")
+    check(r["enter"] == {"timers": 0, "fetches": 1}, f"Enter asks at once and cancels the wait: {r['enter']}")
+    st = r["stale"]
+    check(st["rebuilt"] == [[{"id": 2, "name": "thread"}]],
+          f"an older answer that arrives late must not replace the newer one: {st['rebuilt']}")
+    check(st["label"] == "🔄 Refresh" and st["disabled"] is False and st["dim"] == "1",
+          f"the button and the table are restored once the latest answer lands: {st}")
+    check(r["label"] == "🔄 Refresh", f"overlapping refreshes must not leave 'Loading...' on the button: {r['label']!r}")
+    check(r["staleFailure"]["alerts"] == 0, f"an old request's failure is not shown: {r['staleFailure']}")
+    f = r["failure"]
+    check(len(f["alerts"]) == 1 and "offline" in f["alerts"][0] and f["label"] == "🔄 Refresh" and f["disabled"] is False,
+          f"the latest request's failure is shown and frees the button: {f}")
+
+    print("search: words, case, order and fragments match; status, platform and date filters still bound it; "
+          "a post is never split; the page and refresh agree; stale answers are dropped")
+    print("QUEUE_SEARCH_OK")
+
+
 SECTIONS = {
     "group": section_group, "page": section_page, "order": section_order,
     "edit": section_edit, "parity": section_parity, "js": section_js,
-    "syntax": section_syntax,
+    "syntax": section_syntax, "search": section_search,
 }
 
 if __name__ == "__main__":

@@ -567,7 +567,13 @@ th[onclick]:hover {
             <strong>📅 Scheduled Posts Queue</strong>
             <div class="d-flex align-items-center gap-2 flex-wrap">
                 <!-- Filters -->
-                <form method="get" class="d-flex align-items-center gap-2 flex-wrap" id="filter-form">
+                <form method="get" class="d-flex align-items-center gap-2 flex-wrap" id="filter-form" onsubmit="refreshQueue(); return false;">
+                    <div class="input-group input-group-sm" style="width: auto;">
+                        <span class="input-group-text" aria-hidden="true">🔍</span>
+                        <input type="search" name="q" id="queue-search" class="form-control form-control-sm"
+                               value="{{ search_filter }}" placeholder="Search posts" aria-label="Search scheduled posts"
+                               maxlength="200" autocomplete="off" oninput="queueSearchChanged()" style="width: 180px;">
+                    </div>
                     <select name="status" class="form-select form-select-sm" style="width: auto;" onchange="refreshQueue()">
                         <option value="" {% if not status_filter %}selected{% endif %}>All Statuses</option>
                         <option value="pending" {% if status_filter == 'pending' %}selected{% endif %}>⏳ Pending</option>
@@ -594,7 +600,7 @@ th[onclick]:hover {
                                value="{{ date_to }}" onchange="refreshQueue()" style="width: 140px;">
                     </div>
                     <input type="hidden" name="sort" value="{{ sort_order }}">
-                    {% if status_filter or platform_filter or date_from or date_to %}
+                    {% if status_filter or platform_filter or search_filter or date_from or date_to %}
                     <a href="{{ url_for('schedule_list') }}{% if sort_order != 'asc' %}?sort={{ sort_order }}{% endif %}" class="btn btn-sm btn-outline-secondary" title="Clear Filters">✕</a>
                     {% endif %}
                 </form>
@@ -645,7 +651,9 @@ th[onclick]:hover {
                     </tr>
                 </thead>
                 <tbody id="schedule-tbody">
-                    {% if not queue_groups %}
+                    {% if not queue_groups and (search_filter or platform_filter or date_from or date_to) %}
+                    <tr><td colspan="8" class="text-center text-muted py-4">No scheduled posts match the current filters.</td></tr>
+                    {% elif not queue_groups %}
                     <tr>
                         <td colspan="8" class="text-center py-5 text-muted">
                             <div style="font-size: 3rem;">📅</div>
@@ -1237,8 +1245,21 @@ function toggleSort() {
     refreshQueue();
 }
 
+// Typing in the search box refreshes the queue once the typing pauses.
+let queueSearchTimer = null;
+function queueSearchChanged() {
+    clearTimeout(queueSearchTimer);
+    queueSearchTimer = setTimeout(refreshQueue, 250);
+}
+
+// Each refresh takes a number; a response that is no longer the latest request
+// is dropped, so a slow answer to "th" cannot land on top of the answer to "thread".
+let queueRefreshSeq = 0;
+
 // Refresh the scheduled posts queue without full page reload
 function refreshQueue() {
+    clearTimeout(queueSearchTimer);
+    const seq = ++queueRefreshSeq;
     const btn = document.getElementById('refresh-queue-btn');
     const tbody = document.getElementById('schedule-tbody');
     const linkedinBadge = document.getElementById('queue-linkedin-badge');
@@ -1246,8 +1267,10 @@ function refreshQueue() {
     const facebookBadge = document.getElementById('queue-facebook-badge');
     const totalBadge = document.getElementById('queue-total-badge');
     
-    // Show loading state
-    const originalBtnText = btn.innerHTML;
+    // Show loading state. The label is read once: a refresh that starts while
+    // another is running would otherwise take "Loading..." for the button's label.
+    if (!btn.dataset.label) btn.dataset.label = btn.innerHTML;
+    const originalBtnText = btn.dataset.label;
     btn.innerHTML = '⏳ Loading...';
     btn.disabled = true;
     if (tbody) tbody.style.opacity = '0.5';
@@ -1255,6 +1278,7 @@ function refreshQueue() {
     // Get current filter values
     const statusFilter = document.querySelector('select[name="status"]')?.value || '';
     const platformFilter = document.querySelector('select[name="platform"]')?.value || '';
+    const searchText = (document.querySelector('input[name="q"]')?.value || '').trim().replace(/\s+/g, ' ');
     const dateFrom = document.querySelector('input[name="date_from"]')?.value || '';
     const dateTo = document.querySelector('input[name="date_to"]')?.value || '';
     const sortOrder = document.querySelector('input[name="sort"]')?.value || 'asc';
@@ -1262,6 +1286,7 @@ function refreshQueue() {
     const params = new URLSearchParams();
     if (statusFilter) params.append('status', statusFilter);
     if (platformFilter) params.append('platform', platformFilter);
+    if (searchText) params.append('q', searchText);
     if (dateFrom) params.append('date_from', dateFrom);
     if (dateTo) params.append('date_to', dateTo);
     if (sortOrder) params.append('sort', sortOrder);
@@ -1273,6 +1298,7 @@ function refreshQueue() {
     fetch(`/schedule/list-json?${qs}`)
         .then(response => response.json())
         .then(data => {
+            if (seq !== queueRefreshSeq) return;
             btn.innerHTML = originalBtnText;
             btn.disabled = false;
             if (tbody) tbody.style.opacity = '1';
@@ -1301,6 +1327,7 @@ function refreshQueue() {
             }
         })
         .catch(error => {
+            if (seq !== queueRefreshSeq) return;
             btn.innerHTML = originalBtnText;
             btn.disabled = false;
             if (tbody) tbody.style.opacity = '1';

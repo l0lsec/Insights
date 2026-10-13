@@ -205,6 +205,9 @@ QUEUE_GATES = [
     ("check_queue_groups.py", "QUEUE_SYNTAX_OK",
      "every inline script on the schedule page parses and none is declared twice",
      ("syntax",)),
+    ("check_queue_groups.py", "QUEUE_SEARCH_OK",
+     "searching the queue finds a post by its words, keeps every platform of it, honours the other filters, and drops stale answers, under node",
+     ("search",)),
 ]
 
 # Loading the rest of the Compose list: the route's batch size, and the Load more,

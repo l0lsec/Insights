@@ -2825,6 +2825,7 @@ def list_scheduled_posts(
     date_from: str | None = None,
     date_to: str | None = None,
     sort_order: str = 'asc',
+    search: str | None = None,
     db_path: str = DB_PATH,
 ) -> List[sqlite3.Row]:
     """List scheduled posts with optional filtering.
@@ -2835,6 +2836,8 @@ def list_scheduled_posts(
         date_from: Filter posts scheduled on or after this date (YYYY-MM-DD)
         date_to: Filter posts scheduled on or before this date (YYYY-MM-DD)
         sort_order: Sort order for scheduled_for column ('asc' or 'desc')
+        search: Words to find in a post's copy or its article's topic; every
+            word must appear, in any order, ignoring case (see scheduled_matches_search)
         db_path: Database path
     """
     with sqlite3.connect(db_path) as conn:
@@ -2878,7 +2881,27 @@ def list_scheduled_posts(
         # other platforms) always list in the same order.
         query += f" ORDER BY sp.scheduled_for {order}, sp.id ASC"
         cur = conn.execute(query, params)
-        return cur.fetchall()
+        rows = cur.fetchall()
+    terms = (search or '').casefold().split()
+    if terms:
+        rows = [row for row in rows if scheduled_matches_search(row, terms)]
+    return rows
+
+
+def scheduled_matches_search(row, terms) -> bool:
+    """Whether a queue row's copy or article topic holds every one of ``terms``.
+
+    ``terms`` are already case-folded. The comparison is done here and not in SQL
+    because SQLite's LIKE and lower() only fold ASCII, so a search for "café"
+    would miss "CAFÉ". The queue is a few hundred rows, so the cost is nothing.
+    Every entry of a post shares its copy, so a post's platforms match together
+    and a search can never leave half of a grouped row behind.
+    """
+    text = ' '.join(
+        _scheduled_field(row, name) or ''
+        for name in ('social_content', 'standalone_content', 'article_topic')
+    ).casefold()
+    return all(term in text for term in terms)
 
 
 def _scheduled_field(row, name):
