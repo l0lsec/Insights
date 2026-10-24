@@ -266,7 +266,8 @@ class InstagramClient:
         """Check if Instagram credentials are configured."""
         return bool(self.app_id and self.app_secret)
 
-    def get_authorization_url(self, state: str | None = None) -> tuple[str, str]:
+    def get_authorization_url(self, state: str | None = None,
+                              scopes: str | None = None) -> tuple[str, str]:
         """Generate the OAuth authorization URL.
 
         Returns:
@@ -278,7 +279,7 @@ class InstagramClient:
         params = {
             "client_id": self.app_id,
             "redirect_uri": self.redirect_uri,
-            "scope": INSTAGRAM_SCOPES,
+            "scope": scopes or INSTAGRAM_SCOPES,
             "response_type": "code",
             "state": state,
         }

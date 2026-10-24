@@ -154,6 +154,10 @@ View and manage your posting queue with drag-and-drop reordering, status/platfor
 Catalogue a media archive by year and category, browse it by either, review discovered categories and duplicates, and approve a copy plan that sorts the files.
 
 
+### Outreach
+Work your lead list: import opt-ins from Kartra, let an agent draft personal texts and replies around the clock, approve each one before it goes out through Twilio, and prepare and log the calls you make yourself.
+
+
 ---
 
 ## Project Structure
@@ -353,6 +357,23 @@ The Library reuses `OLLAMA_BASE_URL`, `OLLAMA_TEXT_MODEL`, and `OLLAMA_VISION_MO
 | `INSTAGRAM_SCOPES` | Optional; defaults to `instagram_business_basic,instagram_business_content_publish` |
 
 > Uses the "Instagram API with Instagram Login" flavor (no Facebook Page required). Requires a professional (Business/Creator) Instagram account. Feed/carousel/reel/story media must be publicly hosted — configure Cloudinary or paste public URLs.
+
+### Outreach (Twilio texts)
+
+| Variable | Description |
+|----------|-------------|
+| `TWILIO_ACCOUNT_SID` | Account SID from the [Twilio console](https://console.twilio.com/) |
+| `TWILIO_AUTH_TOKEN` | Auth token from the same page |
+| `TWILIO_FROM_NUMBER` | The number texts come from and replies arrive at, in E.164 form (`+13055550100`). Needed to read replies |
+| `TWILIO_MESSAGING_SERVICE_SID` | Optional; send through a Messaging Service instead of straight from the number |
+| `OUTREACH_ENABLED` | `1` runs the outreach agent in the background (off by default, because it spends on the LLM) |
+| `OUTREACH_TICK_SECONDS` | How often the agent runs a pass (default `300`) |
+| `OUTREACH_MODEL` | Optional model for outreach drafts (defaults to the provider's model) |
+| `OUTREACH_SOCIAL_MINUTES` | How often replies, comments and mentions on your posts are read (default `30`) |
+| `OUTREACH_SEARCH_MINUTES` | How often Threads keyword search runs (default `60`) |
+| `OUTREACH_X_MENTIONS` | `1` reads X mentions too (off by default: X bills every read) |
+| `OUTREACH_PUBLIC_URL` | The app's public https address, for the webhooks (for example your ngrok or Cloudflare tunnel URL) |
+| `KARTRA_WEBHOOK_SECRET` | Turns on `/kartra/webhook`; Kartra must send it as `?secret=` or an `X-Webhook-Secret` header |
 
 ### Stock Images (all free)
 
@@ -671,6 +692,138 @@ In the Command Center, each Instagram post has a **format selector**:
 - **Story** — a single image or video (no caption; Stories expire after 24h)
 
 Media is publicly hosted via Cloudinary (image/video upload) or a pasted public URL. Instagram has no text-only feed posts, so every post needs media. Videos must be MP4/MOV (H.264/AAC, ~90s) — Instagram rejects unsupported codecs/aspect ratios/durations, which the app surfaces as a readable error.
+
+### Outreach
+
+The **Outreach** page (`/outreach`) works on leads for your program: people who
+opted in to a lead magnet, the texts that start and keep a conversation going,
+and the calls you make yourself. An agent reads replies and drafts the next text
+around the clock. **Nothing is sent until you press Send** on a draft; the agent
+has no way to send.
+
+- **Queue**: every draft waiting on you, with the lead, why the agent wrote it,
+  the conversation so far and a segment counter. Edit it and **Send**, or
+  **Regenerate** it with an instruction ("shorter", "mention the quiz"), or
+  **Skip** it. A text from a number Insights does not know waits here until you
+  create a lead for it or link it to one.
+- **Leads**: the pipeline (new, contacted, replied, booked, enrolled, not a fit)
+  with each lead's history, consent and opt-out, and **Merge** for duplicates.
+  **Import leads** takes a CSV or Excel export (Kartra's columns are recognised),
+  shows what it would do first, and asks which form the people signed up through
+  and the exact consent wording it showed. That attestation is stored on every
+  lead, per channel: only tick "texts" if the wording covered texts.
+- **Calls**: leads who agreed to calls, best first. **Prepare brief** writes a
+  one-screen brief (who they are, what they took, an opener, questions, likely
+  objections, the next step); the button dials them; **Log call** records how it
+  went, moves the stage and drafts the follow-up text.
+- **Setup**: **Your business context** (your business name, the field you work
+  in, what you offer, who it is for, how you sound, and the name a first text
+  comes from), the **offers** (the only links a text or reply may carry, such as a
+  free guide, a quiz and your booking link, each with **Match words** an import
+  uses to recognise who took it), and the limits.
+
+Nothing about any business ships with the app: a new install starts with an
+empty business context, and the agent drafts nothing (and the Queue says so)
+until the business name, field, offer and audience are filled in. Every text,
+reply, call brief and conversation-starter post is written from that context,
+and the first text to anyone is refused until it has a sender name.
+
+Send checks these on the server every time, whatever the page shows:
+
+- the person agreed to texts, or texted you in the last 24 hours;
+- they have not opted out (STOP, UNSUBSCRIBE, CANCEL, END, QUIT, STOPALL, REVOKE
+  or OPTOUT; START undoes it) and are not marked do-not-contact;
+- it is between 8am and 8pm (configurable) in their time zone, taken from their
+  number or set on the lead;
+- they have had fewer than 3 texts or calls in 24 hours (Florida's FTSA limit),
+  counting texts other tools sent from your number;
+- today's send cap is not reached and texting is not paused;
+- they have not replied since the draft was written;
+- every link is one of your offers.
+
+The first text to a person ends with your signature and "Reply STOP to opt out".
+A draft is sent once, however many times Send is pressed. If Twilio does not
+confirm a send, the text is marked *outcome unknown* and is never sent again
+automatically; the agent looks it up at Twilio and marks it sent, or failed and
+safe to retry. Carrier errors 30034 (number not registered for A2P 10DLC) and
+30007 (filtered as spam) pause texting until you resume it in Setup.
+
+Setup:
+
+1. Add the `TWILIO_*` values to `.env` and restart. Replies are read from
+   Twilio's API on every pass, so your number's own webhook settings are left
+   alone and the app needs no public URL.
+2. Make sure the number is registered for this kind of message (an A2P 10DLC
+   campaign or toll-free verification); carriers block unregistered texts.
+3. Fill in Setup, then import your opt-ins.
+4. Set `OUTREACH_ENABLED=1` and restart to have the agent run every
+   `OUTREACH_TICK_SECONDS`. Without it, **Run now** runs one pass.
+
+#### Conversations on your posts
+
+Every `OUTREACH_SOCIAL_MINUTES` the agent reads the replies, comments and
+mentions on your posts from the last two weeks (Threads, Instagram, your Facebook
+Page, and X mentions when `OUTREACH_X_MENTIONS=1`). For each one it decides
+whether a reply is worth writing (spam, bots and hostile messages get none) and
+whether the person looks like a lead, and drafts a public, in-thread reply into
+the Queue. A reply card shows the platform, what the person wrote with a link
+to it, and **Reply on Threads** (or Instagram, Facebook, X). The person becomes a
+lead, recognised again by their handle.
+
+Replying in public needs no texting consent or texting hours, but Send still
+refuses after an opt-out or do-not-contact, a reply with no comment to answer,
+a newer message in the same conversation, more than 3 replies to one person a
+day, a reply over the platform's length, or a link that is not one of your
+offers. If you answer a comment yourself on the platform, its draft closes on the
+next pass. A reply whose answer was lost is marked unknown and settled when it
+shows up on the post.
+
+Reading and replying need permissions your accounts were not connected with.
+Add them to the Meta app first (`threads_read_replies`, `threads_manage_replies`,
+`threads_manage_mentions`, `threads_keyword_search`,
+`instagram_business_manage_comments`, `pages_manage_engagement`,
+`pages_read_user_content`), then press **Reconnect with engagement permissions**
+for each account in Setup. Plain **Connect** still asks only for the configured
+scopes, so a permission Meta has not enabled cannot break it. Setup shows each
+source's state; one that says *Needs permission* rests for a few hours instead of
+asking on every pass. X only lets apps reply to people who mentioned you; when
+X refuses, the card offers **Open on X** with your words filled in, and **I posted
+it** once you have.
+
+#### Threads keyword search
+
+Every `OUTREACH_SEARCH_MINUTES` the agent runs the keyword search lines in Setup
+(for example "how do I get started in ...") for recent Threads posts, within the
+searches-per-day budget, and drafts a helpful reply only to people who sound
+like your ideal lead. Meta returns other people's posts only after App
+Review approves `threads_keyword_search` for the app; until then the search sees
+only your own posts.
+
+#### Live webhooks
+
+- **Kartra opt-ins:** set `KARTRA_WEBHOOK_SECRET` and `OUTREACH_PUBLIC_URL`, then
+  in Kartra send "lead subscribes to list" to
+  `<OUTREACH_PUBLIC_URL>/kartra/webhook?secret=<KARTRA_WEBHOOK_SECRET>`. A new
+  opt-in becomes a lead at once, with the consent you attested for webhook
+  opt-ins in Setup (and none until you do). It never clears an opt-out.
+- **Twilio replies (optional):** replies already arrive by polling. To get them
+  instantly, point the number's incoming-message webhook at
+  `<OUTREACH_PUBLIC_URL>/twilio/sms`; only signed requests are accepted. Leave it
+  if another tool (Kartra) uses that webhook.
+
+#### Conversation starters
+
+**Create the conversation-starter brief** in Setup makes one weekly Content
+Agent brief that drafts question posts for your audience into
+Compose, for you to review and schedule. Replies to them land in the Queue.
+
+Drafts use the app's LLM (`LLM_PROVIDER`, or `OUTREACH_MODEL`), metered on
+`/usage` under `outreach`, within the daily draft and spend caps in Setup. This
+is a tool, not legal advice: check your consent wording and texting practices
+with whoever handles your compliance.
+
+Verify with `python scripts/check_outreach.py <section>` (see the file for the
+sections). Twilio and the model are faked, so nothing is sent.
 
 ## Completion Gates
 

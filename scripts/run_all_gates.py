@@ -334,13 +334,95 @@ LINK_COMMENT_GATES = [
      ("registered",)),
 ]
 
+# Outreach: leads, texts and calls. One script, one gate per claim, picked by
+# argument. Twilio is a scripted fake standing in for `requests` and the model is
+# a scripted fake, so nothing is sent. One runs the page's script under node.
+OUTREACH_GATES = [
+    ("check_outreach.py", "OUTREACH_SCHEMA_OK",
+     "the outreach tables upgrade an old database, one identity is one lead, one open item per lead, a Twilio id is stored once",
+     ("schema",)),
+    ("check_outreach.py", "OUTREACH_IMPORT_OK",
+     "a Kartra export imports with per-channel consent, names its bad rows, and a re-import never clears an opt-out",
+     ("import",)),
+    ("check_outreach.py", "OUTREACH_GUARDS_OK",
+     "Send refuses on the server without consent, after an opt-out, outside the lead's hours, over 3 contacts a day or with a foreign link",
+     ("guards",)),
+    ("check_outreach.py", "OUTREACH_IDEMPOTENT_OK",
+     "a double press or two racing tabs send a draft once",
+     ("idempotent",)),
+    ("check_outreach.py", "OUTREACH_AMBIGUOUS_OK",
+     "a send Twilio did not confirm is never resent and is settled from Twilio's records; carrier blocks pause texting",
+     ("ambiguous",)),
+    ("check_outreach.py", "OUTREACH_WORKER_OK",
+     "the outreach worker reads replies and drafts, and has no way to send",
+     ("worker",)),
+    ("check_outreach.py", "OUTREACH_INBOUND_OK",
+     "replies are read across pages once; STOP opts out and START undoes it; strangers wait to be linked",
+     ("inbound",)),
+    ("check_outreach.py", "OUTREACH_SIGNATURE_OK",
+     "Twilio webhook signatures validate, and a tampered request does not",
+     ("signature",)),
+    ("check_outreach.py", "OUTREACH_LLM_OK",
+     "drafts keep only offer links, a refusal waits for review and is retried once, and the caps stop model calls",
+     ("llm",)),
+    ("check_outreach.py", "OUTREACH_UI_OK",
+     "the Outreach tabs render escaped, every action needs a login and the page's header, and calls move the stage",
+     ("ui",)),
+    ("check_outreach.py", "OUTREACH_JS_OK",
+     "the Outreach page's script parses and its SMS counter agrees with the server, under node",
+     ("js",)),
+    ("check_outreach.py", "OUTREACH_DOCS_OK",
+     "the README, .env.example and requirements describe Outreach",
+     ("docs",)),
+    ("check_outreach.py", "OUTREACH_REGISTERED_OK",
+     "every section of the outreach check is registered here under its token",
+     ("registered",)),
+    ("check_outreach.py", "OUTREACH_SESSIONS_OK",
+     "publishing and the outreach listener share one token refresh per platform",
+     ("sessions",)),
+    ("check_outreach.py", "OUTREACH_SOCIAL_CLIENTS_OK",
+     "Threads, Instagram, Facebook and X reads and replies are the documented requests; X's refusal gives an open-on-X link",
+     ("social_clients",)),
+    ("check_outreach.py", "OUTREACH_LISTENER_OK",
+     "the listener reads conversations on the owner's posts, drafts in-thread replies and writes nothing",
+     ("listener",)),
+    ("check_outreach.py", "OUTREACH_SOCIAL_SEND_OK",
+     "a social reply goes out once in-thread and refuses without a target, after an opt-out or with a foreign link",
+     ("social_send",)),
+    ("check_outreach.py", "OUTREACH_ENGAGE_AUTH_OK",
+     "engagement reconnect adds scopes while plain Connect is unchanged, and Setup shows each source",
+     ("engage_auth",)),
+    ("check_outreach.py", "OUTREACH_SOCIAL_UI_OK",
+     "social drafts show their platform, what they answer (escaped) and a link to the original",
+     ("social_ui",)),
+    ("check_outreach.py", "OUTREACH_SEARCH_OK",
+     "Threads keyword search stays in its budget, stores matches once and drafts only for fits",
+     ("search",)),
+    ("check_outreach.py", "OUTREACH_WEBHOOKS_OK",
+     "the Twilio webhook takes only signed requests; the Kartra webhook needs its secret and keeps opt-outs",
+     ("webhooks",)),
+    ("check_outreach.py", "OUTREACH_STARTER_OK",
+     "Setup creates one weekly conversation-starter brief, not auto-queued",
+     ("starter",)),
+    ("check_outreach.py", "OUTREACH_GENERIC_OK",
+     "the shipped Outreach defaults and sources carry no business's details",
+     ("generic",)),
+    ("check_outreach.py", "OUTREACH_CONTEXT_OK",
+     "nothing is drafted before the business context is filled in, and everything after comes from it",
+     ("context",)),
+    ("check_outreach.py", "OUTREACH_CONTEXT_UI_OK",
+     "Setup's business context section saves and reads back, and the Queue points an owner with none to it",
+     ("context_ui",)),
+]
+
 # check_*.py files that are deliberately not gates, with the reason. Empty is the
 # healthy state: a script that is not a gate should not carry the check_ prefix.
 NOT_GATES = {}
 
 ALL_GATES = (ACCOUNT_GATES + ACCOUNT_JS_GATES + LIBRARY_GATES + COMPOSE_GATES
              + VIDEO_GATES + MANUAL_POST_GATES + QUEUE_GATES + PAGING_GATES
-             + IG_PEOPLE_GATES + FIND_RESULTS_GATES + LINK_COMMENT_GATES)
+             + IG_PEOPLE_GATES + FIND_RESULTS_GATES + LINK_COMMENT_GATES
+             + OUTREACH_GATES)
 
 
 def _unpack(entry):

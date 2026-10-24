@@ -471,12 +471,12 @@ def retry_first_comment(standalone_id, *, db_path: str | None = None) -> dict:
     return outcome
 
 
-def _threads(account_id, account, text, image_url, standalone_id, social_id,
-             article_title, db_path, video_url=None):
+def _threads_session(account_id, account, db_path):
+    """The Threads client and a usable token for an account; see ``_linkedin_session``."""
     token = database.get_threads_token(account_id, db_path=db_path)
     if not token:
-        return _result("threads", account_id, account, False,
-                       error="Threads is not connected", needs_reconnect=True)
+        return None, None, _result("threads", account_id, account, False,
+                                   error="Threads is not connected", needs_reconnect=True)
 
     client = get_threads_client()
     if threads_expired(token["expires_at"]):
@@ -490,8 +490,17 @@ def _threads(account_id, account, text, image_url, standalone_id, social_id,
             )
             token = database.get_threads_token(account_id, db_path=db_path)
         except Exception as exc:  # noqa: BLE001
-            return _result("threads", account_id, account, False,
-                           error=f"Threads token expired: {exc}", needs_reconnect=True)
+            return None, None, _result("threads", account_id, account, False,
+                                       error=f"Threads token expired: {exc}",
+                                       needs_reconnect=True)
+    return client, token, None
+
+
+def _threads(account_id, account, text, image_url, standalone_id, social_id,
+             article_title, db_path, video_url=None):
+    client, token, failure = _threads_session(account_id, account, db_path)
+    if failure:
+        return failure
 
     body = text[:CHAR_LIMITS["threads"]]
     if video_url:
@@ -503,19 +512,19 @@ def _threads(account_id, account, text, image_url, standalone_id, social_id,
     return _from_client("threads", account_id, account, result)
 
 
-def _twitter(account_id, account, text, image_url, standalone_id, social_id,
-             article_title, db_path, video_url=None):
+def _twitter_session(account_id, account, db_path):
+    """The X client and a usable token for an account; see ``_linkedin_session``."""
     token = database.get_twitter_token(account_id, db_path=db_path)
     if not token:
-        return _result("twitter", account_id, account, False,
-                       error="X/Twitter is not connected", needs_reconnect=True)
+        return None, None, _result("twitter", account_id, account, False,
+                                   error="X/Twitter is not connected", needs_reconnect=True)
 
     client = get_twitter_client()
     if twitter_expired(token["expires_at"]):
         if not token["refresh_token"]:
-            return _result("twitter", account_id, account, False,
-                           error="X/Twitter token expired. Please reconnect.",
-                           needs_reconnect=True)
+            return None, None, _result("twitter", account_id, account, False,
+                                       error="X/Twitter token expired. Please reconnect.",
+                                       needs_reconnect=True)
         try:
             fresh = client.refresh_access_token(token["refresh_token"])
             database.update_twitter_token(
@@ -527,8 +536,17 @@ def _twitter(account_id, account, text, image_url, standalone_id, social_id,
             )
             token = database.get_twitter_token(account_id, db_path=db_path)
         except Exception as exc:  # noqa: BLE001
-            return _result("twitter", account_id, account, False,
-                           error=f"X/Twitter token expired: {exc}", needs_reconnect=True)
+            return None, None, _result("twitter", account_id, account, False,
+                                       error=f"X/Twitter token expired: {exc}",
+                                       needs_reconnect=True)
+    return client, token, None
+
+
+def _twitter(account_id, account, text, image_url, standalone_id, social_id,
+             article_title, db_path, video_url=None):
+    client, token, failure = _twitter_session(account_id, account, db_path)
+    if failure:
+        return failure
 
     body = text[:CHAR_LIMITS["twitter"]]
     if video_url:
@@ -544,23 +562,30 @@ def _twitter(account_id, account, text, image_url, standalone_id, social_id,
     return _from_client("twitter", account_id, account, result)
 
 
-def _facebook(account_id, account, text, image_url, standalone_id, social_id,
-              article_title, db_path, video_url=None):
+def _facebook_session(account_id, account, db_path):
+    """The Facebook client and the Page token row for an account; see ``_linkedin_session``."""
     token = database.get_facebook_token(account_id, db_path=db_path)
     if not token:
-        return _result("facebook", account_id, account, False,
-                       error="Facebook is not connected", needs_reconnect=True)
+        return None, None, _result("facebook", account_id, account, False,
+                                   error="Facebook is not connected", needs_reconnect=True)
     if not token["page_id"] or not token["page_access_token"]:
-        return _result("facebook", account_id, account, False,
-                       error="This Facebook account still needs a Page selected",
-                       permanent=True)
+        return None, None, _result("facebook", account_id, account, False,
+                                   error="This Facebook account still needs a Page selected",
+                                   permanent=True)
     if facebook_expired(token["expires_at"]) and account_id:
         # Page tokens outlive the user token they came from, so an expired user
         # token is worth flagging on the accounts screen but not worth refusing
         # the post over.
         database.set_social_account_status(account_id, "expired", db_path=db_path)
+    return get_facebook_client(), token, None
 
-    client = get_facebook_client()
+
+def _facebook(account_id, account, text, image_url, standalone_id, social_id,
+              article_title, db_path, video_url=None):
+    client, token, failure = _facebook_session(account_id, account, db_path)
+    if failure:
+        return failure
+
     extra = {"video_url": video_url} if video_url else {}
     result = client.publish_smart_post(
         page_access_token=token["page_access_token"],
@@ -572,12 +597,12 @@ def _facebook(account_id, account, text, image_url, standalone_id, social_id,
     return _from_client("facebook", account_id, account, result)
 
 
-def _instagram(account_id, account, text, image_url, standalone_id, social_id,
-               article_title, db_path, video_url=None):
+def _instagram_session(account_id, account, db_path):
+    """The Instagram client and a usable token for an account; see ``_linkedin_session``."""
     token = database.get_instagram_token(account_id, db_path=db_path)
     if not token:
-        return _result("instagram", account_id, account, False,
-                       error="Instagram is not connected", needs_reconnect=True)
+        return None, None, _result("instagram", account_id, account, False,
+                                   error="Instagram is not connected", needs_reconnect=True)
 
     client = get_instagram_client()
     if instagram_expired(token["expires_at"]):
@@ -591,8 +616,17 @@ def _instagram(account_id, account, text, image_url, standalone_id, social_id,
             )
             token = database.get_instagram_token(account_id, db_path=db_path)
         except Exception as exc:  # noqa: BLE001
-            return _result("instagram", account_id, account, False,
-                           error=f"Instagram token expired: {exc}", needs_reconnect=True)
+            return None, None, _result("instagram", account_id, account, False,
+                                       error=f"Instagram token expired: {exc}",
+                                       needs_reconnect=True)
+    return client, token, None
+
+
+def _instagram(account_id, account, text, image_url, standalone_id, social_id,
+               article_title, db_path, video_url=None):
+    client, token, failure = _instagram_session(account_id, account, db_path)
+    if failure:
+        return failure
 
     caption = text[:CHAR_LIMITS["instagram"]]
     if _instagram_publisher is not None:
@@ -622,6 +656,37 @@ _HANDLERS = {
     "facebook": _facebook,
     "instagram": _instagram,
 }
+
+
+_SESSIONS = {
+    "linkedin": _linkedin_session,
+    "threads": _threads_session,
+    "twitter": _twitter_session,
+    "facebook": _facebook_session,
+    "instagram": _instagram_session,
+}
+
+
+def session(platform: str, account_id=None, *, db_path: str | None = None):
+    """A platform client and a usable token for one account, for any caller.
+
+    Publishing and the outreach listener both need "this account's token,
+    refreshed if it has expired", so they share these sessions instead of each
+    carrying a copy of the refresh. Returns ``(client, token, account, failure)``;
+    ``failure`` is a publish-shaped result (``needs_reconnect`` set when only
+    reconnecting will fix it) and the rest are None when it is set.
+    """
+    db_path = db_path or database.DB_PATH
+    platform = (platform or "").strip().lower()
+    account, error = resolve_target(platform, account_id, db_path=db_path)
+    if error:
+        return None, None, None, _result(platform, account_id, None, False, error=error,
+                                         permanent=True)
+    resolved_id = account["id"] if account is not None else None
+    client, token, failure = _SESSIONS[platform](resolved_id, account, db_path)
+    if failure:
+        return None, None, account, failure
+    return client, token, account, None
 
 
 def _from_client(platform, account_id, account, result, urn_key="permalink") -> dict:

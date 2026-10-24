@@ -20,6 +20,7 @@ import sqlite3
 import tempfile
 import threading
 import uuid
+import hmac
 from queue import Queue
 from flask import (
     Flask,
@@ -254,6 +255,34 @@ from database import (
     get_brief_run,
     list_brief_runs,
     get_active_brief_run,
+    LEAD_STAGES,
+    add_lead_identity,
+    add_outreach_message,
+    clear_lead_opt_out,
+    count_lead_outbound_since,
+    create_lead,
+    create_lead_import_batch,
+    finish_lead_import_batch,
+    get_lead,
+    get_lead_import_batch,
+    get_outreach_message,
+    get_outreach_profile,
+    last_lead_message,
+    lead_reached_before,
+    lead_stage_counts,
+    link_unmatched_messages,
+    list_lead_identities,
+    list_lead_messages,
+    list_leads,
+    list_outreach_queue,
+    merge_leads,
+    open_outreach_item,
+    set_lead_opt_out,
+    update_lead,
+    update_outreach_message,
+    update_outreach_profile,
+    update_outreach_runtime,
+    outreach_messages_in_conversation,
 )
 import social_publisher
 import video_media
@@ -295,6 +324,21 @@ from insights import (
 # research_engine/web_search it pulls in) only late-import insights_web inside
 # functions, so there is no import cycle at module load.
 import content_agent
+# Outreach: leads for the owner's program, and the texts and calls that warm
+# them up. outreach_worker drafts; only outreach_sender sends, from the Send route.
+import lead_import
+import outreach_agent
+import outreach_sender
+import outreach_social
+import outreach_worker
+import twilio_client
+import threads_client as threads_client_module
+import instagram_client as instagram_client_module
+import facebook_client as facebook_client_module
+from outreach_rules import (
+    context_missing, lead_score, lead_zones, offer_names, parse_utc, pretty_phone, send_window_check,
+    utc_now as outreach_utc_now, with_first_text_footer,
+)
 import document_extractor
 from starter_prompts import grouped_starter_prompts
 from linkedin_client import (
@@ -3805,7 +3849,11 @@ def threads_auth():
     if not client.is_configured():
         return jsonify({"error": "Threads not configured"}), 400
     
-    auth_url, state = client.get_authorization_url()
+    # Plain Connect makes exactly the call it always made; only the engagement
+    # reconnect asks for more.
+    engage_scopes = _outreach_engage_scopes('threads')
+    auth_url, state = (client.get_authorization_url(scopes=engage_scopes) if engage_scopes
+                       else client.get_authorization_url())
     session['threads_oauth_state'] = state
     _remember_oauth_return()
     
@@ -4114,7 +4162,11 @@ def instagram_auth():
     if not client.is_configured():
         return jsonify({"error": "Instagram not configured"}), 400
 
-    auth_url, state = client.get_authorization_url()
+    # Plain Connect makes exactly the call it always made; only the engagement
+    # reconnect asks for more.
+    engage_scopes = _outreach_engage_scopes('instagram')
+    auth_url, state = (client.get_authorization_url(scopes=engage_scopes) if engage_scopes
+                       else client.get_authorization_url())
     session['instagram_oauth_state'] = state
     _remember_oauth_return()
 
@@ -4360,7 +4412,11 @@ def facebook_auth():
     if not client.is_configured():
         return jsonify({"error": "Facebook not configured"}), 400
 
-    auth_url, state = client.get_authorization_url()
+    # Plain Connect makes exactly the call it always made; only the engagement
+    # reconnect asks for more.
+    engage_scopes = _outreach_engage_scopes('facebook')
+    auth_url, state = (client.get_authorization_url(scopes=engage_scopes) if engage_scopes
+                       else client.get_authorization_url())
     session['facebook_oauth_state'] = state
     _remember_oauth_return()
 
@@ -11706,6 +11762,865 @@ def content_agent_worker() -> None:
                 app.logger.exception("content_agent_worker loop error")
 
 
+# ── Outreach ────────────────────────────────────────────────────────────────
+#
+# Leads for the owner's program and the texts and calls that warm them up. The
+# worker (outreach_worker) reads replies and writes drafts into the queue; a
+# draft only leaves through outreach_sender.send, which only the Send route
+# below calls. Every outreach POST must come from the page's own fetch (the
+# X-Requested-With header), the app's guard against a cross-site form post.
+
+OUTREACH_TABS = ("queue", "leads", "calls", "setup")
+CALL_OUTCOMES = {
+    "no_answer": "No answer",
+    "voicemail": "Left a voicemail",
+    "interested": "Talked: interested",
+    "not_now": "Talked: not now",
+    "not_fit": "Not a fit",
+    "booked": "Booked a call",
+}
+_CALL_OUTCOME_STAGE = {"interested": "replied", "not_fit": "not_fit", "booked": "booked"}
+OUTREACH_KIND_LABELS = {
+    "opener": "First text", "continuation": "Reply", "follow_up": "Nudge",
+    "external": "Sent outside Insights", "inbound": "Their text", "call": "Call",
+}
+
+
+def _outreach_xhr_required():
+    if request.headers.get('X-Requested-With') != 'XMLHttpRequest':
+        return jsonify({"error": "Use the Outreach page for this"}), 400
+    return None
+
+
+def _outreach_lead_view(lead: dict, profile: dict, now) -> dict:
+    view = dict(lead)
+    view['phone_display'] = pretty_phone(lead.get('phone'))
+    zones, source = lead_zones(lead.get('phone'), lead.get('timezone'), profile.get('timezone'))
+    ok, why = send_window_check(now, zones, profile.get('send_window_start'),
+                                profile.get('send_window_end'))
+    view.update(zones=zones, zone_source=source, in_window=ok, window_note=why)
+    return view
+
+
+def _outreach_twilio_status() -> dict:
+    client = twilio_client.get_twilio_client()
+    return {"can_send": client.can_send(), "can_read": client.can_read(),
+            "missing": client.missing(), "from_number": pretty_phone(client.from_number),
+            "service": bool(client.messaging_service_sid)}
+
+
+@app.route('/outreach')
+def outreach_page():
+    """Queue, leads, calls and setup for the outreach agent."""
+    tab = request.args.get('tab', 'queue')
+    if tab not in OUTREACH_TABS:
+        tab = 'queue'
+    profile = get_outreach_profile()
+    now = outreach_utc_now()
+    leads_cache = {}
+
+    def lead_of(lead_id):
+        if lead_id and lead_id not in leads_cache:
+            lead = get_lead(lead_id)
+            leads_cache[lead_id] = _outreach_lead_view(lead, profile, now) if lead else None
+        return leads_cache.get(lead_id)
+
+    queue = []
+    for message in list_outreach_queue():
+        if message['status'] == 'failed' and (message.get('context') or {}).get('dismissed'):
+            continue
+        item = dict(message)
+        item['lead'] = lead_of(message.get('lead_id'))
+        item['kind_label'] = OUTREACH_KIND_LABELS.get(message.get('kind'), 'Text')
+        if message.get('kind') == 'follow_up':
+            item['kind_label'] = f"Nudge {(message.get('context') or {}).get('follow_up') or ''}".strip()
+        if (message.get('context') or {}).get('after_call'):
+            item['kind_label'] = 'After call'
+        item['peer_display'] = pretty_phone(message.get('peer'))
+        item['social'] = message['channel'] in outreach_social.SOCIAL_CHANNELS
+        if item['social']:
+            context = message.get('context') or {}
+            item['platform_name'] = outreach_social.PLATFORM_NAMES[message['channel']]
+            item['limit'] = outreach_social.REPLY_LIMITS[message['channel']]
+            item['inbound'] = get_outreach_message(message.get('based_on_message_id') or 0)
+            item['permalink'] = context.get('permalink') or \
+                ((item['inbound'] or {}).get('context') or {}).get('permalink')
+            item['source_label'] = {"reply": "Replied to your post", "comment": "Commented on your post",
+                                    "mention": "Mentioned you", "search": "Found by search"}.get(
+                context.get('source'), "Conversation")
+            # Only this person's exchange with the owner, not everyone else on the post.
+            conversation = [m for m in outreach_messages_in_conversation(
+                message['channel'], context.get('root_id') or '')
+                if m['status'] in ('received', 'sent', 'delivered', 'external')
+                and m['id'] != message.get('based_on_message_id')
+                and m.get('lead_id') == message.get('lead_id')]
+            item['thread'] = conversation[-3:]
+            item['first'] = False
+            item['footer'] = ''
+            queue.append(item)
+            continue
+        if item['lead']:
+            thread = [m for m in list_lead_messages(item['lead']['id'], channel='sms')
+                      if m['status'] in ('received', 'sent', 'delivered', 'external', 'unknown')]
+            item['thread'] = thread[-4:]
+            item['first'] = not lead_reached_before(item['lead']['id'], 'sms')
+        else:
+            item['thread'] = []
+            item['first'] = False
+        # What Send adds to a first text, so the page can count it in.
+        item['footer'] = (with_first_text_footer('x', profile.get('sms_signature') or '')[1:]
+                          if item['first'] else '')
+        queue.append(item)
+
+    stage = request.args.get('stage') or None
+    search = (request.args.get('q') or '').strip() or None
+    leads = []
+    if tab == 'leads':
+        leads = [_outreach_lead_view(l, profile, now)
+                 for l in list_leads(stage=stage if stage in LEAD_STAGES else None, search=search)]
+
+    calls = []
+    if tab == 'calls':
+        since = (now - timedelta(hours=24)).strftime('%Y-%m-%d %H:%M:%S')
+        for lead in list_leads(call_consent=True, limit=200):
+            if lead.get('opted_out_at') or lead.get('do_not_contact') \
+                    or lead.get('stage') in ('enrolled', 'not_fit') or not lead.get('phone'):
+                continue
+            view = _outreach_lead_view(lead, profile, now)
+            view['contacts_24h'] = count_lead_outbound_since(lead['id'], since)
+            try:
+                view['brief'] = json.loads(lead['call_brief']) if lead.get('call_brief') else None
+            except (TypeError, ValueError):
+                view['brief'] = None
+            last_call = [m for m in list_lead_messages(lead['id'], channel='call')][-1:]
+            view['last_call'] = last_call[0] if last_call else None
+            calls.append(view)
+
+    starter_brief = get_content_brief(profile['starter_brief_id']) if profile.get('starter_brief_id') else None
+    runtime = profile.get('runtime_state') or {}
+    webhooks = {
+        "public_url": _outreach_public_url('') or '',
+        "twilio_url": _outreach_public_url('/twilio/sms'),
+        "kartra_url": _outreach_public_url('/kartra/webhook'),
+        "kartra_enabled": bool((os.getenv('KARTRA_WEBHOOK_SECRET') or '').strip()),
+        "kartra_last": runtime.get('kartra') or {},
+    }
+    return render_template(
+        'outreach.html', tab=tab, profile=profile, queue=queue, leads=leads, calls=calls,
+        sources=_outreach_sources(profile) if tab == 'setup' else [],
+        webhooks=webhooks, starter_brief=dict(starter_brief) if starter_brief else None,
+        search_state=runtime.get('search') or {},
+        x_mentions=outreach_worker.x_mentions_enabled(), social_minutes=outreach_worker.social_minutes(),
+        context_missing=context_missing(profile), offer_names=offer_names(profile),
+        stage=stage, search=search or '', stages=LEAD_STAGES, stage_counts=lead_stage_counts(),
+        call_outcomes=CALL_OUTCOMES, caps=outreach_agent.caps_status(profile, now),
+        twilio=_outreach_twilio_status(), worker_enabled=outreach_worker.enabled(),
+        tick=int(os.getenv('OUTREACH_TICK_SECONDS', '300') or 300),
+        import_fields=lead_import.FIELDS,
+    )
+
+
+@app.route('/outreach/messages/<int:message_id>/send', methods=['POST'])
+def outreach_send(message_id):
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    data = request.get_json(silent=True) or {}
+    try:
+        result = outreach_sender.send(message_id, (data.get('body') or '').strip(),
+                                      session.get('user_id'))
+    except outreach_sender.NotFromSendButton as exc:
+        return jsonify({"error": str(exc)}), 403
+    if result.get('ok'):
+        return jsonify(result)
+    return jsonify(result), result.get('http_status', 400)
+
+
+@app.route('/outreach/messages/<int:message_id>/regenerate', methods=['POST'])
+def outreach_regenerate(message_id):
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    message = get_outreach_message(message_id)
+    if not message or message['direction'] != 'out' or message['status'] not in ('draft', 'needs_review'):
+        return jsonify({"error": "Only a draft can be rewritten"}), 409
+    lead = get_lead(message['lead_id']) if message.get('lead_id') else None
+    if not lead:
+        return jsonify({"error": "This draft has no lead"}), 409
+    data = request.get_json(silent=True) or {}
+    instruction = (data.get('instruction') or '').strip()[:500] or None
+    if message['channel'] in outreach_social.SOCIAL_CHANNELS:
+        item = get_outreach_message(message.get('based_on_message_id') or 0)
+        if not item:
+            return jsonify({"error": "The message this reply answers is gone"}), 409
+        result = outreach_worker.draft_social(item, get_outreach_profile(), outreach_utc_now(),
+                                              existing=message, instruction=instruction,
+                                              force=True, by='owner')
+        fresh = get_outreach_message(message_id)
+        return jsonify({**result, "body": (fresh or {}).get('body'),
+                        "reason": ((fresh or {}).get('context') or {}).get('reason')}), \
+            (200 if result['status'] == 'draft' else 502)
+    kind = message.get('kind') or 'continuation'
+    last_in = outreach_worker.latest_inbound_id(lead['id'])
+    if kind == 'opener' and last_in:
+        kind = 'continuation'  # they texted first; answer them
+    context = message.get('context') or {}
+    result = outreach_worker.draft_for_lead(
+        lead, get_outreach_profile(), outreach_utc_now(), kind=kind,
+        based_on=last_in if kind == 'continuation' else message.get('based_on_message_id'),
+        follow_up=int(context.get('follow_up') or 0), existing=message,
+        instruction=instruction, after_call=context.get('after_call'),
+        by=context.get('by') or 'owner')
+    fresh = get_outreach_message(message_id)
+    status = 200 if result['status'] in ('draft', 'opted_out') else 502
+    return jsonify({**result, "body": (fresh or {}).get('body'),
+                    "reason": ((fresh or {}).get('context') or {}).get('reason')}), status
+
+
+@app.route('/outreach/messages/<int:message_id>/skip', methods=['POST'])
+def outreach_skip(message_id):
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    message = get_outreach_message(message_id)
+    if not message:
+        return jsonify({"error": "Not found"}), 404
+    if message['status'] in ('draft', 'needs_review') \
+            or (message['direction'] == 'in' and message['status'] == 'received' and not message.get('lead_id')):
+        update_outreach_message(message_id, status='skipped')
+    elif message['status'] == 'failed':
+        update_outreach_message(message_id, context={**(message.get('context') or {}), 'dismissed': True})
+    else:
+        return jsonify({"error": f"A {message['status']} message cannot be skipped"}), 409
+    return jsonify({"success": True})
+
+
+@app.route('/outreach/messages/<int:message_id>/check', methods=['POST'])
+def outreach_check(message_id):
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    message = get_outreach_message(message_id)
+    if not message or message['status'] != 'unknown':
+        return jsonify({"error": "Only a text whose outcome is unknown can be checked"}), 409
+    result = outreach_worker.settle_unknown(message, twilio_client.get_twilio_client(),
+                                            outreach_utc_now())
+    return jsonify(result)
+
+
+@app.route('/outreach/messages/<int:message_id>/retry', methods=['POST'])
+def outreach_retry(message_id):
+    """A failed text comes back as a new draft with the same words, to edit and send."""
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    message = get_outreach_message(message_id)
+    if not message or message['status'] != 'failed' or not message.get('lead_id'):
+        return jsonify({"error": "Only a failed text can be retried"}), 409
+    context = {**(message.get('context') or {}), 'retry_of': message_id, 'by': 'owner'}
+    new_id = add_outreach_message('sms', 'out', 'draft', message.get('body') or '',
+                                  lead_id=message['lead_id'], kind=message.get('kind'),
+                                  context=context,
+                                  based_on_message_id=message.get('based_on_message_id'))
+    if not new_id:
+        return jsonify({"error": "This lead already has a draft in the queue"}), 409
+    update_outreach_message(message_id, context={**(message.get('context') or {}), 'dismissed': True})
+    return jsonify({"success": True, "message_id": new_id})
+
+
+@app.route('/outreach/messages/<int:message_id>/link', methods=['POST'])
+def outreach_link(message_id):
+    """Attach a text from an unknown number to a lead, new or existing."""
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    message = get_outreach_message(message_id)
+    if not message or message['direction'] != 'in' or message.get('lead_id'):
+        return jsonify({"error": "Only an unmatched text can be linked"}), 409
+    data = request.get_json(silent=True) or {}
+    peer = message.get('peer')
+    if data.get('lead_id'):
+        lead_id = int(data['lead_id'])
+        lead = get_lead(lead_id)
+        if not lead:
+            return jsonify({"error": "That lead does not exist"}), 404
+        if not add_lead_identity(lead_id, 'phone', peer):
+            return jsonify({"error": "That number already belongs to another lead"}), 409
+        if not lead.get('phone'):
+            update_lead(lead_id, phone=peer)
+    else:
+        name = (data.get('name') or '').strip()[:120] or None
+        try:
+            lead_id = create_lead([('phone', peer)], phone=peer, name=name, source='sms')
+        except sqlite3.IntegrityError:
+            return jsonify({"error": "That number already belongs to a lead"}), 409
+    link_unmatched_messages(peer, lead_id)
+    lead = get_lead(lead_id)
+    changes = {'last_inbound_at': message.get('sent_at') or message.get('created_at'),
+               'stage': 'replied' if lead.get('stage') in (None, '', 'new', 'contacted') else lead['stage']}
+    update_lead(lead_id, score=lead_score({**lead, **changes}), **changes)
+    result = outreach_worker.draft_for_lead(
+        get_lead(lead_id), get_outreach_profile(), outreach_utc_now(), kind='continuation',
+        based_on=outreach_worker.latest_inbound_id(lead_id), by='owner')
+    return jsonify({"success": True, "lead_id": lead_id, "draft": result})
+
+
+@app.route('/outreach/leads/<int:lead_id>')
+def outreach_lead_detail(lead_id):
+    lead = get_lead(lead_id)
+    if not lead:
+        return jsonify({"error": "Not found"}), 404
+    profile = get_outreach_profile()
+    view = _outreach_lead_view(lead, profile, outreach_utc_now())
+    batch = get_lead_import_batch(lead['import_batch_id']) if lead.get('import_batch_id') else None
+    timeline = []
+    for m in list_lead_messages(lead_id):
+        timeline.append({
+            "id": m['id'], "channel": m['channel'], "direction": m['direction'],
+            "status": m['status'], "kind": OUTREACH_KIND_LABELS.get(m.get('kind'), m.get('kind') or ''),
+            "body": m.get('body') or '', "error": m.get('error') or '',
+            "at": m.get('sent_at') or m.get('created_at'),
+            "outcome": CALL_OUTCOMES.get((m.get('context') or {}).get('outcome'), ''),
+        })
+    return jsonify({
+        "lead": {k: view.get(k) for k in (
+            'id', 'name', 'email', 'phone', 'phone_display', 'source', 'stage', 'score', 'notes',
+            'sms_consent', 'call_consent', 'consent_source', 'consent_at', 'opted_out_at',
+            'opt_out_source', 'do_not_contact', 'magnets', 'tags', 'quiz_result', 'timezone',
+            'zones', 'zone_source', 'in_window', 'window_note', 'last_contact_at',
+            'last_inbound_at', 'next_follow_up_at', 'opted_in_at')},
+        "identities": list_lead_identities(lead_id),
+        "batch": batch,
+        "timeline": timeline,
+        "can_undo_opt_out": bool(lead.get('opted_out_at')) and lead.get('opt_out_source') in ('detected', 'manual'),
+        "stages": list(LEAD_STAGES),
+    })
+
+
+@app.route('/outreach/leads/search')
+def outreach_lead_search():
+    q = (request.args.get('q') or '').strip()
+    if len(q) < 2:
+        return jsonify({"leads": []})
+    return jsonify({"leads": [{"id": l['id'], "name": l.get('name') or '', "email": l.get('email') or '',
+                               "phone": pretty_phone(l.get('phone'))}
+                              for l in list_leads(search=q, limit=10)]})
+
+
+@app.route('/outreach/leads/<int:lead_id>/update', methods=['POST'])
+def outreach_lead_update(lead_id):
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    lead = get_lead(lead_id)
+    if not lead:
+        return jsonify({"error": "Not found"}), 404
+    data = request.get_json(silent=True) or {}
+    changes = {}
+    if 'stage' in data:
+        if data['stage'] not in LEAD_STAGES:
+            return jsonify({"error": "Unknown stage"}), 400
+        changes['stage'] = data['stage']
+    if 'notes' in data:
+        changes['notes'] = (data.get('notes') or '')[:4000]
+    if 'name' in data:
+        changes['name'] = (data.get('name') or '').strip()[:120] or None
+    if 'do_not_contact' in data:
+        changes['do_not_contact'] = bool(data['do_not_contact'])
+        if changes['do_not_contact']:
+            changes['next_follow_up_at'] = None
+    if 'timezone' in data:
+        zone = (data.get('timezone') or '').strip()
+        if zone:
+            try:
+                from zoneinfo import ZoneInfo
+                ZoneInfo(zone)
+            except Exception:
+                return jsonify({"error": f"{zone} is not a time zone name (try America/Chicago)"}), 400
+        changes['timezone'] = zone or None
+    if data.get('opt_out'):
+        set_lead_opt_out(lead_id, 'manual')
+    if data.get('clear_opt_out'):
+        if lead.get('opt_out_source') not in ('detected', 'manual'):
+            return jsonify({"error": "Only an opt-out Insights inferred or you set can be undone. "
+                                     "Someone who texted STOP has to text START."}), 409
+        clear_lead_opt_out(lead_id)
+    if changes:
+        changes['score'] = lead_score({**get_lead(lead_id), **changes})
+        update_lead(lead_id, **changes)
+    if changes.get('do_not_contact'):
+        # Their open drafts close, as they do on an opt-out.
+        for message in list_lead_messages(lead_id):
+            if message['status'] in ('draft', 'needs_review'):
+                update_outreach_message(message['id'], status='skipped', error='Marked do-not-contact')
+    return jsonify({"success": True})
+
+
+@app.route('/outreach/leads/<int:lead_id>/merge', methods=['POST'])
+def outreach_lead_merge(lead_id):
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    data = request.get_json(silent=True) or {}
+    try:
+        merge_leads(lead_id, int(data.get('other_id') or 0))
+    except (ValueError, TypeError) as exc:
+        return jsonify({"error": str(exc) or "Pick a lead to merge"}), 400
+    return jsonify({"success": True})
+
+
+@app.route('/outreach/leads/<int:lead_id>/draft', methods=['POST'])
+def outreach_lead_draft(lead_id):
+    """Ask for a draft to this lead now: a reply, a nudge or a first text, whichever fits."""
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    lead = get_lead(lead_id)
+    if not lead:
+        return jsonify({"error": "Not found"}), 404
+    if open_outreach_item(lead_id, 'sms'):
+        return jsonify({"error": "This lead already has a draft in the queue"}), 409
+    last_in = last_lead_message(lead_id, 'sms', 'in')
+    last_out = last_lead_message(lead_id, 'sms', 'out')
+    if last_in and (not last_out or last_in['id'] > last_out['id']):
+        kind, follow_up = 'continuation', 0
+    elif last_out:
+        kind, follow_up = 'follow_up', int(lead.get('follow_ups_sent') or 0) + 1
+    else:
+        kind, follow_up = 'opener', 0
+    data = request.get_json(silent=True) or {}
+    result = outreach_worker.draft_for_lead(
+        lead, get_outreach_profile(), outreach_utc_now(), kind=kind, follow_up=follow_up,
+        based_on=last_in['id'] if last_in else None, by='owner',
+        instruction=(data.get('instruction') or '').strip()[:500] or None)
+    return jsonify(result), (200 if result['status'] == 'draft' else 502)
+
+
+@app.route('/outreach/leads/import/preview', methods=['POST'])
+def outreach_import_preview():
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    upload = request.files.get('file')
+    if not upload or not upload.filename:
+        return jsonify({"error": "Choose a .csv or .xlsx file"}), 400
+    try:
+        headers, rows = lead_import.read_table(upload.read(), upload.filename)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not headers:
+        return jsonify({"error": "That file has no header row"}), 400
+    try:
+        mapping = json.loads(request.form.get('mapping') or 'null') or lead_import.guess_mapping(headers)
+    except ValueError:
+        mapping = lead_import.guess_mapping(headers)
+    mapping = {k: v for k, v in mapping.items() if k in lead_import.FIELDS and v in headers}
+    return jsonify({"headers": headers, "mapping": mapping, "fields": lead_import.FIELDS,
+                    "report": lead_import.preview(headers, rows, mapping)})
+
+
+@app.route('/outreach/leads/import', methods=['POST'])
+def outreach_import():
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    upload = request.files.get('file')
+    if not upload or not upload.filename:
+        return jsonify({"error": "Choose a .csv or .xlsx file"}), 400
+    form = request.form
+    consent_texts = form.get('consent_texts') == '1'
+    consent_calls = form.get('consent_calls') == '1'
+    form_name = (form.get('form_name') or '').strip()[:200]
+    wording = (form.get('consent_wording') or '').strip()[:2000]
+    consent_date = (form.get('consent_date') or '').strip()[:10]
+    if form.get('confirm') != '1':
+        return jsonify({"error": "Confirm that everyone in this file agreed to the wording you entered"}), 400
+    if not form_name:
+        return jsonify({"error": "Name the form these people signed up through"}), 400
+    if (consent_texts or consent_calls) and (not wording or not consent_date):
+        return jsonify({"error": "Paste the consent wording the form showed, and the date it applied from"}), 400
+    try:
+        headers, rows = lead_import.read_table(upload.read(), upload.filename)
+        mapping = json.loads(form.get('mapping') or '{}')
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    mapping = {k: v for k, v in mapping.items() if k in lead_import.FIELDS and v in headers}
+    if 'phone' not in mapping and 'email' not in mapping:
+        return jsonify({"error": "Map a phone or an email column"}), 400
+    types = [t for t, on in (('texts', consent_texts), ('calls', consent_calls)) if on]
+    batch_id = create_lead_import_batch(upload.filename, form_name, types, wording, consent_date,
+                                        consent_texts, user_id=session.get('user_id'))
+    source = f'{form_name} (import #{batch_id}, {consent_date or "no date"})'
+    if wording:
+        source += f': "{wording[:300]}"'
+    result = lead_import.apply(rows, mapping, batch_id, {"sms": consent_texts, "call": consent_calls},
+                               source, consent_date or None)
+    finish_lead_import_batch(batch_id, result['total'], result['added'], result['updated'],
+                             result['rejected'])
+    return jsonify({"success": True, "batch_id": batch_id, **result})
+
+
+@app.route('/outreach/leads/<int:lead_id>/call/brief', methods=['POST'])
+def outreach_call_brief(lead_id):
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    lead = get_lead(lead_id)
+    if not lead:
+        return jsonify({"error": "Not found"}), 404
+    try:
+        brief = outreach_agent.call_brief(lead, list_lead_messages(lead_id), get_outreach_profile())
+    except outreach_agent.DraftError as exc:
+        return jsonify({"error": str(exc)}), 502
+    except Exception as exc:  # noqa: BLE001
+        app.logger.exception("call brief failed for lead %s", lead_id)
+        return jsonify({"error": f"Could not write the brief ({exc.__class__.__name__})"}), 502
+    update_lead(lead_id, call_brief=json.dumps(brief),
+                call_brief_at=outreach_utc_now().strftime('%Y-%m-%d %H:%M:%S'))
+    return jsonify({"brief": brief})
+
+
+@app.route('/outreach/leads/<int:lead_id>/call/log', methods=['POST'])
+def outreach_call_log(lead_id):
+    """Log how a call went; the stage moves and a follow-up text is drafted."""
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    lead = get_lead(lead_id)
+    if not lead:
+        return jsonify({"error": "Not found"}), 404
+    data = request.get_json(silent=True) or {}
+    outcome = data.get('outcome')
+    if outcome not in CALL_OUTCOMES:
+        return jsonify({"error": "Pick how the call went"}), 400
+    notes = (data.get('notes') or '').strip()[:2000]
+    now = outreach_utc_now()
+    stamp = now.strftime('%Y-%m-%d %H:%M:%S')
+    add_outreach_message('call', 'out', 'logged', notes, lead_id=lead_id, kind='call',
+                         context={'outcome': outcome}, sent_at=stamp)
+    changes = {'last_contact_at': stamp, 'call_brief': None, 'call_brief_at': None}
+    new_stage = _CALL_OUTCOME_STAGE.get(outcome)
+    if new_stage and (new_stage != 'replied' or lead.get('stage') in (None, '', 'new', 'contacted')):
+        changes['stage'] = new_stage
+    elif lead.get('stage') in (None, '', 'new'):
+        changes['stage'] = 'contacted'
+    changes['score'] = lead_score({**lead, **changes}, now)
+    update_lead(lead_id, **changes)
+    lead = get_lead(lead_id)
+
+    draft = None
+    note = None
+    last_in = last_lead_message(lead_id, 'sms', 'in')
+    texted_lately = bool(last_in and (now - (parse_utc(last_in.get('sent_at') or last_in.get('created_at')) or now)).total_seconds() <= 86400)
+    if outcome == 'not_fit':
+        note = "No follow-up text for a lead who is not a fit."
+    elif lead.get('opted_out_at') or lead.get('do_not_contact'):
+        note = "No follow-up text: they opted out or are do-not-contact."
+    elif not lead.get('sms_consent') and not texted_lately:
+        note = "No follow-up text: there is no text consent on record."
+    elif open_outreach_item(lead_id, 'sms'):
+        note = "They already have a draft in the queue; edit that one."
+    else:
+        draft = outreach_worker.draft_for_lead(
+            lead, get_outreach_profile(), now, kind='continuation',
+            based_on=last_in['id'] if last_in else None, by='owner',
+            after_call={'outcome': CALL_OUTCOMES[outcome], 'notes': notes})
+    return jsonify({"success": True, "stage": lead.get('stage'), "draft": draft, "note": note})
+
+
+def _outreach_profile_from_form(data: dict) -> tuple[dict, str | None]:
+    """Profile fields from the Setup form, or an error naming the bad field."""
+    from zoneinfo import ZoneInfo
+    out = {}
+    for key, limit in (('business_name', 120), ('business_field', 200), ('program_summary', 4000),
+                       ('ideal_lead', 4000), ('voice_notes', 2000), ('sms_signature', 80)):
+        if key in data:
+            out[key] = (data.get(key) or '').strip()[:limit]
+    for key in ('send_window_start', 'send_window_end'):
+        if key in data:
+            value = (data.get(key) or '').strip()
+            if not re.fullmatch(r'([01]\d|2[0-3]):[0-5]\d', value):
+                return {}, "Texting hours must look like 08:00"
+            out[key] = value
+    if out.get('send_window_start', '08:00') >= out.get('send_window_end', '20:00'):
+        return {}, "The texting window must start before it ends"
+    if 'timezone' in data:
+        try:
+            ZoneInfo((data.get('timezone') or '').strip())
+        except Exception:
+            return {}, "Your time zone must be a name like America/New_York"
+        out['timezone'] = data['timezone'].strip()
+    for key, cast, low, high in (('daily_draft_cap', int, 0, 500), ('daily_send_cap', int, 0, 1000),
+                                 ('daily_cost_cap', float, 0, 100), ('follow_up_days', int, 0, 60),
+                                 ('max_follow_ups', int, 0, 5)):
+        if key in data:
+            try:
+                out[key] = max(low, min(high, cast(data.get(key))))
+            except (TypeError, ValueError):
+                return {}, f"{key.replace('_', ' ')} must be a number"
+    if 'search_keywords' in data:
+        raw = data.get('search_keywords') or []
+        if isinstance(raw, str):
+            raw = raw.splitlines()
+        out['search_keywords'] = [k.strip()[:80] for k in raw if k and k.strip()][:20]
+    if 'search_daily_queries' in data:
+        try:
+            out['search_daily_queries'] = max(0, min(2000, int(data.get('search_daily_queries'))))
+        except (TypeError, ValueError):
+            return {}, "Searches per day must be a number"
+    if 'webhook_consent' in data:
+        consent = data.get('webhook_consent') or {}
+        texts, calls = bool(consent.get('texts')), bool(consent.get('calls'))
+        wording = (consent.get('wording') or '').strip()[:2000]
+        form_name = (consent.get('form_name') or '').strip()[:200]
+        if (texts or calls) and not (wording and form_name and consent.get('confirmed')):
+            return {}, ("To give webhook opt-ins consent, name the form, paste its consent wording, "
+                        "and confirm that every opt-in agreed to it")
+        out['webhook_consent'] = {"form_name": form_name, "wording": wording, "texts": texts,
+                                  "calls": calls, "confirmed": bool(consent.get('confirmed')),
+                                  "date": (consent.get('date') or '').strip()[:10]}
+    if 'offers' in data:
+        offers = []
+        for offer in data.get('offers') or []:
+            key = re.sub(r'[^a-z0-9_]', '', (offer.get('key') or '').strip().lower())[:40]
+            name = (offer.get('name') or '').strip()[:120]
+            url = (offer.get('url') or '').strip()[:500]
+            if not key and not name:
+                continue
+            if url and not re.match(r'https?://[^\s]+\.[^\s]+', url):
+                return {}, f"The link for {name or key} must start with https://"
+            offers.append({"key": key or re.sub(r'[^a-z0-9]+', '_', name.lower())[:40],
+                           "name": name or key, "url": url,
+                           "when_to_use": (offer.get('when_to_use') or '').strip()[:400],
+                           "match": (offer.get('match') or '').strip()[:300]})
+        keys = [o["key"] for o in offers]
+        if len(keys) != len(set(keys)):
+            return {}, "Two offers have the same key; give each its own"
+        out['offers'] = offers
+    return out, None
+
+
+@app.route('/outreach/profile', methods=['POST'])
+def outreach_profile_save():
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    fields, error = _outreach_profile_from_form(request.get_json(silent=True) or {})
+    if error:
+        return jsonify({"error": error}), 400
+    update_outreach_profile(**fields)
+    return jsonify({"success": True})
+
+
+@app.route('/outreach/run', methods=['POST'])
+def outreach_run_now():
+    """Run one worker pass now, in the background; the page polls /outreach/status."""
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+
+    def _bg():
+        with usage_meter.usage_context("proactive"):
+            try:
+                outreach_worker.run_once()
+            except Exception:
+                app.logger.exception("Outreach run failed")
+
+    threading.Thread(target=_bg, daemon=True).start()
+    return jsonify({"started": True})
+
+
+@app.route('/outreach/status')
+def outreach_status():
+    profile = get_outreach_profile()
+    return jsonify({"last_run_at": profile.get('last_run_at'),
+                    "summary": profile.get('last_run_summary') or {},
+                    "running": outreach_worker._run_lock.locked(),
+                    "paused": profile.get('sms_paused_reason'),
+                    "caps": outreach_agent.caps_status(profile)})
+
+
+@app.route('/outreach/sms/resume', methods=['POST'])
+def outreach_sms_resume():
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    update_outreach_profile(sms_paused_reason=None)
+    return jsonify({"success": True})
+
+
+def _outreach_engage_scopes(platform: str):
+    """The scopes for an OAuth start: the configured ones, plus the engagement
+    ones when the owner pressed "Reconnect with engagement permissions"."""
+    if request.args.get('engage') != '1':
+        return None
+    configured = {"threads": threads_client_module.THREADS_SCOPES,
+                  "instagram": instagram_client_module.INSTAGRAM_SCOPES,
+                  "facebook": facebook_client_module.FACEBOOK_SCOPES}[platform]
+    update_outreach_runtime(engage_requested={platform: outreach_utc_now().strftime('%Y-%m-%d %H:%M:%S')})
+    return outreach_social.merge_scopes(configured, outreach_social.ENGAGE_SCOPES[platform])
+
+
+def _outreach_sources(profile: dict) -> list:
+    """Each connected account the listener reads, with what happened last time."""
+    runtime = profile.get('runtime_state') or {}
+    sources = runtime.get('sources') or {}
+    requested = runtime.get('engage_requested') or {}
+    rows = []
+    for account in list_social_accounts():
+        platform = account['platform']
+        if platform not in outreach_social.SOCIAL_CHANNELS:
+            continue
+        entry = sources.get(f"{platform}:{account['id']}") or {}
+        state = entry.get('state') or 'unchecked'
+        if platform == 'twitter' and not outreach_worker.x_mentions_enabled():
+            state = 'off'
+        rows.append({
+            "platform": platform, "name": outreach_social.PLATFORM_NAMES[platform],
+            "account_id": account['id'],
+            "handle": account['handle'] or account['display_name'] or account['label'] or '',
+            "state": state, "friendly": entry.get('friendly') or '', "at": entry.get('at'),
+            "engage_requested": requested.get(platform),
+            "reconnect_url": (f"/{platform}/auth?engage=1" if platform != 'twitter' else None),
+        })
+        if platform == 'threads' and account['is_default']:
+            search = sources.get(f"search:{account['id']}") or {}
+            rows.append({
+                "platform": "search", "name": "Threads search", "account_id": account['id'],
+                "handle": account['handle'] or '', "state": search.get('state') or 'unchecked',
+                "friendly": search.get('friendly') or '', "at": search.get('at'),
+                "engage_requested": requested.get('threads'),
+                "reconnect_url": "/threads/auth?engage=1",
+            })
+    return rows
+
+
+def _outreach_public_url(path: str):
+    base = (os.getenv('OUTREACH_PUBLIC_URL') or '').strip().rstrip('/')
+    return f"{base}{path}" if base else None
+
+
+@app.route('/outreach/messages/<int:message_id>/mark-sent', methods=['POST'])
+def outreach_mark_sent(message_id):
+    """The owner posted a refused reply by hand (X's own compose box): record it."""
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    message = get_outreach_message(message_id)
+    if not message or message['status'] != 'failed' \
+            or not (message.get('context') or {}).get('open_url'):
+        return jsonify({"error": "Only a reply the platform refused can be marked as posted by hand"}), 409
+    update_outreach_message(message_id, status='sent',
+                            sent_at=outreach_utc_now().strftime('%Y-%m-%d %H:%M:%S'),
+                            error=None, context={**(message.get('context') or {}), 'by_hand': True})
+    return jsonify({"success": True})
+
+
+@app.route('/outreach/starter', methods=['POST'])
+def outreach_starter():
+    """Create the weekly Content Agent brief that proposes conversation-starter posts."""
+    refused = _outreach_xhr_required()
+    if refused:
+        return refused
+    profile = get_outreach_profile()
+    existing = profile.get('starter_brief_id')
+    if existing and get_content_brief(existing):
+        return jsonify({"success": True, "created": False, "brief_id": existing})
+    missing = context_missing(profile)
+    if missing:
+        return jsonify({"error": "Fill in your business context first (missing: "
+                                 + ", ".join(missing) + ")"}), 400
+    offers = "; ".join(f"{o['name']} ({o['url']})" for o in profile.get('offers') or [] if o.get('url'))
+    instructions = (
+        f"Write conversation-starter posts for {profile['business_name']} "
+        f"({profile['business_field']}), aimed at this audience: {profile['ideal_lead']}\n"
+        "Each post is one open question that invites replies about their situation, a common "
+        "struggle, or a choice they face, with a short line of context from a practitioner's point "
+        "of view. No hard sell and no link in the post itself. The goal is replies the outreach "
+        "agent can answer.\n\n"
+        f"What the business offers: {profile['program_summary']}\n"
+        + (f"Offers people can be pointed to in replies: {offers}\n" if offers else "")
+    )
+    brief_id = create_content_brief(
+        name="Outreach: conversation starters", instructions=instructions, content_type="posts",
+        platforms=["threads", "twitter", "linkedin"], tone="casual", posts_per_platform=2,
+        audience_persona=profile.get('ideal_lead') or None, use_web_search=False,
+        use_saved_sources=False, cadence="weekly", run_time="09:00", run_days=[0],
+        enabled=True, auto_queue=False, max_cost_usd=0.3, max_drafts_per_run=10,
+        user_id=session.get('user_id'))
+    set_content_brief_schedule(brief_id, next_run_at=_compute_next_run_at(get_content_brief(brief_id)))
+    update_outreach_profile(starter_brief_id=brief_id)
+    return jsonify({"success": True, "created": True, "brief_id": brief_id})
+
+
+_EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'
+
+
+@app.route('/twilio/sms', methods=['POST'])
+def outreach_twilio_webhook():
+    """Twilio's incoming-text webhook, for when the number is pointed here.
+
+    Polling reads the same texts, so this only makes replies arrive sooner. A
+    request must carry Twilio's signature over the public URL Twilio called.
+    """
+    token = os.getenv('TWILIO_AUTH_TOKEN', '')
+    url = _outreach_public_url('/twilio/sms') or request.url
+    if not twilio_client.validate_signature(url, request.form,
+                                            request.headers.get('X-Twilio-Signature'), token):
+        return Response("forbidden", status=403, mimetype='text/plain')
+    ours = (os.getenv('TWILIO_FROM_NUMBER') or '').strip()
+    to = request.form.get('To', '')
+    if ours and to and to != ours:
+        return Response(_EMPTY_TWIML, mimetype='text/xml')
+    now = outreach_utc_now()
+    stamp = now.strftime('%Y-%m-%d %H:%M:%S')
+    message = {"sid": request.form.get('MessageSid') or request.form.get('SmsSid') or '',
+               "from": request.form.get('From', ''), "to": to, "body": request.form.get('Body', ''),
+               "status": "received", "direction": "inbound", "date_sent": stamp,
+               "date_created": stamp, "error_code": None, "error_message": None}
+    if message["sid"] and message["from"]:
+        outreach_worker.ingest_inbound(message, now, {"inbound": 0, "unmatched": 0, "opted_out": 0})
+    return Response(_EMPTY_TWIML, mimetype='text/xml')
+
+
+@app.route('/kartra/webhook', methods=['POST'])
+def outreach_kartra_webhook():
+    """Kartra's outbound webhook: a new opt-in becomes (or updates) a lead at once."""
+    secret = (os.getenv('KARTRA_WEBHOOK_SECRET') or '').strip()
+    if not secret:
+        return jsonify({"error": "not enabled"}), 404
+    given = request.args.get('secret') or request.headers.get('X-Webhook-Secret') or ''
+    if not hmac.compare_digest(given.encode(), secret.encode()):
+        return jsonify({"error": "forbidden"}), 403
+    payload = request.get_json(silent=True)
+    if payload is None:
+        payload = {key: (values if len(values) > 1 else values[0])
+                   for key, values in request.form.lists()}
+    flat = lead_import.flatten_payload(payload or {})
+    row = lead_import.row_from_webhook(flat)
+    # What the last call looked like, so the owner can see Kartra's field names in Setup.
+    update_outreach_runtime(kartra={"last_at": outreach_utc_now().strftime('%Y-%m-%d %H:%M:%S'),
+                                    "fields": sorted(map(str, payload))[:40] if isinstance(payload, dict) else [],
+                                    "result": row["reject"] or "ok"})
+    if row["reject"]:
+        return jsonify({"success": False, "error": row["reject"]}), 422
+    consent = get_outreach_profile().get('webhook_consent') or {}
+    confirmed = bool(consent.get('confirmed'))
+    source = (f'{consent.get("form_name")} (Kartra webhook, {consent.get("date") or "no date"}): '
+              f'"{(consent.get("wording") or "")[:300]}"') if confirmed else ""
+    outcome, lead_id = lead_import.upsert_one(
+        row, {"sms": confirmed and consent.get('texts'), "call": confirmed and consent.get('calls')},
+        source, consent.get('date') or None)
+    if outcome == "conflict":
+        return jsonify({"success": False, "error": "Its phone and email belong to two different leads"}), 409
+    return jsonify({"success": True, "outcome": outcome, "lead_id": lead_id})
+
+
+# The webhooks are called by Twilio and Kartra, not a logged-in browser; each
+# checks its own secret (Twilio's signature, the Kartra secret) instead.
+PUBLIC_ENDPOINTS.update({"outreach_twilio_webhook", "outreach_kartra_webhook"})
+
+
 # ── Content Library ─────────────────────────────────────────────────────────
 #
 # Catalogues a large on-disk media archive and sorts it by year and category.
@@ -13125,6 +14040,13 @@ def start_workers():
         content_worker = threading.Thread(target=content_agent_worker, daemon=True)
         content_worker.start()
         app.logger.info("Content agent worker started")
+
+    # Outreach worker: reads texts that arrive at the Twilio number and drafts
+    # replies and first texts for the Outreach queue. It never sends; it spends
+    # on the LLM, so it is off unless OUTREACH_ENABLED is set.
+    if outreach_worker.enabled():
+        threading.Thread(target=outreach_worker.worker_loop, daemon=True).start()
+        app.logger.info("Outreach worker started")
 
     # One-time backfill for YouTube channel names
     backfill_thread = threading.Thread(target=_backfill_youtube_channels_bg, daemon=True)

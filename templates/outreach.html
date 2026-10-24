@@ -1,0 +1,968 @@
+{% extends "base.html" %}
+{% block title %}Outreach | Insights{% endblock %}
+{% block header %}Outreach{% endblock %}
+{% block subtitle %}<p class="page-subtitle">
+    Leads for your program, and the texts and calls that warm them up. The agent reads replies
+    and drafts around the clock; nothing is sent until you press Send.
+</p>{% endblock %}
+{% block page_actions %}
+    <button class="btn btn-outline-secondary btn-sm" id="run-now-btn" onclick="runNow()">Run now</button>
+{% endblock %}
+{% block content %}
+{% set magnet_names = offer_names %}
+{% set stage_names = {'new': 'New', 'contacted': 'Contacted', 'replied': 'Replied', 'booked': 'Booked', 'enrolled': 'Enrolled', 'not_fit': 'Not a fit'} %}
+
+{% if profile.sms_paused_reason %}
+<div class="alert alert-warning d-flex justify-content-between align-items-start gap-3" id="paused-banner">
+    <div><strong>Texting is paused.</strong> {{ profile.sms_paused_reason }}</div>
+    <button class="btn btn-sm btn-outline-dark text-nowrap" onclick="resumeSms()">Resume texting</button>
+</div>
+{% endif %}
+
+<ul class="nav nav-tabs mb-3" id="outreach-tabs">
+    <li class="nav-item"><a class="nav-link {% if tab == 'queue' %}active{% endif %}" href="{{ url_for('outreach_page', tab='queue') }}">Queue{% if queue %} <span class="badge bg-primary">{{ queue|length }}</span>{% endif %}</a></li>
+    <li class="nav-item"><a class="nav-link {% if tab == 'leads' %}active{% endif %}" href="{{ url_for('outreach_page', tab='leads') }}">Leads</a></li>
+    <li class="nav-item"><a class="nav-link {% if tab == 'calls' %}active{% endif %}" href="{{ url_for('outreach_page', tab='calls') }}">Calls</a></li>
+    <li class="nav-item"><a class="nav-link {% if tab == 'setup' %}active{% endif %}" href="{{ url_for('outreach_page', tab='setup') }}">Setup</a></li>
+</ul>
+
+{# ───────────────────────────── Queue ───────────────────────────── #}
+{% if tab == 'queue' %}
+{% if context_missing %}
+<div class="alert alert-info d-flex justify-content-between align-items-start gap-3" id="context-banner">
+    <div><strong>Tell the agent about your business first.</strong> It drafts nothing until your business context is filled in (missing: {{ context_missing|join(', ') }}).</div>
+    <a class="btn btn-sm btn-primary text-nowrap" href="{{ url_for('outreach_page', tab='setup') }}#business-context">Open Setup</a>
+</div>
+{% endif %}
+{% if not queue %}
+<div class="text-center text-muted py-5" id="queue-empty">
+    <p class="mb-1">Nothing waiting on you.</p>
+    <p class="small mb-0">Drafts appear here as leads come in and reply.
+        {% if not worker_enabled %}The agent runs on its own once <code>OUTREACH_ENABLED=1</code> is set; until then use <em>Run now</em>.{% endif %}
+    </p>
+</div>
+{% endif %}
+<div id="queue-list">
+{% for item in queue %}
+    {% set lead = item.lead %}
+    <div class="card mb-3 outreach-item" id="msg-{{ item.id }}" data-id="{{ item.id }}" data-status="{{ item.status }}"
+         data-footer="{{ item.footer }}" data-channel="{{ item.channel }}" data-limit="{{ item.limit or '' }}">
+        <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+            <div>
+                {% if lead %}
+                    <a href="#" class="fw-semibold" onclick="openLead({{ lead.id }}); return false;">{{ lead.name or lead.phone_display or 'Unnamed lead' }}</a>
+                    {% if item.social %}
+                        <span class="badge bg-info-subtle text-info-emphasis ms-1">{{ item.platform_name }}</span>
+                        <span class="text-muted small ms-1">{{ item.source_label }}</span>
+                    {% else %}
+                        <span class="text-muted small ms-1">{{ lead.phone_display }}</span>
+                    {% endif %}
+                    <span class="badge bg-light text-dark ms-1">{{ stage_names.get(lead.stage, lead.stage) }}</span>
+                {% else %}
+                    <span class="fw-semibold">Text from {{ item.peer_display or item.peer }}</span>
+                    <span class="badge bg-warning text-dark ms-1">Unknown number</span>
+                {% endif %}
+            </div>
+            <div class="small">
+                {% if item.direction == 'out' %}<span class="badge bg-secondary">{{ item.kind_label }}</span>{% endif %}
+                {% if item.status == 'needs_review' %}<span class="badge bg-warning text-dark">Needs you</span>
+                {% elif item.status == 'unknown' %}<span class="badge bg-danger">Outcome unknown</span>
+                {% elif item.status == 'failed' %}<span class="badge bg-danger">Not sent</span>{% endif %}
+            </div>
+        </div>
+        <div class="card-body">
+            {% if item.thread %}
+            <div class="outreach-thread small mb-2">
+                {% for m in item.thread %}
+                <div class="{% if m.direction == 'in' %}text-body{% else %}text-muted{% endif %}">
+                    <strong>{% if m.direction == 'in' %}{% if item.social %}{{ m.peer or 'Them' }}{% else %}Them{% endif %}{% else %}You{% endif %}:</strong> {{ m.body }}
+                </div>
+                {% endfor %}
+            </div>
+            {% endif %}
+
+            {% if item.direction == 'in' %}
+                <p class="mb-2">{{ item.body }}</p>
+                <div class="d-flex flex-wrap gap-2 align-items-center">
+                    <input type="text" class="form-control form-control-sm w-auto" placeholder="Their name (optional)" id="link-name-{{ item.id }}">
+                    <button class="btn btn-sm btn-primary" onclick="linkMessage({{ item.id }}, null)">Create lead</button>
+                    <input type="search" class="form-control form-control-sm w-auto" placeholder="Or find a lead…" oninput="findLeadsFor({{ item.id }}, this.value)">
+                    <button class="btn btn-sm btn-outline-secondary" onclick="skipMessage({{ item.id }})">Dismiss</button>
+                </div>
+                <div class="list-group mt-2 small" id="link-results-{{ item.id }}"></div>
+            {% else %}
+                {% if item.social and item.inbound %}
+                <div class="border-start border-3 ps-2 mb-2 social-inbound">
+                    <div class="small text-muted">{{ item.inbound.peer }} wrote{% if item.permalink %} · <a href="{{ item.permalink }}" target="_blank" rel="noopener noreferrer">View on {{ item.platform_name }}</a>{% endif %}</div>
+                    <div>{{ item.inbound.body }}</div>
+                </div>
+                {% endif %}
+                {% if item.context and item.context.reason %}
+                <p class="small text-muted mb-2"><strong>Why:</strong> {{ item.context.reason }}</p>
+                {% endif %}
+                {% if item.error %}
+                <div class="alert {% if item.status in ('unknown', 'failed') %}alert-danger{% else %}alert-warning{% endif %} py-2 small mb-2">{{ item.error }}</div>
+                {% endif %}
+                <textarea class="form-control draft-body" rows="4" id="body-{{ item.id }}"
+                          {% if item.status in ('unknown', 'failed') %}readonly{% endif %}
+                          oninput="countDraft({{ item.id }})">{{ item.body }}</textarea>
+                <div class="d-flex flex-wrap justify-content-between small text-muted mt-1 gap-2">
+                    <span id="count-{{ item.id }}"></span>
+                    {% if item.first %}<span>First text: Send adds your signature and "Reply STOP to opt out".</span>{% endif %}
+                </div>
+                {% if not item.social and lead and not lead.in_window and item.status in ('draft', 'needs_review') %}
+                <div class="small text-warning-emphasis mt-1">{{ lead.window_note }}</div>
+                {% endif %}
+                <div class="small mt-2" id="status-{{ item.id }}" role="status"></div>
+            {% endif %}
+        </div>
+        {% if item.direction == 'out' %}
+        <div class="card-footer d-flex flex-wrap gap-2 align-items-center">
+            {% if item.status in ('draft', 'needs_review') %}
+                <button class="btn btn-primary btn-sm" id="send-{{ item.id }}" onclick="sendDraft({{ item.id }})">{% if item.social %}Reply on {{ item.platform_name }}{% else %}Send{% endif %}</button>
+                <input type="text" class="form-control form-control-sm w-auto flex-grow-1" id="instruction-{{ item.id }}" placeholder="Optional: how to rewrite it (shorter, mention the quiz…)">
+                <button class="btn btn-outline-secondary btn-sm" onclick="regenerate({{ item.id }})">Regenerate</button>
+                <button class="btn btn-outline-secondary btn-sm" onclick="skipMessage({{ item.id }})">Skip</button>
+            {% elif item.status == 'unknown' and item.social %}
+                {% if item.permalink %}<a class="btn btn-outline-primary btn-sm" href="{{ item.permalink }}" target="_blank" rel="noopener noreferrer">Look at the post</a>{% endif %}
+                <span class="small text-muted">Insights checks the post on its next pass and will not reply again on its own.</span>
+            {% elif item.status == 'unknown' %}
+                <button class="btn btn-outline-primary btn-sm" onclick="checkMessage({{ item.id }})">Check status</button>
+                <span class="small text-muted">Insights will not send this again on its own.</span>
+            {% elif item.status == 'failed' and item.context.open_url %}
+                <a class="btn btn-primary btn-sm" href="{{ item.context.open_url }}" target="_blank" rel="noopener noreferrer">Open on {{ item.platform_name or 'X' }}</a>
+                <button class="btn btn-outline-secondary btn-sm" onclick="markSent({{ item.id }})">I posted it</button>
+                <button class="btn btn-outline-secondary btn-sm" onclick="skipMessage({{ item.id }})">Dismiss</button>
+            {% elif item.status == 'failed' %}
+                <button class="btn btn-outline-primary btn-sm" onclick="retryMessage({{ item.id }})">Edit &amp; retry</button>
+                <button class="btn btn-outline-secondary btn-sm" onclick="skipMessage({{ item.id }})">Dismiss</button>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+{% endfor %}
+</div>
+
+{# ───────────────────────────── Leads ───────────────────────────── #}
+{% elif tab == 'leads' %}
+<div class="d-flex flex-wrap gap-2 align-items-center mb-3">
+    <form class="d-flex flex-wrap gap-2" method="get" action="{{ url_for('outreach_page') }}">
+        <input type="hidden" name="tab" value="leads">
+        <select name="stage" class="form-select form-select-sm w-auto" onchange="this.form.submit()">
+            <option value="">All stages</option>
+            {% for s in stages %}<option value="{{ s }}" {% if stage == s %}selected{% endif %}>{{ stage_names[s] }} ({{ stage_counts[s] }})</option>{% endfor %}
+        </select>
+        <input type="search" name="q" value="{{ search }}" class="form-control form-control-sm w-auto" placeholder="Name, email or phone">
+        <button class="btn btn-sm btn-outline-secondary">Filter</button>
+    </form>
+    <span class="text-muted small">{{ stage_counts.opted_out }} opted out</span>
+    <button class="btn btn-primary btn-sm ms-auto" onclick="openImport()">Import leads</button>
+</div>
+{% if leads %}
+<div class="table-responsive">
+<table class="table table-sm align-middle" id="leads-table">
+    <thead><tr><th>Name</th><th>Phone</th><th>Took</th><th>Stage</th><th class="text-end">Score</th><th>Consent</th><th>Last contact</th></tr></thead>
+    <tbody>
+    {% for l in leads %}
+        <tr data-lead-id="{{ l.id }}">
+            <td><a href="#" onclick="openLead({{ l.id }}); return false;">{{ l.name or l.email or l.phone_display or ('Lead ' ~ l.id) }}</a>
+                {% if l.email %}<div class="text-muted small">{{ l.email }}</div>{% endif %}
+                {% if l.source and l.source not in ('kartra', 'sms') %}<div class="text-muted small">From {{ {'threads': 'Threads', 'threads_search': 'Threads search', 'instagram': 'Instagram', 'facebook': 'Facebook', 'twitter': 'X'}.get(l.source, l.source) }}</div>{% endif %}</td>
+            <td class="text-nowrap">{{ l.phone_display }}</td>
+            <td>{% for m in l.magnets %}<span class="badge bg-light text-dark me-1">{{ magnet_names.get(m, m) }}</span>{% endfor %}
+                {% if l.quiz_result %}<div class="text-muted small">{{ l.quiz_result }}</div>{% endif %}</td>
+            <td>{{ stage_names.get(l.stage, l.stage) }}</td>
+            <td class="text-end">{{ l.score }}</td>
+            <td class="small text-nowrap">
+                {% if l.opted_out_at %}<span class="badge bg-danger">Opted out</span>
+                {% elif l.do_not_contact %}<span class="badge bg-dark">Do not contact</span>
+                {% else %}
+                    <span class="badge {% if l.sms_consent %}bg-success{% else %}bg-light text-muted{% endif %}">Texts</span>
+                    <span class="badge {% if l.call_consent %}bg-success{% else %}bg-light text-muted{% endif %}">Calls</span>
+                {% endif %}
+            </td>
+            <td class="small text-muted">{{ (l.last_contact_at or '')[:10] }}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<div class="text-center text-muted py-5">
+    <p class="mb-1">No leads{% if stage or search %} match{% else %} yet{% endif %}.</p>
+    <p class="small">Export your opt-ins from Kartra as a CSV and import them here.</p>
+</div>
+{% endif %}
+
+{# ───────────────────────────── Calls ───────────────────────────── #}
+{% elif tab == 'calls' %}
+<p class="text-muted small">Leads who agreed to calls, best first. You dial; Insights prepares you and drafts the follow-up text once you log how it went.</p>
+{% if not calls %}
+<div class="text-center text-muted py-5">No one to call yet. Leads appear here once they are imported with call consent.</div>
+{% endif %}
+{% for l in calls %}
+<div class="card mb-3" id="call-{{ l.id }}">
+    <div class="card-body">
+        <div class="d-flex flex-wrap justify-content-between gap-2">
+            <div>
+                <a href="#" class="fw-semibold" onclick="openLead({{ l.id }}); return false;">{{ l.name or l.phone_display }}</a>
+                <span class="badge bg-light text-dark ms-1">{{ stage_names.get(l.stage, l.stage) }}</span>
+                <div class="small text-muted">
+                    {% for m in l.magnets %}{{ magnet_names.get(m, m) }}{% if not loop.last %}, {% endif %}{% endfor %}
+                    {% if l.quiz_result %} · Quiz: {{ l.quiz_result }}{% endif %}
+                    {% if l.last_call %} · Last call: {{ call_outcomes.get(l.last_call.context.outcome, '') }} {{ (l.last_call.sent_at or '')[:10] }}{% endif %}
+                </div>
+            </div>
+            <div class="text-end">
+                <a class="btn btn-success btn-sm" href="tel:{{ l.phone }}">Call {{ l.phone_display }}</a>
+                {% if not l.in_window %}<div class="small text-warning-emphasis mt-1">{{ l.window_note }}</div>{% endif %}
+                {% if l.contacts_24h >= 3 %}<div class="small text-danger mt-1">Already {{ l.contacts_24h }} texts or calls in 24 hours.</div>{% endif %}
+            </div>
+        </div>
+        <div class="mt-2" id="brief-{{ l.id }}" data-brief="{{ l.brief|tojson|forceescape if l.brief else '' }}"></div>
+        <button class="btn btn-outline-secondary btn-sm mt-2" onclick="makeBrief({{ l.id }})" id="brief-btn-{{ l.id }}">{% if l.brief %}Refresh brief{% else %}Prepare brief{% endif %}</button>
+        <div class="row g-2 mt-2 align-items-end">
+            <div class="col-sm-4">
+                <label class="form-label small mb-0">How did it go?</label>
+                <select class="form-select form-select-sm" id="outcome-{{ l.id }}">
+                    <option value="">Choose…</option>
+                    {% for key, label in call_outcomes.items() %}<option value="{{ key }}">{{ label }}</option>{% endfor %}
+                </select>
+            </div>
+            <div class="col-sm-6"><input type="text" class="form-control form-control-sm" id="call-notes-{{ l.id }}" placeholder="Notes (what they said, what you promised)"></div>
+            <div class="col-sm-2 d-grid"><button class="btn btn-primary btn-sm" onclick="logCall({{ l.id }})">Log call</button></div>
+        </div>
+        <div class="small mt-2" id="call-status-{{ l.id }}" role="status"></div>
+    </div>
+</div>
+{% endfor %}
+
+{# ───────────────────────────── Setup ───────────────────────────── #}
+{% else %}
+<div class="row g-3 mb-4">
+    <div class="col-md-4">
+        <div class="card h-100"><div class="card-body">
+            <h2 class="h6">Twilio</h2>
+            {% if twilio.can_send and twilio.can_read %}
+                <p class="small mb-1"><span class="badge bg-success">Connected</span> {{ twilio.from_number }}{% if twilio.service %} via a Messaging Service{% endif %}</p>
+                <p class="small text-muted mb-0">Replies are read from Twilio every pass; your number's own settings are left alone.</p>
+            {% else %}
+                <p class="small mb-1"><span class="badge bg-secondary">Needs setup</span></p>
+                <p class="small text-muted mb-0">Add to <code>.env</code> and restart: {{ twilio.missing|join(', ') }}.</p>
+            {% endif %}
+        </div></div>
+    </div>
+    <div class="col-md-4">
+        <div class="card h-100"><div class="card-body">
+            <h2 class="h6">Agent</h2>
+            <p class="small mb-1">{% if worker_enabled %}<span class="badge bg-success">On</span> every {{ (tick / 60)|round(1) }} min{% else %}<span class="badge bg-secondary">Off</span> set <code>OUTREACH_ENABLED=1</code> and restart{% endif %}</p>
+            <p class="small text-muted mb-0" id="last-run">
+                {% if profile.last_run_at %}Last pass {{ profile.last_run_at }} UTC:
+                    {{ profile.last_run_summary.inbound or 0 }} new texts, {{ profile.last_run_summary.drafts or 0 }} drafts{% if profile.last_run_summary.capped %}, {{ profile.last_run_summary.capped }}{% endif %}.
+                {% else %}No pass yet.{% endif %}
+                {% if profile.last_poll_error %}<br><span class="text-danger">{{ profile.last_poll_error }}</span>{% endif %}
+            </p>
+        </div></div>
+    </div>
+    <div class="col-md-4">
+        <div class="card h-100"><div class="card-body">
+            <h2 class="h6">Today</h2>
+            <p class="small mb-1">{{ caps.drafts }} of {{ caps.draft_cap }} agent drafts · ${{ '%.2f'|format(caps.cost) }} of ${{ '%.2f'|format(caps.cost_cap) }} AI spend</p>
+            {% if caps.reason %}<p class="small text-warning-emphasis mb-0">{{ caps.reason }}; drafting resumes tomorrow.</p>{% endif %}
+            {% if profile.sms_paused_reason %}<p class="small text-danger mb-0">Texting paused.</p>{% endif %}
+        </div></div>
+    </div>
+</div>
+
+<form id="profile-form" onsubmit="saveProfile(event)">
+    <h2 class="h5" id="business-context">Your business context</h2>
+    <p class="small text-muted">Everything the agent knows about you comes from here: every text, reply, call brief and conversation-starter post is written from it. Nothing is drafted until the first four are filled in.</p>
+    {% if context_missing %}<div class="alert alert-warning py-2 small" id="context-missing">Still missing: {{ context_missing|join(', ') }}.</div>{% endif %}
+    <div class="row g-3">
+        <div class="col-md-6">
+            <label class="form-label" for="pf-business">Business name</label>
+            <input class="form-control" id="pf-business" name="business_name" value="{{ profile.business_name }}" maxlength="120" placeholder="Acme Coaching">
+        </div>
+        <div class="col-md-6">
+            <label class="form-label" for="pf-field">What field you work in</label>
+            <input class="form-control" id="pf-field" name="business_field" value="{{ profile.business_field }}" maxlength="200" placeholder="career coaching for people moving into tech">
+        </div>
+        <div class="col-md-6">
+            <label class="form-label" for="pf-program">What you offer</label>
+            <textarea class="form-control" id="pf-program" name="program_summary" rows="4" placeholder="Your program or product, its format, and what makes it different">{{ profile.program_summary }}</textarea>
+        </div>
+        <div class="col-md-6">
+            <label class="form-label" for="pf-ideal">Who it is for</label>
+            <textarea class="form-control" id="pf-ideal" name="ideal_lead" rows="4" placeholder="Who you want to reach, where they are now, and what they want">{{ profile.ideal_lead }}</textarea>
+        </div>
+        <div class="col-md-8">
+            <label class="form-label" for="pf-voice">How you sound</label>
+            <textarea class="form-control" id="pf-voice" name="voice_notes" rows="2" placeholder="Warm, direct, short sentences. Words you use and words you never use.">{{ profile.voice_notes }}</textarea>
+        </div>
+        <div class="col-md-4">
+            <label class="form-label" for="pf-signature">Name on a first text</label>
+            <input class="form-control" id="pf-signature" name="sms_signature" value="{{ profile.sms_signature }}" maxlength="80">
+            <div class="form-text">Shown as "- {{ profile.sms_signature or 'Your name' }}" above "Reply STOP to opt out". Required before the first text to anyone.</div>
+        </div>
+    </div>
+
+    <h2 class="h5 mt-4">Offers</h2>
+    <p class="small text-muted">Your lead magnets and next steps: the only links a text or reply may carry. Drafts suggest one when its "when to use" fits; an offer without a link is never suggested. "Match words" are how an import recognises who took it (a Kartra tag, list or form name).</p>
+    <div class="table-responsive">
+    <table class="table table-sm align-middle" id="offers-table" style="min-width: 760px;">
+        <thead><tr><th style="width:11%">Key</th><th style="width:17%">Name</th><th style="width:22%">Link</th><th>When to use</th><th style="width:16%">Match words</th><th></th></tr></thead>
+        <tbody>
+        {% for o in profile.offers %}
+            <tr class="offer-row">
+                <td><input class="form-control form-control-sm" data-f="key" value="{{ o.key }}"></td>
+                <td><input class="form-control form-control-sm" data-f="name" value="{{ o.name }}"></td>
+                <td><input class="form-control form-control-sm" data-f="url" value="{{ o.url }}" placeholder="https://"></td>
+                <td><input class="form-control form-control-sm" data-f="when_to_use" value="{{ o.when_to_use }}"></td>
+                <td><input class="form-control form-control-sm" data-f="match" value="{{ o.match or '' }}"></td>
+                <td><button type="button" class="btn btn-sm btn-outline-danger" onclick="this.closest('tr').remove()">×</button></td>
+            </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    <button type="button" class="btn btn-sm btn-outline-secondary" onclick="addOffer()">Add offer</button>
+
+    <h2 class="h5 mt-4">Limits</h2>
+    <div class="row g-3">
+        <div class="col-6 col-md-2"><label class="form-label" for="pf-start">Texts from</label><input class="form-control" id="pf-start" name="send_window_start" value="{{ profile.send_window_start }}" pattern="[0-2][0-9]:[0-5][0-9]"></div>
+        <div class="col-6 col-md-2"><label class="form-label" for="pf-end">until</label><input class="form-control" id="pf-end" name="send_window_end" value="{{ profile.send_window_end }}" pattern="[0-2][0-9]:[0-5][0-9]"></div>
+        <div class="col-md-3"><label class="form-label" for="pf-tz">Your time zone</label><input class="form-control" id="pf-tz" name="timezone" value="{{ profile.timezone }}"></div>
+        <div class="col-6 col-md-2"><label class="form-label" for="pf-drafts">Agent drafts / day</label><input type="number" min="0" class="form-control" id="pf-drafts" name="daily_draft_cap" value="{{ profile.daily_draft_cap }}"></div>
+        <div class="col-6 col-md-3"><label class="form-label" for="pf-cost">AI spend / day ($)</label><input type="number" min="0" step="0.05" class="form-control" id="pf-cost" name="daily_cost_cap" value="{{ profile.daily_cost_cap }}"></div>
+        <div class="col-6 col-md-2"><label class="form-label" for="pf-sends">Texts / day</label><input type="number" min="0" class="form-control" id="pf-sends" name="daily_send_cap" value="{{ profile.daily_send_cap }}"></div>
+        <div class="col-6 col-md-2"><label class="form-label" for="pf-fu-days">Nudge after (days)</label><input type="number" min="0" class="form-control" id="pf-fu-days" name="follow_up_days" value="{{ profile.follow_up_days }}"></div>
+        <div class="col-6 col-md-2"><label class="form-label" for="pf-fu-max">Most nudges</label><input type="number" min="0" max="5" class="form-control" id="pf-fu-max" name="max_follow_ups" value="{{ profile.max_follow_ups }}"></div>
+    </div>
+    <p class="small text-muted mt-2 mb-0">Texts only go out inside these hours in the lead's own time zone (from their number), and never more than 3 texts or calls to one person in 24 hours, whatever you set here. "Texts / day" is also the daily limit for replies on each social platform.</p>
+
+    <h2 class="h5 mt-4">Threads search</h2>
+    <p class="small text-muted">Every hour the agent searches Threads for recent posts with these words and drafts a helpful reply to the people who sound like your ideal lead. Meta only returns other people's posts once it approves your app for <code>threads_keyword_search</code>; until then the search sees only your own posts.</p>
+    <div class="row g-3">
+        <div class="col-md-8"><label class="form-label" for="pf-keywords">Search for (one per line)</label>
+            <textarea class="form-control" id="pf-keywords" name="search_keywords" rows="4">{{ profile.search_keywords|join('\n') }}</textarea></div>
+        <div class="col-md-4"><label class="form-label" for="pf-searches">Searches / day</label>
+            <input type="number" min="0" class="form-control" id="pf-searches" name="search_daily_queries" value="{{ profile.search_daily_queries }}">
+            <div class="form-text">Used today: {{ search_state.used or 0 }}. Each line is one search.</div></div>
+    </div>
+
+    <h2 class="h5 mt-4">Live opt-ins from Kartra</h2>
+    <p class="small text-muted">Consent that every opt-in arriving through the Kartra webhook gets. Leave it unticked and webhook leads arrive with no consent (you can still call or text them only once they agree).</p>
+    {% set wc = profile.webhook_consent or {} %}
+    <div class="row g-2" id="webhook-consent">
+        <div class="col-md-6"><label class="form-label small" for="wc-form">Form</label>
+            <input class="form-control form-control-sm" id="wc-form" value="{{ wc.form_name or '' }}" placeholder="Free guide opt-in"></div>
+        <div class="col-md-3"><label class="form-label small" for="wc-date">Wording applied from</label>
+            <input type="date" class="form-control form-control-sm" id="wc-date" value="{{ wc.date or '' }}"></div>
+        <div class="col-md-3 d-flex flex-column justify-content-end">
+            <div class="form-check"><input class="form-check-input" type="checkbox" id="wc-calls" {% if wc.calls %}checked{% endif %}><label class="form-check-label small" for="wc-calls">They agree to calls</label></div>
+            <div class="form-check"><input class="form-check-input" type="checkbox" id="wc-texts" {% if wc.texts %}checked{% endif %}><label class="form-check-label small" for="wc-texts">They agree to texts</label></div>
+        </div>
+        <div class="col-12"><label class="form-label small" for="wc-wording">The form's consent wording, exactly</label>
+            <textarea class="form-control form-control-sm" id="wc-wording" rows="2">{{ wc.wording or '' }}</textarea></div>
+        <div class="col-12"><div class="form-check"><input class="form-check-input" type="checkbox" id="wc-confirm" {% if wc.confirmed %}checked{% endif %}>
+            <label class="form-check-label small" for="wc-confirm">Every opt-in the webhook sends agreed to this wording.</label></div></div>
+    </div>
+    <div class="mt-3 d-flex gap-2 align-items-center">
+        <button class="btn btn-primary">Save</button>
+        <span class="small" id="profile-status" role="status"></span>
+    </div>
+</form>
+
+<h2 class="h5 mt-5">Conversations on your posts</h2>
+<p class="small text-muted">Every {{ social_minutes }} minutes the agent reads replies, comments and mentions on your recent posts (the last two weeks) and drafts answers into the Queue. Reading and replying need permissions your accounts were not connected with: use <em>Reconnect with engagement permissions</em> once per account (add the permissions in Meta's developer dashboard first). X mentions are {% if x_mentions %}on{% else %}off: X bills every read, so set <code>OUTREACH_X_MENTIONS=1</code> to turn them on{% endif %}; X only lets apps reply to people who mentioned you.</p>
+{% set state_badges = {'ok': ('bg-success', 'Working'), 'needs_permission': ('bg-warning text-dark', 'Needs permission'), 'needs_reconnect': ('bg-danger', 'Reconnect'), 'rate_limited': ('bg-secondary', 'Rate limited'), 'error': ('bg-danger', 'Error'), 'off': ('bg-light text-muted', 'Off'), 'unchecked': ('bg-light text-dark', 'Not checked yet')} %}
+{% if sources %}
+<div class="table-responsive">
+<table class="table table-sm align-middle" id="sources-table">
+    <thead><tr><th>Source</th><th>Account</th><th>State</th><th></th></tr></thead>
+    <tbody>
+    {% for src in sources %}
+        {% set badge = state_badges.get(src.state, ('bg-light text-dark', src.state)) %}
+        <tr data-source="{{ src.platform }}:{{ src.account_id }}">
+            <td>{{ src.name }}</td>
+            <td>{{ src.handle }}</td>
+            <td><span class="badge {{ badge[0] }}">{{ badge[1] }}</span>
+                {% if src.friendly %}<div class="small text-muted">{{ src.friendly }}</div>{% endif %}
+                {% if src.at %}<div class="small text-muted">Checked {{ src.at }} UTC</div>{% endif %}</td>
+            <td class="text-end">{% if src.reconnect_url %}<a class="btn btn-sm btn-outline-primary text-nowrap" href="{{ src.reconnect_url }}">Reconnect with engagement permissions</a>{% endif %}</td>
+        </tr>
+    {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<p class="small text-muted">No Threads, Instagram, Facebook or X account is connected. Connect one on the <a href="{{ url_for('accounts_page') }}">Accounts</a> page.</p>
+{% endif %}
+
+<h2 class="h5 mt-5">Live webhooks</h2>
+<div class="row g-3">
+    <div class="col-md-6"><div class="card h-100"><div class="card-body small">
+        <h3 class="h6">Kartra opt-ins</h3>
+        {% if webhooks.kartra_enabled and webhooks.kartra_url %}
+            <p class="mb-1"><span class="badge bg-success">Ready</span> In Kartra (My Integrations, API, outbound), send "lead subscribes to list" to:</p>
+            <code class="d-block text-break">{{ webhooks.kartra_url }}?secret=&lt;your KARTRA_WEBHOOK_SECRET&gt;</code>
+        {% else %}
+            <p class="mb-1"><span class="badge bg-secondary">Off</span> Set <code>KARTRA_WEBHOOK_SECRET</code>{% if not webhooks.public_url %} and <code>OUTREACH_PUBLIC_URL</code> (the app's public https address){% endif %} and restart. CSV import works without it.</p>
+        {% endif %}
+        {% if webhooks.kartra_last.last_at %}<p class="mb-0 text-muted">Last opt-in {{ webhooks.kartra_last.last_at }} UTC: {{ webhooks.kartra_last.result }}</p>{% endif %}
+    </div></div></div>
+    <div class="col-md-6"><div class="card h-100"><div class="card-body small">
+        <h3 class="h6">Twilio replies (optional)</h3>
+        {% if webhooks.twilio_url %}
+            <p class="mb-1">Replies already arrive by polling. To get them instantly, set your number's incoming-message webhook to:</p>
+            <code class="d-block text-break">{{ webhooks.twilio_url }}</code>
+            <p class="mb-0 text-muted">Only if no other tool (Kartra) needs that webhook.</p>
+        {% else %}
+            <p class="mb-0">Replies arrive by polling every pass. Set <code>OUTREACH_PUBLIC_URL</code> to see the webhook address.</p>
+        {% endif %}
+    </div></div></div>
+</div>
+
+<h2 class="h5 mt-5">Conversation starters</h2>
+<p class="small text-muted">A weekly Content Agent brief that drafts question posts for your audience into Compose for you to review and schedule. Replies to those posts land in the Queue.</p>
+<div class="d-flex gap-2 align-items-center mb-4">
+    {% if starter_brief %}
+        <a class="btn btn-sm btn-outline-primary" href="{{ url_for('briefs_page') }}">Open the brief ({{ starter_brief.name }})</a>
+    {% else %}
+        <button class="btn btn-sm btn-primary" onclick="makeStarter()" id="starter-btn">Create the conversation-starter brief</button>
+    {% endif %}
+    <span class="small" id="starter-status" role="status"></span>
+</div>
+{% endif %}
+
+{# ───────────────────────────── Lead drawer ───────────────────────────── #}
+{# Above the app's sticky nav (z-index 1050), or the nav hides the drawer's title and close button. #}
+<div class="offcanvas offcanvas-end" tabindex="-1" id="leadDrawer" aria-labelledby="leadDrawerTitle" style="width: min(560px, 100vw); z-index: 1060;">
+    <div class="offcanvas-header">
+        <h2 class="offcanvas-title h5" id="leadDrawerTitle">Lead</h2>
+        <button type="button" class="btn-close" data-bs-dismiss="offcanvas" aria-label="Close"></button>
+    </div>
+    <div class="offcanvas-body" id="leadDrawerBody"><p class="text-muted">Loading…</p></div>
+</div>
+
+{# ───────────────────────────── Import ───────────────────────────── #}
+<div class="modal fade" id="importModal" tabindex="-1" aria-labelledby="importTitle" aria-hidden="true">
+    <div class="modal-dialog modal-xl modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title h5" id="importTitle">Import leads</h2>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label" for="import-file">CSV or Excel export (from Kartra or anywhere)</label>
+                    <input type="file" class="form-control" id="import-file" accept=".csv,.xlsx,.txt" onchange="previewImport()">
+                </div>
+                <div id="import-step2" class="d-none">
+                    <h3 class="h6">Columns</h3>
+                    <div class="row g-2 mb-2" id="import-mapping"></div>
+                    <button type="button" class="btn btn-sm btn-outline-secondary mb-3" onclick="previewImport()">Check again</button>
+                    <div id="import-report" class="mb-3"></div>
+
+                    <h3 class="h6">Consent</h3>
+                    <p class="small text-muted">Who agreed to what decides who can be texted or called. This is recorded on every lead in the file.</p>
+                    <div class="row g-2">
+                        <div class="col-md-6"><label class="form-label small" for="imp-form">Form they signed up through</label>
+                            <input class="form-control form-control-sm" id="imp-form" placeholder="Free guide opt-in"></div>
+                        <div class="col-md-3"><label class="form-label small" for="imp-date">Wording applied from</label>
+                            <input type="date" class="form-control form-control-sm" id="imp-date"></div>
+                        <div class="col-md-3 d-flex flex-column justify-content-end">
+                            <div class="form-check"><input class="form-check-input" type="checkbox" id="imp-calls"><label class="form-check-label small" for="imp-calls">They agreed to calls</label></div>
+                            <div class="form-check"><input class="form-check-input" type="checkbox" id="imp-texts"><label class="form-check-label small" for="imp-texts">They agreed to texts</label></div>
+                        </div>
+                        <div class="col-12"><label class="form-label small" for="imp-wording">The consent wording the form showed, exactly</label>
+                            <textarea class="form-control form-control-sm" id="imp-wording" rows="2"></textarea>
+                            <div class="form-text">Only tick "texts" if this wording mentions texts or SMS (or "calls and texts"). Carriers and Florida's law look for that.</div></div>
+                        <div class="col-12"><div class="form-check"><input class="form-check-input" type="checkbox" id="imp-confirm">
+                            <label class="form-check-label small" for="imp-confirm">Everyone in this file signed up through this form and agreed to this wording.</label></div></div>
+                    </div>
+                </div>
+                <div class="small mt-2" id="import-status" role="status"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="import-btn" onclick="commitImport()" disabled>Import</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// ── shared ────────────────────────────────────────────────────────────────
+const OUTREACH_FIELDS = {{ import_fields|tojson }};
+const STAGE_NAMES = {{ stage_names|tojson }};
+const MAGNET_NAMES = {{ magnet_names|tojson }};
+
+async function outreachPost(url, payload, isForm) {
+    const opts = {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}};
+    if (isForm) {
+        opts.body = payload;
+    } else {
+        opts.headers['Content-Type'] = 'application/json';
+        opts.body = JSON.stringify(payload || {});
+    }
+    let resp, data = {};
+    try {
+        resp = await fetch(url, opts);
+        data = await resp.json().catch(() => ({}));
+    } catch (e) {
+        return {ok: false, data: {error: 'Could not reach Insights: ' + e}};
+    }
+    return {ok: resp.ok, status: resp.status, data};
+}
+
+function setStatus(el, text, kind) {
+    if (!el) return;
+    el.textContent = text || '';
+    el.className = 'small mt-2 ' + (kind === 'error' ? 'text-danger' : kind === 'ok' ? 'text-success' : 'text-muted');
+}
+
+function el(tag, attrs, text) {
+    const node = document.createElement(tag);
+    Object.entries(attrs || {}).forEach(([k, v]) => {
+        if (k === 'class') node.className = v; else if (k.startsWith('on')) node[k] = v; else node.setAttribute(k, v);
+    });
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+}
+
+// ── SMS segment counter (mirrors outreach_rules.sms_segments) ──────────────
+const GSM_BASIC = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !\"#¤%&'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà";
+const GSM_EXT = "^{}\\[~]|€";
+
+function plainText(text) {
+    return (text || '').replace(/\s*—\s*/g, ', ')
+        .replace(/[‘’‚‛]/g, "'").replace(/[“”„‟]/g, '"')
+        .replace(/[–−]/g, '-').replace(/…/g, '...').replace(/ /g, ' ')
+        .replace(/[​‌‍﻿]/g, '').trim();
+}
+
+function smsSegments(text) {
+    const chars = Array.from(text || '');
+    const gsm = chars.every(ch => GSM_BASIC.includes(ch) || GSM_EXT.includes(ch));
+    const units = gsm ? chars.reduce((n, ch) => n + (GSM_EXT.includes(ch) ? 2 : 1), 0)
+                      : chars.reduce((n, ch) => n + (ch.codePointAt(0) > 0xffff ? 2 : 1), 0);
+    const single = gsm ? 160 : 70, multi = gsm ? 153 : 67;
+    const segments = units === 0 ? 0 : units <= single ? 1 : Math.ceil(units / multi);
+    return {encoding: gsm ? 'GSM-7' : 'UCS-2', units, segments};
+}
+
+function countDraft(id) {
+    const card = document.getElementById('msg-' + id);
+    const area = document.getElementById('body-' + id);
+    const out = document.getElementById('count-' + id);
+    if (!card || !area || !out) return;
+    if (card.dataset.channel && card.dataset.channel !== 'sms') {
+        const limit = parseInt(card.dataset.limit || '0', 10);
+        const length = Array.from(plainText(area.value)).length;
+        out.textContent = limit ? `${length} of ${limit} characters` : `${length} characters`;
+        out.className = limit && length > limit ? 'text-danger' : '';
+        return;
+    }
+    const text = plainText(area.value) + (card.dataset.footer || '');
+    const s = smsSegments(text);
+    out.textContent = `${s.units} characters · ${s.segments} SMS segment${s.segments === 1 ? '' : 's'}`
+        + (s.encoding === 'UCS-2' ? ' · a special character makes this cost more' : '');
+    out.className = s.segments > 2 || s.encoding === 'UCS-2' ? 'text-warning-emphasis' : '';
+}
+
+// ── queue actions ─────────────────────────────────────────────────────────
+async function sendDraft(id) {
+    const btn = document.getElementById('send-' + id);
+    const status = document.getElementById('status-' + id);
+    const body = document.getElementById('body-' + id).value;
+    btn.disabled = true;
+    setStatus(status, 'Sending…');
+    const {ok, data} = await outreachPost(`/outreach/messages/${id}/send`, {body});
+    if (ok) {
+        setStatus(status, 'Sent.', 'ok');
+        const card = document.getElementById('msg-' + id);
+        card.querySelectorAll('button, input, textarea').forEach(n => n.disabled = true);
+        card.classList.add('opacity-50');
+        return;
+    }
+    btn.disabled = false;
+    setStatus(status, data.error || 'Not sent.', 'error');
+    if (data.status === 'unknown' || data.status === 'failed') setTimeout(() => location.reload(), 2500);
+}
+
+async function regenerate(id) {
+    const status = document.getElementById('status-' + id);
+    const instruction = (document.getElementById('instruction-' + id) || {}).value || '';
+    setStatus(status, 'Rewriting…');
+    const {ok, data} = await outreachPost(`/outreach/messages/${id}/regenerate`, {instruction});
+    if (ok && data.status === 'draft') {
+        document.getElementById('body-' + id).value = data.body || '';
+        countDraft(id);
+        setStatus(status, data.reason ? 'Why: ' + data.reason : 'Rewritten.', 'ok');
+    } else if (ok && data.status === 'opted_out') {
+        setStatus(status, data.error, 'error');
+    } else {
+        setStatus(status, data.error || 'Could not rewrite it.', 'error');
+    }
+}
+
+async function skipMessage(id) {
+    const {ok, data} = await outreachPost(`/outreach/messages/${id}/skip`);
+    if (ok) document.getElementById('msg-' + id).remove();
+    else alert(data.error || 'Could not skip it.');
+}
+
+async function checkMessage(id) {
+    const status = document.getElementById('status-' + id);
+    setStatus(status, 'Asking Twilio…');
+    const {ok, data} = await outreachPost(`/outreach/messages/${id}/check`);
+    setStatus(status, (data.friendly || data.error || ''), ok ? 'ok' : 'error');
+    if (ok && data.settled) setTimeout(() => location.reload(), 1500);
+}
+
+async function markSent(id) {
+    const {ok, data} = await outreachPost(`/outreach/messages/${id}/mark-sent`);
+    if (ok) document.getElementById('msg-' + id).remove();
+    else alert(data.error || 'Could not record it.');
+}
+
+async function retryMessage(id) {
+    const {ok, data} = await outreachPost(`/outreach/messages/${id}/retry`);
+    if (ok) location.reload(); else alert(data.error || 'Could not retry it.');
+}
+
+async function linkMessage(id, leadId) {
+    const name = (document.getElementById('link-name-' + id) || {}).value || '';
+    const payload = leadId ? {lead_id: leadId} : {name};
+    const {ok, data} = await outreachPost(`/outreach/messages/${id}/link`, payload);
+    if (ok) location.reload(); else alert(data.error || 'Could not link it.');
+}
+
+let findTimer = null;
+function findLeadsFor(id, q) {
+    clearTimeout(findTimer);
+    findTimer = setTimeout(async () => {
+        const box = document.getElementById('link-results-' + id);
+        box.replaceChildren();
+        if ((q || '').trim().length < 2) return;
+        const resp = await fetch('/outreach/leads/search?q=' + encodeURIComponent(q));
+        const data = await resp.json().catch(() => ({leads: []}));
+        (data.leads || []).forEach(l => {
+            const label = [l.name, l.email, l.phone].filter(Boolean).join(' · ') || ('Lead ' + l.id);
+            box.appendChild(el('button', {type: 'button', class: 'list-group-item list-group-item-action',
+                onclick: () => linkMessage(id, l.id)}, 'Link to ' + label));
+        });
+    }, 250);
+}
+
+async function runNow() {
+    const btn = document.getElementById('run-now-btn');
+    btn.disabled = true;
+    btn.textContent = 'Running…';
+    await outreachPost('/outreach/run');
+    const poll = setInterval(async () => {
+        const resp = await fetch('/outreach/status');
+        const data = await resp.json().catch(() => ({}));
+        if (!data.running) {
+            clearInterval(poll);
+            location.reload();
+        }
+    }, 2000);
+}
+
+async function resumeSms() {
+    const {ok} = await outreachPost('/outreach/sms/resume');
+    if (ok) location.reload();
+}
+
+// ── lead drawer ───────────────────────────────────────────────────────────
+let drawer = null;
+async function openLead(id) {
+    const body = document.getElementById('leadDrawerBody');
+    body.replaceChildren(el('p', {class: 'text-muted'}, 'Loading…'));
+    if (!drawer) drawer = new bootstrap.Offcanvas(document.getElementById('leadDrawer'));
+    drawer.show();
+    const resp = await fetch('/outreach/leads/' + id);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { body.replaceChildren(el('p', {class: 'text-danger'}, data.error || 'Could not load the lead.')); return; }
+    renderLead(data);
+}
+
+function renderLead(data) {
+    const lead = data.lead;
+    document.getElementById('leadDrawerTitle').textContent = lead.name || lead.phone_display || lead.email || ('Lead ' + lead.id);
+    const body = document.getElementById('leadDrawerBody');
+    body.replaceChildren();
+
+    const facts = el('dl', {class: 'row small mb-3'});
+    const fact = (k, v) => { if (!v) return; facts.append(el('dt', {class: 'col-4'}, k), el('dd', {class: 'col-8 mb-1'}, v)); };
+    fact('Phone', lead.phone_display);
+    fact('Email', lead.email);
+    fact('Took', (lead.magnets || []).map(m => MAGNET_NAMES[m] || m).join(', '));
+    fact('Quiz or form result', lead.quiz_result);
+    const handleNames = {threads: 'Threads', instagram: 'Instagram', facebook: 'Facebook', twitter: 'X'};
+    fact('Handles', (data.identities || []).filter(i => handleNames[i.kind])
+        .map(i => `${handleNames[i.kind]}: ${/^\d+$/.test(i.value) ? i.value : '@' + i.value}`).join(', '));
+    if (lead.phone) fact('Time zone', (lead.zones || []).join(', ') + ', ' + lead.zone_source);
+    fact('Score', String(lead.score));
+    fact('Texts', lead.sms_consent ? 'Agreed' : 'No consent on record');
+    fact('Calls', lead.call_consent ? 'Agreed' : 'No consent on record');
+    fact('Consent from', lead.consent_source);
+    fact('Next nudge', lead.next_follow_up_at ? lead.next_follow_up_at + ' UTC' : '');
+    body.appendChild(facts);
+
+    if (lead.opted_out_at) {
+        const box = el('div', {class: 'alert alert-danger py-2 small'}, `Opted out ${lead.opted_out_at.slice(0, 10)} (${lead.opt_out_source || ''}). `);
+        if (data.can_undo_opt_out) box.appendChild(el('button', {class: 'btn btn-sm btn-outline-dark ms-1', onclick: () => updateLead(lead.id, {clear_opt_out: true})}, 'Undo'));
+        body.appendChild(box);
+    }
+
+    const form = el('div', {class: 'row g-2 mb-3'});
+    const stageSel = el('select', {class: 'form-select form-select-sm', id: 'lead-stage'});
+    data.stages.forEach(s => { const o = el('option', {value: s}, STAGE_NAMES[s] || s); if (s === lead.stage) o.selected = true; stageSel.appendChild(o); });
+    const tz = el('input', {class: 'form-control form-control-sm', id: 'lead-tz', placeholder: 'e.g. America/Chicago'});
+    tz.value = lead.timezone || '';
+    const notes = el('textarea', {class: 'form-control form-control-sm', id: 'lead-notes', rows: '3', placeholder: 'Notes the agent will read'});
+    notes.value = lead.notes || '';
+    const dnc = el('input', {type: 'checkbox', class: 'form-check-input', id: 'lead-dnc'});
+    dnc.checked = !!lead.do_not_contact;
+    const colA = el('div', {class: 'col-6'}); colA.append(el('label', {class: 'form-label small mb-0', for: 'lead-stage'}, 'Stage'), stageSel);
+    const colB = el('div', {class: 'col-6'}); colB.append(el('label', {class: 'form-label small mb-0', for: 'lead-tz'}, 'Their time zone (optional)'), tz);
+    const colC = el('div', {class: 'col-12'}); colC.append(notes);
+    const colD = el('div', {class: 'col-12 form-check ms-2'}); colD.append(dnc, el('label', {class: 'form-check-label small', for: 'lead-dnc'}, 'Do not contact'));
+    const save = el('button', {class: 'btn btn-sm btn-primary', onclick: () => updateLead(lead.id, {
+        stage: stageSel.value, timezone: tz.value, notes: notes.value, do_not_contact: dnc.checked})}, 'Save');
+    const draft = el('button', {class: 'btn btn-sm btn-outline-primary', onclick: () => draftFor(lead.id)}, 'Draft a text');
+    const optOut = el('button', {class: 'btn btn-sm btn-outline-danger', onclick: () => { if (confirm('Opt this person out of texts?')) updateLead(lead.id, {opt_out: true}); }}, 'Opt out');
+    const actions = el('div', {class: 'col-12 d-flex gap-2'}); actions.append(save);
+    if (lead.phone) actions.append(draft);  // a text needs a number; social leads are answered in their thread
+    if (!lead.opted_out_at) actions.append(optOut);
+    form.append(colA, colB, colC, colD, actions, el('div', {class: 'col-12 small', id: 'lead-status', role: 'status'}));
+    body.appendChild(form);
+
+    body.appendChild(el('h3', {class: 'h6'}, 'History'));
+    const list = el('div', {class: 'small mb-3'});
+    if (!data.timeline.length) list.appendChild(el('p', {class: 'text-muted'}, 'Nothing yet.'));
+    data.timeline.forEach(m => {
+        const who = m.channel === 'call' ? `Call: ${m.outcome}` : (m.direction === 'in' ? 'Them' : `You (${m.kind}, ${m.status})`);
+        const row = el('div', {class: 'border-bottom py-1'});
+        row.append(el('div', {class: 'text-muted'}, `${(m.at || '').slice(0, 16)} · ${who}`), el('div', {}, m.body || ''));
+        if (m.error) row.appendChild(el('div', {class: 'text-danger'}, m.error));
+        list.appendChild(row);
+    });
+    body.appendChild(list);
+
+    body.appendChild(el('h3', {class: 'h6'}, 'Merge with another lead'));
+    const mergeQ = el('input', {type: 'search', class: 'form-control form-control-sm mb-1', placeholder: 'Find the duplicate by name, email or phone'});
+    const mergeResults = el('div', {class: 'list-group small'});
+    mergeQ.oninput = () => {
+        clearTimeout(findTimer);
+        findTimer = setTimeout(async () => {
+            mergeResults.replaceChildren();
+            if (mergeQ.value.trim().length < 2) return;
+            const resp = await fetch('/outreach/leads/search?q=' + encodeURIComponent(mergeQ.value));
+            const found = await resp.json().catch(() => ({leads: []}));
+            (found.leads || []).filter(l => l.id !== lead.id).forEach(l => {
+                const label = [l.name, l.email, l.phone].filter(Boolean).join(' · ');
+                mergeResults.appendChild(el('button', {type: 'button', class: 'list-group-item list-group-item-action', onclick: async () => {
+                    if (!confirm(`Merge "${label}" into this lead? Its history and contact details move here.`)) return;
+                    const {ok, data: r} = await outreachPost(`/outreach/leads/${lead.id}/merge`, {other_id: l.id});
+                    if (ok) openLead(lead.id); else alert(r.error || 'Could not merge.');
+                }}, 'Merge in ' + label));
+            });
+        }, 250);
+    };
+    body.append(mergeQ, mergeResults);
+}
+
+async function updateLead(id, changes) {
+    const {ok, data} = await outreachPost(`/outreach/leads/${id}/update`, changes);
+    if (ok) openLead(id);
+    else setStatus(document.getElementById('lead-status'), data.error || 'Could not save.', 'error');
+}
+
+async function draftFor(id) {
+    const status = document.getElementById('lead-status');
+    setStatus(status, 'Writing a draft…');
+    const {ok, data} = await outreachPost(`/outreach/leads/${id}/draft`);
+    setStatus(status, ok ? 'Draft added to the Queue.' : (data.error || 'Could not draft.'), ok ? 'ok' : 'error');
+}
+
+// ── calls ─────────────────────────────────────────────────────────────────
+function renderBrief(id, brief) {
+    const box = document.getElementById('brief-' + id);
+    if (!box) return;
+    box.replaceChildren();
+    if (!brief) return;
+    const card = el('div', {class: 'border rounded p-2 small bg-body-tertiary'});
+    card.appendChild(el('p', {class: 'mb-1'}, brief.summary));
+    if (brief.opener) card.appendChild(el('p', {class: 'mb-1'}, 'Open with: ' + brief.opener));
+    if ((brief.questions || []).length) {
+        const ul = el('ul', {class: 'mb-1'});
+        brief.questions.forEach(q => ul.appendChild(el('li', {}, q)));
+        card.append(el('div', {class: 'fw-semibold'}, 'Ask'), ul);
+    }
+    if ((brief.objections || []).length) {
+        const ul = el('ul', {class: 'mb-1'});
+        brief.objections.forEach(o => ul.appendChild(el('li', {}, `${o.objection} → ${o.answer}`)));
+        card.append(el('div', {class: 'fw-semibold'}, 'If they say'), ul);
+    }
+    if (brief.next_step) card.appendChild(el('p', {class: 'mb-0'}, 'Aim for: ' + brief.next_step));
+    box.appendChild(card);
+}
+
+async function makeBrief(id) {
+    const btn = document.getElementById('brief-btn-' + id);
+    btn.disabled = true;
+    setStatus(document.getElementById('call-status-' + id), 'Preparing the brief…');
+    const {ok, data} = await outreachPost(`/outreach/leads/${id}/call/brief`);
+    btn.disabled = false;
+    if (ok) { renderBrief(id, data.brief); setStatus(document.getElementById('call-status-' + id), ''); btn.textContent = 'Refresh brief'; }
+    else setStatus(document.getElementById('call-status-' + id), data.error || 'Could not prepare it.', 'error');
+}
+
+async function logCall(id) {
+    const outcome = document.getElementById('outcome-' + id).value;
+    const notes = document.getElementById('call-notes-' + id).value;
+    const status = document.getElementById('call-status-' + id);
+    if (!outcome) { setStatus(status, 'Pick how the call went.', 'error'); return; }
+    setStatus(status, 'Logging…');
+    const {ok, data} = await outreachPost(`/outreach/leads/${id}/call/log`, {outcome, notes});
+    if (!ok) { setStatus(status, data.error || 'Could not log it.', 'error'); return; }
+    const drafted = data.draft && data.draft.status === 'draft';
+    setStatus(status, 'Logged. ' + (drafted ? 'A follow-up text is waiting in the Queue.' : (data.note || (data.draft && data.draft.error) || '')), 'ok');
+}
+
+// ── import ────────────────────────────────────────────────────────────────
+let importModal = null;
+function openImport() {
+    if (!importModal) importModal = new bootstrap.Modal(document.getElementById('importModal'));
+    document.getElementById('import-step2').classList.add('d-none');
+    document.getElementById('import-btn').disabled = true;
+    setStatus(document.getElementById('import-status'), '');
+    importModal.show();
+}
+
+function currentMapping() {
+    const mapping = {};
+    document.querySelectorAll('#import-mapping select').forEach(s => { if (s.value) mapping[s.dataset.field] = s.value; });
+    return mapping;
+}
+
+async function previewImport() {
+    const file = document.getElementById('import-file').files[0];
+    const status = document.getElementById('import-status');
+    if (!file) return;
+    const form = new FormData();
+    form.append('file', file);
+    if (!document.getElementById('import-step2').classList.contains('d-none')) form.append('mapping', JSON.stringify(currentMapping()));
+    setStatus(status, 'Reading the file…');
+    const {ok, data} = await outreachPost('/outreach/leads/import/preview', form, true);
+    if (!ok) { setStatus(status, data.error || 'Could not read it.', 'error'); return; }
+    setStatus(status, '');
+    const box = document.getElementById('import-mapping');
+    box.replaceChildren();
+    Object.entries(data.fields).forEach(([field, label]) => {
+        const col = el('div', {class: 'col-6 col-md-3'});
+        const sel = el('select', {class: 'form-select form-select-sm', 'data-field': field, id: 'map-' + field});
+        sel.appendChild(el('option', {value: ''}, '(not in this file)'));
+        data.headers.forEach(h => { const o = el('option', {value: h}, h); if (data.mapping[field] === h) o.selected = true; sel.appendChild(o); });
+        col.append(el('label', {class: 'form-label small mb-0', for: 'map-' + field}, label), sel);
+        box.appendChild(col);
+    });
+    const r = data.report;
+    const rep = document.getElementById('import-report');
+    rep.replaceChildren();
+    rep.appendChild(el('p', {class: 'small mb-1'}, `${r.total} rows: ${r.new} new leads, ${r.update} already here (they will be updated, never un-opted-out), ${r.rejected.length} rejected, ${r.duplicates.length} duplicates in the file${r.conflicts.length ? ', ' + r.conflicts.length + ' conflicts' : ''}${r.no_phone ? ', ' + r.no_phone + ' without a phone number' : ''}.`));
+    [...r.rejected.slice(0, 8), ...r.conflicts.slice(0, 4)].forEach(x => rep.appendChild(el('div', {class: 'small text-danger'}, `Row ${x.row}: ${x.reason}`)));
+    if (r.sample.length) {
+        const table = el('table', {class: 'table table-sm small mt-2'});
+        const head = el('tr');
+        ['Row', 'Name', 'Phone', 'Email', 'Took', 'Quiz'].forEach(h => head.appendChild(el('th', {}, h)));
+        table.appendChild(el('thead')).appendChild(head);
+        const tb = el('tbody');
+        r.sample.forEach(s => {
+            const tr = el('tr');
+            [s.row, s.name, s.phone, s.email, (s.magnets || []).map(m => MAGNET_NAMES[m] || m).join(', '), s.quiz_result]
+                .forEach(v => tr.appendChild(el('td', {}, v == null ? '' : String(v))));
+            tb.appendChild(tr);
+        });
+        table.appendChild(tb);
+        rep.appendChild(table);
+    }
+    document.getElementById('import-step2').classList.remove('d-none');
+    document.getElementById('import-btn').disabled = false;
+}
+
+async function commitImport() {
+    const file = document.getElementById('import-file').files[0];
+    const status = document.getElementById('import-status');
+    const form = new FormData();
+    form.append('file', file);
+    form.append('mapping', JSON.stringify(currentMapping()));
+    form.append('form_name', document.getElementById('imp-form').value);
+    form.append('consent_date', document.getElementById('imp-date').value);
+    form.append('consent_wording', document.getElementById('imp-wording').value);
+    form.append('consent_calls', document.getElementById('imp-calls').checked ? '1' : '0');
+    form.append('consent_texts', document.getElementById('imp-texts').checked ? '1' : '0');
+    form.append('confirm', document.getElementById('imp-confirm').checked ? '1' : '0');
+    document.getElementById('import-btn').disabled = true;
+    setStatus(status, 'Importing…');
+    const {ok, data} = await outreachPost('/outreach/leads/import', form, true);
+    document.getElementById('import-btn').disabled = false;
+    if (!ok) { setStatus(status, data.error || 'Could not import.', 'error'); return; }
+    setStatus(status, `Imported: ${data.added} new, ${data.updated} updated, ${data.rejected} skipped.`, 'ok');
+    setTimeout(() => location.reload(), 1500);
+}
+
+// ── setup ─────────────────────────────────────────────────────────────────
+async function makeStarter() {
+    const status = document.getElementById('starter-status');
+    const {ok, data} = await outreachPost('/outreach/starter');
+    status.textContent = ok ? 'Created. Find it under Create, Content Agent.' : (data.error || 'Could not create it.');
+    status.className = 'small ' + (ok ? 'text-success' : 'text-danger');
+    if (ok) setTimeout(() => location.reload(), 1200);
+}
+
+function addOffer() {
+    const tr = el('tr', {class: 'offer-row'});
+    ['key', 'name', 'url', 'when_to_use', 'match'].forEach(f => {
+        const td = el('td');
+        td.appendChild(el('input', {class: 'form-control form-control-sm', 'data-f': f, placeholder: f === 'url' ? 'https://' : ''}));
+        tr.appendChild(td);
+    });
+    const td = el('td');
+    td.appendChild(el('button', {type: 'button', class: 'btn btn-sm btn-outline-danger', onclick: () => tr.remove()}, '×'));
+    tr.appendChild(td);
+    document.querySelector('#offers-table tbody').appendChild(tr);
+}
+
+async function saveProfile(event) {
+    event.preventDefault();
+    const form = event.target;
+    const payload = {};
+    form.querySelectorAll('[name]').forEach(n => { payload[n.name] = n.value; });
+    payload.offers = Array.from(form.querySelectorAll('.offer-row')).map(row => {
+        const offer = {};
+        row.querySelectorAll('[data-f]').forEach(i => { offer[i.dataset.f] = i.value; });
+        return offer;
+    });
+    payload.webhook_consent = {
+        form_name: document.getElementById('wc-form').value, date: document.getElementById('wc-date').value,
+        wording: document.getElementById('wc-wording').value, calls: document.getElementById('wc-calls').checked,
+        texts: document.getElementById('wc-texts').checked, confirmed: document.getElementById('wc-confirm').checked,
+    };
+    const status = document.getElementById('profile-status');
+    const {ok, data} = await outreachPost('/outreach/profile', payload);
+    status.textContent = ok ? 'Saved.' : (data.error || 'Could not save.');
+    status.className = 'small ' + (ok ? 'text-success' : 'text-danger');
+}
+
+document.querySelectorAll('.outreach-item').forEach(card => countDraft(card.dataset.id));
+document.querySelectorAll('[id^="brief-"][data-brief]').forEach(box => {
+    if (!box.dataset.brief) return;
+    try { renderBrief(box.id.slice(6), JSON.parse(box.dataset.brief)); } catch (e) { /* a stale brief is just not shown */ }
+});
+</script>
+{% endblock %}

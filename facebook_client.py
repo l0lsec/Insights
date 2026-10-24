@@ -49,14 +49,15 @@ class FacebookClient:
     # OAuth helpers
     # ------------------------------------------------------------------
 
-    def get_authorization_url(self, state: str | None = None) -> tuple[str, str]:
+    def get_authorization_url(self, state: str | None = None,
+                              scopes: str | None = None) -> tuple[str, str]:
         if state is None:
             state = secrets.token_urlsafe(32)
 
         params = {
             "client_id": self.app_id,
             "redirect_uri": self.redirect_uri,
-            "scope": FACEBOOK_SCOPES,
+            "scope": scopes or FACEBOOK_SCOPES,
             "response_type": "code",
             "state": state,
         }

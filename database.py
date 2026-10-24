@@ -827,6 +827,7 @@ def init_db(db_path: str = DB_PATH) -> None:
             )
 
         _migrate_tokens_to_accounts(conn)
+        _init_outreach_tables(conn)
         conn.commit()
 
 
@@ -6606,3 +6607,981 @@ def count_social_accounts(platform: str | None = None, db_path: str = DB_PATH) -
                 "SELECT COUNT(*) FROM social_accounts WHERE status != 'removed'"
             )
         return cur.fetchone()[0]
+
+
+# ── Outreach ────────────────────────────────────────────────────────────────
+#
+# Leads for the owner's program and the conversations held with them. The
+# outreach worker reads inbound messages and writes drafts; only the Send route
+# (outreach_sender) ever moves a draft out of the building. Times in these tables
+# are UTC, written as "YYYY-MM-DD HH:MM:SS" like usage_events.ts, so they compare
+# as strings.
+
+# Statuses that make a message the lead's one "open" item on a channel. The
+# partial unique index below allows at most one of these per lead and channel,
+# which is what stops a second draft (or a second send) from appearing beside
+# the first.
+OUTREACH_OPEN_STATUSES = ("draft", "sending", "needs_review")
+
+# Outbound statuses that mean "this may have reached the person". They count
+# toward the per-lead frequency cap and mark the lead as already contacted.
+OUTREACH_REACHED_STATUSES = ("sending", "sent", "delivered", "unknown", "external", "logged")
+
+LEAD_STAGES = ("new", "contacted", "replied", "booked", "enrolled", "not_fit")
+
+# Every business detail starts empty: the owner fills in "Your business
+# context" in Setup, and the agent drafts nothing until they have.
+OUTREACH_PROFILE_DEFAULTS = {
+    "business_name": "",
+    "business_field": "",
+    "program_summary": "",
+    "ideal_lead": "",
+    "offers": [],
+    "voice_notes": "",
+    "sms_signature": "",
+    "send_window_start": "08:00",
+    "send_window_end": "20:00",
+    "timezone": "America/New_York",
+    "daily_draft_cap": 25,
+    "daily_send_cap": 50,
+    "daily_cost_cap": 1.0,
+    "follow_up_days": 3,
+    "max_follow_ups": 2,
+    # Threads keyword search: what people looking for the owner's offer would write.
+    "search_keywords": [],
+    "search_daily_queries": 40,
+    # The consent a Kartra webhook opt-in arrives with, attested once in Setup.
+    "webhook_consent": {},
+}
+
+_OUTREACH_PROFILE_JSON = ("offers", "search_keywords", "webhook_consent", "runtime_state",
+                          "last_run_summary")
+_OUTREACH_PROFILE_UPDATABLE = set(OUTREACH_PROFILE_DEFAULTS) | {
+    "sms_paused_reason", "last_run_at", "last_run_summary", "last_poll_error",
+    "runtime_state", "starter_brief_id",
+}
+
+# Columns added after the outreach tables first shipped: (name, SQL type and default).
+_OUTREACH_PROFILE_LATER = (
+    ("business_name", "TEXT"),
+    ("business_field", "TEXT"),
+    ("search_keywords", "TEXT"),
+    ("search_daily_queries", "INTEGER DEFAULT 40"),
+    ("webhook_consent", "TEXT"),
+    ("runtime_state", "TEXT"),
+    ("starter_brief_id", "INTEGER"),
+)
+
+_LEAD_JSON = ("magnets", "tags")
+_LEAD_UPDATABLE = {
+    "name", "email", "phone", "source", "kartra_id", "sms_consent", "call_consent",
+    "consent_source", "consent_at", "opted_out_at", "opt_out_source", "do_not_contact",
+    "magnets", "tags", "quiz_result", "stage", "score", "notes", "timezone",
+    "last_contact_at", "last_inbound_at", "next_follow_up_at", "follow_ups_sent",
+    "call_brief", "call_brief_at", "import_batch_id", "opted_in_at",
+}
+
+_MESSAGE_UPDATABLE = {
+    "lead_id", "body", "context", "status", "external_id", "peer", "error",
+    "attempts", "sent_by", "sent_at", "kind", "based_on_message_id",
+}
+
+
+def outreach_now() -> str:
+    """The current UTC time in the outreach tables' format."""
+    return datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _init_outreach_tables(conn) -> None:
+    """Create the outreach tables. Called from init_db; safe to run repeatedly."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS outreach_profile (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            program_summary TEXT,
+            ideal_lead TEXT,
+            offers TEXT,
+            voice_notes TEXT,
+            sms_signature TEXT,
+            send_window_start TEXT DEFAULT '08:00',
+            send_window_end TEXT DEFAULT '20:00',
+            timezone TEXT DEFAULT 'America/New_York',
+            daily_draft_cap INTEGER DEFAULT 25,
+            daily_send_cap INTEGER DEFAULT 50,
+            daily_cost_cap REAL DEFAULT 1.0,
+            follow_up_days INTEGER DEFAULT 3,
+            max_follow_ups INTEGER DEFAULT 2,
+            sms_paused_reason TEXT,
+            last_run_at TEXT,
+            last_run_summary TEXT,
+            last_poll_error TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS lead_import_batches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            filename TEXT,
+            form_name TEXT,
+            consent_types TEXT,
+            consent_wording TEXT,
+            consent_date TEXT,
+            covers_texts INTEGER DEFAULT 0,
+            rows_total INTEGER DEFAULT 0,
+            rows_added INTEGER DEFAULT 0,
+            rows_updated INTEGER DEFAULT 0,
+            rows_rejected INTEGER DEFAULT 0,
+            user_id INTEGER,
+            created_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS leads (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT,
+            email TEXT,
+            phone TEXT,
+            source TEXT,
+            kartra_id TEXT,
+            sms_consent INTEGER DEFAULT 0,
+            call_consent INTEGER DEFAULT 0,
+            consent_source TEXT,
+            consent_at TEXT,
+            opted_in_at TEXT,
+            opted_out_at TEXT,
+            opt_out_source TEXT,
+            do_not_contact INTEGER DEFAULT 0,
+            magnets TEXT,
+            tags TEXT,
+            quiz_result TEXT,
+            stage TEXT DEFAULT 'new',
+            score INTEGER DEFAULT 0,
+            notes TEXT,
+            timezone TEXT,
+            last_contact_at TEXT,
+            last_inbound_at TEXT,
+            next_follow_up_at TEXT,
+            follow_ups_sent INTEGER DEFAULT 0,
+            call_brief TEXT,
+            call_brief_at TEXT,
+            import_batch_id INTEGER,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS lead_identities (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id INTEGER NOT NULL,
+            kind TEXT NOT NULL,
+            value TEXT NOT NULL,
+            created_at TEXT,
+            FOREIGN KEY(lead_id) REFERENCES leads(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS outreach_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            lead_id INTEGER,
+            channel TEXT NOT NULL,
+            direction TEXT NOT NULL,
+            kind TEXT,
+            body TEXT,
+            context TEXT,
+            based_on_message_id INTEGER,
+            status TEXT NOT NULL,
+            external_id TEXT,
+            peer TEXT,
+            error TEXT,
+            attempts INTEGER DEFAULT 0,
+            sent_by INTEGER,
+            created_at TEXT,
+            updated_at TEXT,
+            sent_at TEXT,
+            FOREIGN KEY(lead_id) REFERENCES leads(id) ON DELETE CASCADE
+        )
+        """
+    )
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(outreach_profile)")}
+    for name, sql_type in _OUTREACH_PROFILE_LATER:
+        if name not in cols:
+            conn.execute(f"ALTER TABLE outreach_profile ADD COLUMN {name} {sql_type}")
+    # The owner's recent posts the listener has looked at, and how many comments
+    # they had then, so a post with nothing new is not fetched again.
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS outreach_watch (
+            platform TEXT NOT NULL,
+            account_id INTEGER NOT NULL,
+            post_id TEXT NOT NULL,
+            seen_count INTEGER DEFAULT -1,
+            checked_at TEXT,
+            PRIMARY KEY (platform, account_id, post_id)
+        )
+        """
+    )
+    open_list = ", ".join(f"'{s}'" for s in OUTREACH_OPEN_STATUSES)
+    for stmt in (
+        # One identity (an email, a phone number, a handle) belongs to one lead.
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_lead_identities_value "
+        "ON lead_identities(kind, value)",
+        "CREATE INDEX IF NOT EXISTS idx_lead_identities_lead ON lead_identities(lead_id)",
+        "CREATE INDEX IF NOT EXISTS idx_leads_stage ON leads(stage, score DESC)",
+        # A platform's message id is seen once, however many times it is polled.
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_messages_external "
+        "ON outreach_messages(channel, external_id) WHERE external_id IS NOT NULL",
+        # At most one open item (draft, being sent, or awaiting review) per lead
+        # and channel.
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_outreach_messages_open "
+        f"ON outreach_messages(lead_id, channel) WHERE status IN ({open_list}) "
+        "AND lead_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_outreach_messages_lead "
+        "ON outreach_messages(lead_id, channel, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_outreach_messages_status "
+        "ON outreach_messages(status, updated_at)",
+    ):
+        conn.execute(stmt)
+
+
+def _json_or(value, default):
+    if value is None or value == "":
+        return default
+    if isinstance(value, (list, dict)):
+        return value
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
+
+
+# --- Outreach profile ---
+
+def get_outreach_profile(db_path: str = DB_PATH) -> dict:
+    """The single outreach profile row, created with the defaults on first read."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM outreach_profile WHERE id = 1").fetchone()
+        if row is None:
+            fields = dict(OUTREACH_PROFILE_DEFAULTS)
+            for key in ("offers", "search_keywords", "webhook_consent"):
+                fields[key] = json.dumps(fields[key])
+            cols = ", ".join(fields)
+            marks = ", ".join("?" for _ in fields)
+            conn.execute(
+                f"INSERT OR IGNORE INTO outreach_profile (id, {cols}, updated_at) "
+                f"VALUES (1, {marks}, ?)",
+                (*fields.values(), outreach_now()),
+            )
+            conn.commit()
+            row = conn.execute("SELECT * FROM outreach_profile WHERE id = 1").fetchone()
+    profile = dict(row)
+    profile["offers"] = _json_or(profile.get("offers"), [])
+    profile["last_run_summary"] = _json_or(profile.get("last_run_summary"), {})
+    keywords = profile.get("search_keywords")
+    profile["search_keywords"] = _json_or(keywords, []) if keywords is not None \
+        else list(OUTREACH_PROFILE_DEFAULTS["search_keywords"])
+    if profile.get("search_daily_queries") is None:
+        profile["search_daily_queries"] = OUTREACH_PROFILE_DEFAULTS["search_daily_queries"]
+    profile["webhook_consent"] = _json_or(profile.get("webhook_consent"), {})
+    profile["runtime_state"] = _json_or(profile.get("runtime_state"), {})
+    for key in ("business_name", "business_field", "program_summary", "ideal_lead",
+                "voice_notes", "sms_signature"):
+        profile[key] = profile.get(key) or ""
+    return profile
+
+
+def update_outreach_runtime(db_path: str = DB_PATH, **changes) -> dict:
+    """Merge ``changes`` into the profile's runtime state (sources, search budget, cursors)."""
+    state = get_outreach_profile(db_path=db_path)["runtime_state"]
+    for key, value in changes.items():
+        if isinstance(value, dict) and isinstance(state.get(key), dict):
+            state[key] = {**state[key], **value}
+        else:
+            state[key] = value
+    update_outreach_profile(db_path=db_path, runtime_state=state)
+    return state
+
+
+def update_outreach_profile(db_path: str = DB_PATH, **fields) -> None:
+    """Write the given profile columns. Unknown keys are ignored."""
+    get_outreach_profile(db_path=db_path)  # make sure the row exists
+    sets, params = [], []
+    for key, value in fields.items():
+        if key not in _OUTREACH_PROFILE_UPDATABLE:
+            continue
+        if key in _OUTREACH_PROFILE_JSON:
+            value = json.dumps(value) if not isinstance(value, str) else value
+        sets.append(f"{key} = ?")
+        params.append(value)
+    if not sets:
+        return
+    sets.append("updated_at = ?")
+    params.append(outreach_now())
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(f"UPDATE outreach_profile SET {', '.join(sets)} WHERE id = 1", params)
+        conn.commit()
+
+
+# --- Leads ---
+
+def _lead_dict(row) -> dict | None:
+    if row is None:
+        return None
+    lead = dict(row)
+    for key in _LEAD_JSON:
+        lead[key] = _json_or(lead.get(key), [])
+    return lead
+
+
+def _encode_lead_fields(fields: dict) -> dict:
+    out = {}
+    for key, value in fields.items():
+        if key not in _LEAD_UPDATABLE:
+            continue
+        if key in _LEAD_JSON and isinstance(value, (list, tuple)):
+            value = json.dumps(list(value))
+        elif isinstance(value, bool):
+            value = 1 if value else 0
+        out[key] = value
+    return out
+
+
+def create_lead(identities=(), db_path: str = DB_PATH, **fields) -> int:
+    """Create a lead and claim its identities; returns the new id.
+
+    ``identities`` is a list of ``(kind, value)`` pairs. An identity another lead
+    already holds raises ``sqlite3.IntegrityError`` and nothing is written, so a
+    caller that has not looked the person up first cannot make a duplicate.
+    """
+    now = outreach_now()
+    data = _encode_lead_fields(fields)
+    data.setdefault("stage", "new")
+    data["created_at"] = now
+    data["updated_at"] = now
+    cols = ", ".join(data)
+    marks = ", ".join("?" for _ in data)
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(f"INSERT INTO leads ({cols}) VALUES ({marks})", list(data.values()))
+        lead_id = cur.lastrowid
+        for kind, value in identities:
+            if value:
+                conn.execute(
+                    "INSERT INTO lead_identities (lead_id, kind, value, created_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (lead_id, kind, value, now),
+                )
+        conn.commit()
+        return lead_id
+
+
+def get_lead(lead_id: int, db_path: str = DB_PATH) -> dict | None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return _lead_dict(conn.execute("SELECT * FROM leads WHERE id = ?", (lead_id,)).fetchone())
+
+
+def update_lead(lead_id: int, db_path: str = DB_PATH, **fields) -> None:
+    """Write the given lead columns. Unknown keys are ignored."""
+    data = _encode_lead_fields(fields)
+    if not data:
+        return
+    data["updated_at"] = outreach_now()
+    sets = ", ".join(f"{key} = ?" for key in data)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(f"UPDATE leads SET {sets} WHERE id = ?", (*data.values(), lead_id))
+        conn.commit()
+
+
+def find_lead_by_identity(kind: str, value: str, db_path: str = DB_PATH) -> int | None:
+    if not value:
+        return None
+    with sqlite3.connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT lead_id FROM lead_identities WHERE kind = ? AND value = ?", (kind, value)
+        ).fetchone()
+        return row[0] if row else None
+
+
+def add_lead_identity(lead_id: int, kind: str, value: str, db_path: str = DB_PATH) -> bool:
+    """Give a lead an identity. False if another lead already holds it."""
+    if not value:
+        return False
+    with sqlite3.connect(db_path) as conn:
+        holder = conn.execute(
+            "SELECT lead_id FROM lead_identities WHERE kind = ? AND value = ?", (kind, value)
+        ).fetchone()
+        if holder:
+            return holder[0] == lead_id
+        conn.execute(
+            "INSERT INTO lead_identities (lead_id, kind, value, created_at) VALUES (?, ?, ?, ?)",
+            (lead_id, kind, value, outreach_now()),
+        )
+        conn.commit()
+        return True
+
+
+def list_lead_identities(lead_id: int, db_path: str = DB_PATH) -> list:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute(
+            "SELECT kind, value FROM lead_identities WHERE lead_id = ? ORDER BY kind, value",
+            (lead_id,))]
+
+
+def list_leads(stage: str | None = None, source: str | None = None, search: str | None = None,
+               call_consent: bool | None = None, limit: int = 500, offset: int = 0,
+               db_path: str = DB_PATH) -> list:
+    where, params = [], []
+    if stage:
+        where.append("stage = ?")
+        params.append(stage)
+    if source:
+        where.append("source = ?")
+        params.append(source)
+    if call_consent is not None:
+        where.append("call_consent = ?")
+        params.append(1 if call_consent else 0)
+    if search:
+        like = f"%{search.strip().lower()}%"
+        where.append("(LOWER(COALESCE(name,'')) LIKE ? OR LOWER(COALESCE(email,'')) LIKE ? "
+                     "OR COALESCE(phone,'') LIKE ?)")
+        params += [like, like, like]
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"SELECT * FROM leads{clause} ORDER BY score DESC, id DESC LIMIT ? OFFSET ?",
+            (*params, limit, offset),
+        ).fetchall()
+        return [_lead_dict(r) for r in rows]
+
+
+def lead_stage_counts(db_path: str = DB_PATH) -> dict:
+    with sqlite3.connect(db_path) as conn:
+        counts = {stage: 0 for stage in LEAD_STAGES}
+        for stage, n in conn.execute("SELECT stage, COUNT(*) FROM leads GROUP BY stage"):
+            counts[stage or "new"] = n
+        counts["opted_out"] = conn.execute(
+            "SELECT COUNT(*) FROM leads WHERE opted_out_at IS NOT NULL").fetchone()[0]
+        return counts
+
+
+def set_lead_opt_out(lead_id: int, source: str, db_path: str = DB_PATH) -> int:
+    """Opt a lead out and close their open drafts. Returns how many drafts closed."""
+    now = outreach_now()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE leads SET opted_out_at = COALESCE(opted_out_at, ?), opt_out_source = "
+            "COALESCE(opt_out_source, ?), next_follow_up_at = NULL, updated_at = ? WHERE id = ?",
+            (now, source, now, lead_id),
+        )
+        cur = conn.execute(
+            "UPDATE outreach_messages SET status = 'skipped', error = 'The lead opted out', "
+            "updated_at = ? WHERE lead_id = ? AND status IN ('draft', 'needs_review')",
+            (now, lead_id),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
+def clear_lead_opt_out(lead_id: int, db_path: str = DB_PATH) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE leads SET opted_out_at = NULL, opt_out_source = NULL, updated_at = ? "
+            "WHERE id = ?",
+            (outreach_now(), lead_id),
+        )
+        conn.commit()
+
+
+def merge_leads(keep_id: int, drop_id: int, db_path: str = DB_PATH) -> None:
+    """Fold ``drop_id`` into ``keep_id``: identities, messages and history move over.
+
+    The merged lead keeps the most careful answer to every consent question: an
+    opt-out or a do-not-contact on either side survives, and a consent stays only
+    with the record of where it was given.
+    """
+    if keep_id == drop_id:
+        raise ValueError("cannot merge a lead into itself")
+    keep = get_lead(keep_id, db_path=db_path)
+    drop = get_lead(drop_id, db_path=db_path)
+    if not keep or not drop:
+        raise ValueError("both leads must exist")
+    merged = {
+        "magnets": list(dict.fromkeys((keep["magnets"] or []) + (drop["magnets"] or []))),
+        "tags": list(dict.fromkeys((keep["tags"] or []) + (drop["tags"] or []))),
+        "do_not_contact": 1 if (keep["do_not_contact"] or drop["do_not_contact"]) else 0,
+    }
+    for key in ("name", "email", "phone", "kartra_id", "quiz_result", "timezone",
+                "last_inbound_at", "last_contact_at"):
+        if not keep.get(key) and drop.get(key):
+            merged[key] = drop[key]
+    for channel in ("sms", "call"):
+        flag = f"{channel}_consent"
+        if drop[flag] and not keep[flag]:
+            merged[flag] = 1
+            sources = [s for s in (keep.get("consent_source"), drop.get("consent_source")) if s]
+            merged["consent_source"] = " | ".join(dict.fromkeys(sources))
+            merged["consent_at"] = keep.get("consent_at") or drop.get("consent_at")
+    if drop.get("opted_out_at") and not keep.get("opted_out_at"):
+        merged["opted_out_at"] = drop["opted_out_at"]
+        merged["opt_out_source"] = drop.get("opt_out_source")
+    notes = [n for n in (keep.get("notes"), drop.get("notes")) if n]
+    if len(notes) > 1:
+        merged["notes"] = "\n\n".join(notes)
+    with sqlite3.connect(db_path) as conn:
+        # The kept lead's open item wins; the dropped lead's open drafts close.
+        conn.execute(
+            "UPDATE outreach_messages SET status = 'skipped', error = 'Merged into another lead', "
+            "updated_at = ? WHERE lead_id = ? AND status IN ('draft', 'needs_review')",
+            (outreach_now(), drop_id),
+        )
+        conn.execute("UPDATE outreach_messages SET lead_id = ? WHERE lead_id = ?", (keep_id, drop_id))
+        conn.execute("UPDATE lead_identities SET lead_id = ? WHERE lead_id = ?", (keep_id, drop_id))
+        conn.execute("DELETE FROM leads WHERE id = ?", (drop_id,))
+        conn.commit()
+    update_lead(keep_id, db_path=db_path, **merged)
+
+
+def create_lead_import_batch(filename: str, form_name: str, consent_types, consent_wording: str,
+                             consent_date: str, covers_texts: bool, user_id: int | None = None,
+                             db_path: str = DB_PATH) -> int:
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO lead_import_batches (filename, form_name, consent_types, consent_wording, "
+            "consent_date, covers_texts, user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (filename, form_name, json.dumps(list(consent_types or [])), consent_wording,
+             consent_date, 1 if covers_texts else 0, user_id, outreach_now()),
+        )
+        conn.commit()
+        return cur.lastrowid
+
+
+def finish_lead_import_batch(batch_id: int, total: int, added: int, updated: int, rejected: int,
+                             db_path: str = DB_PATH) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE lead_import_batches SET rows_total = ?, rows_added = ?, rows_updated = ?, "
+            "rows_rejected = ? WHERE id = ?",
+            (total, added, updated, rejected, batch_id),
+        )
+        conn.commit()
+
+
+def get_lead_import_batch(batch_id: int, db_path: str = DB_PATH) -> dict | None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM lead_import_batches WHERE id = ?", (batch_id,)).fetchone()
+        return dict(row) if row else None
+
+
+# --- Outreach messages ---
+
+def _message_dict(row) -> dict | None:
+    if row is None:
+        return None
+    msg = dict(row)
+    msg["context"] = _json_or(msg.get("context"), {})
+    return msg
+
+
+def add_outreach_message(channel: str, direction: str, status: str, body: str = "",
+                         lead_id: int | None = None, kind: str | None = None, context=None,
+                         based_on_message_id: int | None = None, external_id: str | None = None,
+                         peer: str | None = None, error: str | None = None, attempts: int = 0,
+                         sent_at: str | None = None, created_at: str | None = None,
+                         db_path: str = DB_PATH) -> int | None:
+    """Insert a message; returns its id, or None when an index refused it.
+
+    None means the platform id was already stored (a repeat poll) or the lead
+    already has an open item on this channel. Both are expected, so neither is
+    an error for the caller.
+    """
+    now = outreach_now()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            cur = conn.execute(
+                "INSERT INTO outreach_messages (lead_id, channel, direction, kind, body, context, "
+                "based_on_message_id, status, external_id, peer, error, attempts, created_at, "
+                "updated_at, sent_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (lead_id, channel, direction, kind, body or "",
+                 json.dumps(context or {}), based_on_message_id, status, external_id, peer,
+                 error, attempts, created_at or now, now, sent_at),
+            )
+            conn.commit()
+            return cur.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+
+
+def get_outreach_message(message_id: int, db_path: str = DB_PATH) -> dict | None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return _message_dict(conn.execute(
+            "SELECT * FROM outreach_messages WHERE id = ?", (message_id,)).fetchone())
+
+
+def find_outreach_message(channel: str, external_id: str, db_path: str = DB_PATH) -> dict | None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return _message_dict(conn.execute(
+            "SELECT * FROM outreach_messages WHERE channel = ? AND external_id = ?",
+            (channel, external_id)).fetchone())
+
+
+def update_outreach_message(message_id: int, db_path: str = DB_PATH, **fields) -> None:
+    data = {k: v for k, v in fields.items() if k in _MESSAGE_UPDATABLE}
+    if "context" in data and not isinstance(data["context"], str):
+        data["context"] = json.dumps(data["context"] or {})
+    if not data:
+        return
+    data["updated_at"] = outreach_now()
+    sets = ", ".join(f"{key} = ?" for key in data)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(f"UPDATE outreach_messages SET {sets} WHERE id = ?", (*data.values(), message_id))
+        conn.commit()
+
+
+def list_lead_messages(lead_id: int, channel: str | None = None, db_path: str = DB_PATH) -> list:
+    """A lead's whole history, oldest first: texts both ways, calls, drafts."""
+    sql = "SELECT * FROM outreach_messages WHERE lead_id = ?"
+    params = [lead_id]
+    if channel:
+        sql += " AND channel = ?"
+        params.append(channel)
+    sql += " ORDER BY COALESCE(sent_at, created_at), id"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return [_message_dict(r) for r in conn.execute(sql, params)]
+
+
+def open_outreach_item(lead_id: int, channel: str, db_path: str = DB_PATH) -> dict | None:
+    marks = ", ".join("?" for _ in OUTREACH_OPEN_STATUSES)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return _message_dict(conn.execute(
+            f"SELECT * FROM outreach_messages WHERE lead_id = ? AND channel = ? "
+            f"AND status IN ({marks})", (lead_id, channel, *OUTREACH_OPEN_STATUSES)).fetchone())
+
+
+def list_outreach_queue(db_path: str = DB_PATH) -> list:
+    """Everything waiting on the owner: drafts, failures to look at, unmatched texts.
+
+    Social messages never wait here on their own: the worker triages each one
+    into a draft (which does) or a skip.
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """
+            SELECT * FROM outreach_messages
+            WHERE (direction = 'out' AND status IN ('draft', 'needs_review', 'unknown', 'failed')
+                   AND channel != 'call')
+               OR (direction = 'in' AND channel = 'sms' AND lead_id IS NULL AND status = 'received')
+            ORDER BY CASE status WHEN 'unknown' THEN 0 WHEN 'received' THEN 1
+                                 WHEN 'failed' THEN 2 WHEN 'needs_review' THEN 3 ELSE 4 END,
+                     created_at DESC, id DESC
+            """
+        ).fetchall()
+        return [_message_dict(r) for r in rows]
+
+
+def claim_outreach_message(message_id: int, body: str, user_id: int, check,
+                           db_path: str = DB_PATH):
+    """Atomically check and claim a draft for sending.
+
+    Runs ``check(conn, message, lead)`` and the draft -> sending update inside one
+    ``BEGIN IMMEDIATE`` transaction, so two sends of the same draft (a double
+    click, a second tab) and two drafts racing the per-lead caps are decided one
+    at a time. ``check`` returns ``None`` to go ahead or ``(http_status, reason)``
+    to refuse. Returns ``(message, lead, None)`` on a claim, or
+    ``(message, lead, (http_status, reason))`` on a refusal, with nothing written.
+    """
+    conn = sqlite3.connect(db_path, isolation_level=None, timeout=30)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        message = _message_dict(conn.execute(
+            "SELECT * FROM outreach_messages WHERE id = ?", (message_id,)).fetchone())
+        if message is None:
+            conn.execute("ROLLBACK")
+            return None, None, (404, "That message no longer exists")
+        lead = _lead_dict(conn.execute(
+            "SELECT * FROM leads WHERE id = ?", (message["lead_id"],)).fetchone()) \
+            if message["lead_id"] else None
+        if message["status"] not in ("draft", "needs_review"):
+            conn.execute("ROLLBACK")
+            return message, lead, (409, f"This message is already {message['status']}")
+        refusal = check(conn, message, lead)
+        if refusal:
+            conn.execute("ROLLBACK")
+            return message, lead, refusal
+        cur = conn.execute(
+            "UPDATE outreach_messages SET status = 'sending', body = ?, sent_by = ?, "
+            "attempts = attempts + 1, sent_at = ?, error = NULL, updated_at = ? "
+            "WHERE id = ? AND status IN ('draft', 'needs_review')",
+            (body, user_id, outreach_now(), outreach_now(), message_id),
+        )
+        if cur.rowcount != 1:
+            conn.execute("ROLLBACK")
+            return message, lead, (409, "This message was just sent from somewhere else")
+        conn.execute("COMMIT")
+        message.update(status="sending", body=body, sent_by=user_id)
+        return message, lead, None
+    except Exception:
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def record_outreach_sent(message_id: int, external_id: str | None, status: str = "sent",
+                         error: str | None = None, db_path: str = DB_PATH) -> None:
+    """Store a send's outcome. A poll may have stored the same platform id first,
+    as a message sent outside Insights; that copy is ours, so it is dropped."""
+    now = outreach_now()
+    with sqlite3.connect(db_path) as conn:
+        msg = conn.execute("SELECT channel FROM outreach_messages WHERE id = ?",
+                           (message_id,)).fetchone()
+        if msg and external_id:
+            conn.execute(
+                "DELETE FROM outreach_messages WHERE channel = ? AND external_id = ? AND id != ? "
+                "AND kind = 'external'",
+                (msg[0], external_id, message_id),
+            )
+        conn.execute(
+            "UPDATE outreach_messages SET status = ?, external_id = COALESCE(?, external_id), "
+            "error = ?, updated_at = ? WHERE id = ?",
+            (status, external_id, error, now, message_id),
+        )
+        conn.commit()
+
+
+def count_lead_outbound_since(lead_id: int, since: str, db_path: str = DB_PATH) -> int:
+    """Texts and calls that may have reached this lead since ``since`` (UTC)."""
+    marks = ", ".join("?" for _ in OUTREACH_REACHED_STATUSES)
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            f"SELECT COUNT(*) FROM outreach_messages WHERE lead_id = ? AND direction = 'out' "
+            f"AND status IN ({marks}) AND COALESCE(sent_at, created_at) >= ?",
+            (lead_id, *OUTREACH_REACHED_STATUSES, since),
+        ).fetchone()[0]
+
+
+def count_outreach_sent_since(since: str, channel: str = "sms", db_path: str = DB_PATH) -> int:
+    """Messages Insights itself sent on a channel since ``since`` (UTC)."""
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM outreach_messages WHERE channel = ? AND direction = 'out' "
+            "AND status IN ('sending', 'sent', 'delivered', 'unknown') AND sent_at >= ?",
+            (channel, since),
+        ).fetchone()[0]
+
+
+def count_agent_drafts_since(since: str, db_path: str = DB_PATH) -> int:
+    """Drafts the worker wrote since ``since`` (UTC), whatever became of them."""
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            "SELECT COUNT(*) FROM outreach_messages WHERE direction = 'out' "
+            "AND kind IN ('opener', 'continuation', 'follow_up') AND created_at >= ? "
+            "AND json_extract(context, '$.by') = 'agent'",
+            (since,),
+        ).fetchone()[0]
+
+
+def lead_reached_before(lead_id: int, channel: str = "sms", db_path: str = DB_PATH) -> bool:
+    """Has anything on this channel possibly reached the lead already?"""
+    marks = ", ".join("?" for _ in OUTREACH_REACHED_STATUSES)
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            f"SELECT 1 FROM outreach_messages WHERE lead_id = ? AND channel = ? "
+            f"AND direction = 'out' AND status IN ({marks}) LIMIT 1",
+            (lead_id, channel, *OUTREACH_REACHED_STATUSES),
+        ).fetchone() is not None
+
+
+def last_lead_message(lead_id: int, channel: str, direction: str,
+                      db_path: str = DB_PATH) -> dict | None:
+    """The lead's latest inbound message, or latest outbound one that may have
+    reached them, on a channel."""
+    if direction == "in":
+        statuses = ("received",)
+    else:
+        statuses = OUTREACH_REACHED_STATUSES
+    marks = ", ".join("?" for _ in statuses)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return _message_dict(conn.execute(
+            f"SELECT * FROM outreach_messages WHERE lead_id = ? AND channel = ? "
+            f"AND direction = ? AND status IN ({marks}) "
+            f"ORDER BY COALESCE(sent_at, created_at) DESC, id DESC LIMIT 1",
+            (lead_id, channel, direction, *statuses)).fetchone())
+
+
+def leads_awaiting_reply(channel: str = "sms", db_path: str = DB_PATH) -> list:
+    """Leads whose latest message on the channel is theirs, with nothing open.
+
+    These are the conversations to continue. Opted-out and do-not-contact leads
+    are left out, and so is a lead with a send whose outcome is still unknown,
+    and one whose reply to that latest message the owner skipped or saw fail.
+    """
+    reached = ", ".join(f"'{s}'" for s in OUTREACH_REACHED_STATUSES)
+    open_ = ", ".join(f"'{s}'" for s in OUTREACH_OPEN_STATUSES)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT l.*, (SELECT MAX(id) FROM outreach_messages i
+                         WHERE i.lead_id = l.id AND i.channel = ? AND i.direction = 'in'
+                           AND i.status = 'received') AS last_in_id
+            FROM leads l
+            WHERE l.opted_out_at IS NULL AND COALESCE(l.do_not_contact, 0) = 0
+              AND EXISTS (SELECT 1 FROM outreach_messages i WHERE i.lead_id = l.id
+                          AND i.channel = ? AND i.direction = 'in' AND i.status = 'received')
+              AND NOT EXISTS (SELECT 1 FROM outreach_messages o WHERE o.lead_id = l.id
+                          AND o.channel = ? AND o.status IN ({open_}, 'unknown'))
+              AND (SELECT MAX(COALESCE(i.sent_at, i.created_at)) FROM outreach_messages i
+                   WHERE i.lead_id = l.id AND i.channel = ? AND i.direction = 'in'
+                     AND i.status = 'received')
+                  > COALESCE((SELECT MAX(COALESCE(o.sent_at, o.created_at)) FROM outreach_messages o
+                   WHERE o.lead_id = l.id AND o.channel = ? AND o.direction = 'out'
+                     AND o.status IN ({reached})), '')
+              AND NOT EXISTS (SELECT 1 FROM outreach_messages s WHERE s.lead_id = l.id
+                   AND s.channel = ? AND s.direction = 'out' AND s.status IN ('skipped', 'failed')
+                   AND s.based_on_message_id = (SELECT MAX(id) FROM outreach_messages i
+                        WHERE i.lead_id = l.id AND i.channel = ? AND i.direction = 'in'
+                          AND i.status = 'received'))
+            ORDER BY l.score DESC, l.id
+            """,
+            (channel, channel, channel, channel, channel, channel, channel),
+        ).fetchall()
+        return [_lead_dict(r) | {"last_in_id": r["last_in_id"]} for r in rows]
+
+
+def leads_needing_opener(limit: int, db_path: str = DB_PATH) -> list:
+    """New leads who agreed to texts and have never had a text drafted, best first.
+
+    Any earlier outbound text counts, even a skipped or failed one: the owner has
+    already seen this lead, so the worker does not keep offering a new opener.
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT * FROM leads l
+            WHERE l.sms_consent = 1 AND l.opted_out_at IS NULL
+              AND COALESCE(l.do_not_contact, 0) = 0 AND l.phone IS NOT NULL AND l.phone != ''
+              AND l.stage = 'new'
+              AND NOT EXISTS (SELECT 1 FROM outreach_messages m WHERE m.lead_id = l.id
+                              AND m.channel = 'sms' AND m.direction = 'out')
+            ORDER BY l.score DESC, l.id
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [_lead_dict(r) for r in rows]
+
+
+def leads_due_follow_up(now: str, max_follow_ups: int, db_path: str = DB_PATH) -> list:
+    """Leads who went quiet after our last text and are due a nudge."""
+    open_ = ", ".join(f"'{s}'" for s in OUTREACH_OPEN_STATUSES)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            f"""
+            SELECT * FROM leads l
+            WHERE l.next_follow_up_at IS NOT NULL AND l.next_follow_up_at <= ?
+              AND COALESCE(l.follow_ups_sent, 0) < ?
+              AND l.opted_out_at IS NULL AND COALESCE(l.do_not_contact, 0) = 0
+              AND l.stage NOT IN ('booked', 'enrolled', 'not_fit')
+              AND NOT EXISTS (SELECT 1 FROM outreach_messages m WHERE m.lead_id = l.id
+                              AND m.channel = 'sms' AND m.status IN ({open_}, 'unknown'))
+            ORDER BY l.next_follow_up_at, l.id
+            """,
+            (now, max_follow_ups),
+        ).fetchall()
+        return [_lead_dict(r) for r in rows]
+
+
+def outreach_messages_with_status(status: str, older_than: str | None = None,
+                                  newer_than: str | None = None, channel: str = "sms",
+                                  db_path: str = DB_PATH) -> list:
+    sql = "SELECT * FROM outreach_messages WHERE status = ? AND channel = ?"
+    params = [status, channel]
+    if older_than:
+        sql += " AND updated_at < ?"
+        params.append(older_than)
+    if newer_than:
+        sql += " AND COALESCE(sent_at, created_at) >= ?"
+        params.append(newer_than)
+    sql += " ORDER BY id"
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return [_message_dict(r) for r in conn.execute(sql, params)]
+
+
+def link_unmatched_messages(peer: str, lead_id: int, channel: str = "sms",
+                            db_path: str = DB_PATH) -> int:
+    """Attach every unmatched message from ``peer`` to a lead."""
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE outreach_messages SET lead_id = ?, updated_at = ? "
+            "WHERE lead_id IS NULL AND channel = ? AND peer = ?",
+            (lead_id, outreach_now(), channel, peer),
+        )
+        conn.commit()
+        return cur.rowcount
+
+
+def get_watch(platform: str, account_id: int, post_id: str, db_path: str = DB_PATH) -> dict | None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM outreach_watch WHERE platform = ? AND account_id = ? AND post_id = ?",
+            (platform, account_id, str(post_id))).fetchone()
+        return dict(row) if row else None
+
+
+def set_watch(platform: str, account_id: int, post_id: str, seen_count: int,
+              db_path: str = DB_PATH) -> None:
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO outreach_watch (platform, account_id, post_id, seen_count, checked_at) "
+            "VALUES (?, ?, ?, ?, ?) ON CONFLICT(platform, account_id, post_id) DO UPDATE SET "
+            "seen_count = excluded.seen_count, checked_at = excluded.checked_at",
+            (platform, account_id, str(post_id), seen_count, outreach_now()))
+        conn.commit()
+
+
+def social_items_to_triage(limit: int = 50, db_path: str = DB_PATH) -> list:
+    """Social messages that arrived and have not been looked at yet, oldest first."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM outreach_messages WHERE direction = 'in' AND status = 'received' "
+            "AND channel IN ('threads', 'instagram', 'facebook', 'twitter') "
+            "AND json_extract(context, '$.triage') IS NULL ORDER BY id LIMIT ?",
+            (limit,)).fetchall()
+        return [_message_dict(r) for r in rows]
+
+
+def outreach_messages_in_conversation(channel: str, root_id: str, db_path: str = DB_PATH) -> list:
+    """Every stored message of one social conversation (one of the owner's posts), oldest first."""
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            "SELECT * FROM outreach_messages WHERE channel = ? "
+            "AND json_extract(context, '$.root_id') = ? ORDER BY COALESCE(sent_at, created_at), id",
+            (channel, str(root_id))).fetchall()
+        return [_message_dict(r) for r in rows]

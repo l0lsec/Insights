@@ -56,7 +56,8 @@ class ThreadsClient:
         """Check if Threads credentials are configured."""
         return bool(self.app_id and self.app_secret)
 
-    def get_authorization_url(self, state: str | None = None) -> tuple[str, str]:
+    def get_authorization_url(self, state: str | None = None,
+                              scopes: str | None = None) -> tuple[str, str]:
         """Generate the OAuth authorization URL.
 
         Returns:
@@ -68,7 +69,7 @@ class ThreadsClient:
         params = {
             "client_id": self.app_id,
             "redirect_uri": self.redirect_uri,
-            "scope": THREADS_SCOPES,
+            "scope": scopes or THREADS_SCOPES,
             "response_type": "code",
             "state": state,
         }
