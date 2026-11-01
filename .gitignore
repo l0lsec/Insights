@@ -9,6 +9,7 @@ venv/
 .DS_Store
 *.md
 !CLAUDE.md
+!docs/UX_PRINCIPLES.md
 uploads/
 downloads/
 *.log

@@ -73,3 +73,16 @@ nothing else:
 Commits already on `main` that are authored as `Claude` were left as they are on
 purpose. Changing them means rewriting `main` and force-pushing it, which the
 owner declined. Do not rewrite them to tidy this up.
+
+## UI work follows the UX principles
+
+Before you design, build or change any template, page script or flow, read
+`docs/UX_PRINCIPLES.md` (the owner's 20 UX laws, with an Insights checklist). The
+rollout plan is in `docs/ux-rollout/PLAN.md`.
+
+The short version: one dominant action per section, immediate feedback on every
+click, disable impossible actions and say why, keep the user's input when
+something fails, say what happened and what comes next, and prefer Undo to a
+confirmation. Do not add new `alert(` calls, do not write another toast helper,
+and do not hard-code colors outside the tokens in `base.html`. That file says
+which shared pieces exist yet and what to do until they do.
