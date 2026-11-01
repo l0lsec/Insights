@@ -394,6 +394,37 @@ class ThreadsClient:
 
         return self.publish_text_post(access_token, full_text)
 
+    def publish_reply(
+        self,
+        access_token: str,
+        reply_to_id: str,
+        text: str,
+    ) -> dict:
+        """Publish a text reply under a live Threads post.
+
+        Used to post a link as the first reply to one's own post. Replying needs
+        the ``threads_manage_replies`` permission on top of posting; without it
+        Threads refuses the container. A reply with no ``reply_to_id`` is refused
+        here, because Threads would publish the words as a new top-level post.
+
+        Returns the same dict as the other publish methods (``post_id`` is the
+        reply's own id); nothing is truncated, so the caller checks the length.
+        """
+        if not str(reply_to_id or "").strip():
+            return {
+                "success": False,
+                "error": {"message": "No post to reply to"},
+            }
+        params = {
+            "media_type": "TEXT",
+            "text": text,
+            "reply_to_id": reply_to_id,
+            "access_token": access_token,
+        }
+        return self._publish_media_container(
+            access_token, params, label="Reply", max_retries=10, poll_interval=0.5,
+        )
+
     def publish_image_post(
         self,
         access_token: str,

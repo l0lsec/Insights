@@ -320,12 +320,13 @@ def init_db(db_path: str = DB_PATH) -> None:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN ig_collaborators TEXT")
         if "ig_reel_tags" not in standalone_columns:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN ig_reel_tags TEXT")
-        # Where a LinkedIn post carries its link. link_comment is NULL (follow the
-        # account's setting), 1 (the link leaves the post and goes out as its first
-        # comment) or 0 (the link stays in the post). LinkedIn holds back posts that
-        # link out, so the comment is how a link gets there without that cost.
+        # Where a LinkedIn, Threads or X post carries its link. link_comment is NULL
+        # (follow the account's setting), 1 (the link leaves the post and goes out as
+        # its first comment on LinkedIn, its first reply on Threads and X) or 0 (the
+        # link stays in the post). Those platforms show posts that link out to fewer
+        # people, so the comment is how a link gets there without that cost.
         # link_comment_state is a JSON note on what became of that comment, kept so a
-        # comment LinkedIn refused can be retried on the post that is already live.
+        # comment the platform refused can be retried on the post that is already live.
         if "link_comment" not in standalone_columns:
             conn.execute("ALTER TABLE standalone_posts ADD COLUMN link_comment INTEGER")
         if "link_comment_state" not in standalone_columns:
@@ -808,13 +809,22 @@ def init_db(db_path: str = DB_PATH) -> None:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} INTEGER")
 
         # An account's standing choice about links: 1 sends the link of every
-        # post it publishes as the post's first comment. Only LinkedIn reads it;
-        # a post can still override it either way (standalone_posts.link_comment).
+        # post it publishes as the post's first comment (LinkedIn) or first reply
+        # (Threads, X). A post can still override it either way
+        # (standalone_posts.link_comment).
         cur = conn.execute("PRAGMA table_info(social_accounts)")
-        if "link_in_comment" not in [row[1] for row in cur.fetchall()]:
+        account_columns = [row[1] for row in cur.fetchall()]
+        if "link_in_comment" not in account_columns:
             conn.execute(
                 "ALTER TABLE social_accounts ADD COLUMN link_in_comment INTEGER DEFAULT 0"
             )
+        # link_reply_blocked is a JSON note {error, at} set when the platform refused
+        # an account's link comment for want of a permission. While it is set the
+        # account's links stay in the post, so a scheduled post never goes out with
+        # its link nowhere. Reconnecting the account, a comment that posts, or saving
+        # the account's setting clears it.
+        if "link_reply_blocked" not in account_columns:
+            conn.execute("ALTER TABLE social_accounts ADD COLUMN link_reply_blocked TEXT")
 
         # A token table may only ever hold one row per account, or "which token
         # is this account's" stops having an answer. The partial index leaves
@@ -981,6 +991,10 @@ def _upsert_account_row(
         # Only overwrite profile fields we were actually given: a callback that
         # skipped the profile endpoint must not blank out a known name.
         sets, params = ["updated_at = ?", "status = 'active'"], [now]
+        # A reconnect may carry the permission a link comment was refused for,
+        # so the next post tries the comment again.
+        if "link_reply_blocked" in [c[1] for c in conn.execute("PRAGMA table_info(social_accounts)")]:
+            sets.append("link_reply_blocked = NULL")
         for column, value in (
             ("display_name", display_name),
             ("handle", handle),
@@ -3752,7 +3766,7 @@ def add_standalone_post(
         ig_collaborators / ig_reel_tags: usernames already cleaned by the caller
             (see instagram_client.normalize_handles); stored as JSON, and only
             meaningful on an Instagram row.
-        link_comment: LinkedIn only. None follows the account's setting; True
+        link_comment: LinkedIn, Threads and X. None follows the account's setting; True
             or False is this post's own choice about sending its link as the
             first comment.
         repost: If True, marks this as an intentional duplicate that bypassed
@@ -4138,7 +4152,7 @@ def set_standalone_post_link_comment(
     enabled: Optional[bool],
     db_path: str = DB_PATH,
 ) -> None:
-    """Set whether a LinkedIn post sends its link as the first comment.
+    """Set whether a post sends its link as the first comment (or reply).
 
     ``None`` clears the post's own choice so the account's setting applies
     again; ``True`` and ``False`` are the post's choice and beat the account.
@@ -4183,7 +4197,7 @@ def link_comment_state(row) -> Optional[dict]:
 
 
 def link_in_comment_enabled(post_row, account_row) -> bool:
-    """Whether a LinkedIn post sends its link as the first comment.
+    """Whether a post sends its link as the first comment (LinkedIn) or reply (Threads, X).
 
     The post's own choice wins, whichever way it points; a post that has not
     made one follows its account; with neither the link stays in the post, which
@@ -6514,7 +6528,8 @@ def set_social_account_link_in_comment(
     """Make an account send its posts' links as first comments (or stop).
 
     False if the id is unknown. Whether the platform can do it is the caller's
-    question: the column exists on every account but only LinkedIn reads it.
+    question: the column exists on every account but only LinkedIn, Threads and
+    X read it.
     """
     with sqlite3.connect(db_path) as conn:
         cur = conn.execute(
@@ -6524,6 +6539,35 @@ def set_social_account_link_in_comment(
         )
         conn.commit()
         return cur.rowcount > 0
+
+
+def set_social_account_link_reply_blocked(
+    account_id: int, note: Optional[dict], db_path: str = DB_PATH
+) -> bool:
+    """Record that the platform refused an account's link comments, or clear it.
+
+    ``note`` is ``{"error", "at"}``; None clears it. While it is set the
+    publisher keeps that account's links in the post (see
+    ``social_publisher``). False if the id is unknown.
+    """
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "UPDATE social_accounts SET link_reply_blocked = ? WHERE id = ?",
+            (json.dumps(note) if note else None, account_id),
+        )
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def link_reply_blocked(account_row) -> Optional[dict]:
+    """An account's refused-link-comment note, or None. Tolerates NULL and bad JSON."""
+    raw = (account_row["link_reply_blocked"]
+           if account_row is not None and "link_reply_blocked" in account_row.keys() else None)
+    try:
+        note = json.loads(raw) if raw else None
+    except (ValueError, TypeError):
+        return None
+    return note if isinstance(note, dict) else None
 
 
 def set_social_account_status(

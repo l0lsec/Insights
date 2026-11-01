@@ -62,6 +62,18 @@ logger = logging.getLogger(__name__)
 
 PLATFORMS = ("linkedin", "threads", "twitter", "facebook", "instagram")
 
+# The platforms that can send a post's links as its first comment (LinkedIn) or
+# first reply (Threads, X) instead of in the post, because they show posts that
+# link out to fewer people. A reply is never trimmed, since a cut link is broken,
+# so each one's longest is checked before anything is sent. X counts a link as
+# 23 characters whatever its length; the raw length used here is the safe side.
+LINK_REPLY_PLATFORMS = ("linkedin", "threads", "twitter")
+LINK_REPLY_MAX_CHARS = {
+    "linkedin": LINKEDIN_COMMENT_MAX_CHARS,
+    "threads": 500,
+    "twitter": 280,
+}
+
 # What each platform will accept in one post. Copy is trimmed rather than
 # refused: the same text goes to every target, and a card that fits LinkedIn
 # should still reach X rather than failing the whole fan-out.
@@ -127,6 +139,7 @@ def account_summary(account) -> dict:
         "external_id": account["external_id"],
         "link_in_comment": bool(
             account["link_in_comment"] if "link_in_comment" in account.keys() else 0),
+        "link_reply_blocked": database.link_reply_blocked(account),
     }
 
 
@@ -196,12 +209,14 @@ def publish(
     delivered fails the post; it is never quietly swapped for a text or image
     post, because the copy was written to go with the video.
 
-    ``link_in_comment`` is LinkedIn's alone, because LinkedIn holds back posts
-    that link out. True takes the post's links out of the copy and posts them as
-    its first comment, False keeps them in the copy, and None (what every caller
+    ``link_in_comment`` is for LinkedIn, Threads and X (``LINK_REPLY_PLATFORMS``),
+    which show posts that link out to fewer people. True takes the post's links
+    out of the copy and posts them as its first comment (a reply to the post on
+    Threads and X), False keeps them in the copy, and None (what every caller
     passes) lets the saved post's own choice and then the account's decide. A
-    comment LinkedIn refuses does not fail the post: it reports ``first_comment``
-    on the result and keeps what a retry needs (see ``retry_first_comment``).
+    comment the platform refuses does not fail the post: it reports
+    ``first_comment`` on the result and keeps what a retry needs (see
+    ``retry_first_comment``).
 
     Every step that can fail (no token, an expired token that will not refresh,
     the platform rejecting the post) comes back as ``success: False`` with a
@@ -227,10 +242,10 @@ def publish(
                        error=f"{platform_name(platform)} cannot be published to",
                        permanent=True)
 
-    # Only LinkedIn takes it, and only when a caller names one, so every other
-    # platform (and a LinkedIn post nobody overrides) is called exactly as before.
+    # Only the platforms that take it, and only when a caller names one, so every
+    # other platform (and a post nobody overrides) is called exactly as before.
     extra = {"link_in_comment": link_in_comment} \
-        if platform == "linkedin" and link_in_comment is not None else {}
+        if platform in LINK_REPLY_PLATFORMS and link_in_comment is not None else {}
 
     try:
         return handler(
@@ -318,7 +333,7 @@ def _linkedin_session(account_id, account, db_path):
 
 
 def _link_comment_wanted(override, account, standalone_id, db_path) -> bool:
-    """Whether this LinkedIn post sends its link as the first comment.
+    """Whether this post sends its link as the first comment (or reply).
 
     A caller's explicit answer wins; otherwise the saved post's own choice, then
     its account's, then no (see ``database.link_in_comment_enabled``).
@@ -329,27 +344,64 @@ def _link_comment_wanted(override, account, standalone_id, db_path) -> bool:
     return database.link_in_comment_enabled(row, account)
 
 
+def link_reply_noun(platform: str) -> str:
+    """What the link goes out as: a "comment" on LinkedIn, a "reply" on Threads and X."""
+    return "comment" if platform == "linkedin" else "reply"
+
+
+def _split_for_link_reply(platform, account, text, override, standalone_id, db_path):
+    """Take the links out of a post that sends them as its first comment.
+
+    Returns ``(text, reply_text, kept, failure)``. ``reply_text`` is the
+    comment to post once the post is live (None when there is none), ``kept``
+    is the note for a post whose links stay in it because the platform refused
+    this account's last link comment, and ``failure`` is a ready-made result for
+    a post that cannot go out this way. All of it is decided before anything is
+    sent: a refusal after the post is live would leave it without its link.
+    """
+    if platform not in LINK_REPLY_PLATFORMS or \
+            not _link_comment_wanted(override, account, standalone_id, db_path):
+        return text, None, None, None
+    body, links = split_link_for_comment(text)
+    if not links:
+        return text, None, None, None
+    reply_text = "\n".join(links)
+    name, noun = platform_name(platform), link_reply_noun(platform)
+    account_id = account["id"] if account is not None else None
+
+    blocked = database.link_reply_blocked(account)
+    if blocked:
+        # The platform said no to this account's last link comment and nothing
+        # has changed since, so another would fail too and leave the post with
+        # its link nowhere. The link stays in the post until the account is
+        # reconnected, a retried comment posts, or its setting is saved again.
+        kept = {"status": "kept", "text": reply_text, "error": blocked.get("error"),
+                "comment_id": None, "post_urn": None,
+                "at": datetime.utcnow().isoformat(timespec="seconds")}
+        return text, None, kept, None
+
+    limit = LINK_REPLY_MAX_CHARS[platform]
+    if len(reply_text) > limit:
+        return text, None, None, _result(
+            platform, account_id, account, False, permanent=True,
+            error=(f"The link {noun} would be {len(reply_text)} characters and "
+                   f"{name} allows {limit}. Remove some of the links."))
+    if not body.strip():
+        # Posts here always carry words (publish() refuses an empty one), and a
+        # link-only post would be left with none.
+        return text, None, None, _result(
+            platform, account_id, account, False, permanent=True,
+            error=(f"Nothing is left to post once the link moves to the {noun}. "
+                   "Add some words to the post."))
+    return body, reply_text, None, None
+
+
 def _linkedin(account_id, account, text, image_url, standalone_id, social_id,
               article_title, db_path, video_url=None, link_in_comment=None):
-    # A post whose link is going to the comment is checked before anything is
-    # sent: a refusal after the post is live would leave it without its link.
-    comment_text = None
-    if _link_comment_wanted(link_in_comment, account, standalone_id, db_path):
-        text, links = split_link_for_comment(text)
-        if links:
-            comment_text = "\n".join(links)
-            if len(comment_text) > LINKEDIN_COMMENT_MAX_CHARS:
-                return _result(
-                    "linkedin", account_id, account, False, permanent=True,
-                    error=(f"The link comment would be {len(comment_text)} characters and "
-                           f"LinkedIn allows {LINKEDIN_COMMENT_MAX_CHARS}. Remove some of the links."))
-            if not text.strip():
-                # LinkedIn posts here always carry words (publish() refuses an
-                # empty one), and a link-only post would be left with none.
-                return _result(
-                    "linkedin", account_id, account, False, permanent=True,
-                    error=("Nothing is left to post once the link moves to the comment. "
-                           "Add some words to the post."))
+    text, comment_text, kept, failure = _split_for_link_reply(
+        "linkedin", account, text, link_in_comment, standalone_id, db_path)
+    if failure:
+        return failure
 
     client, token, failure = _linkedin_session(account_id, account, db_path)
     if failure:
@@ -378,64 +430,155 @@ def _linkedin(account_id, account, text, image_url, standalone_id, social_id,
             article_title=article_title,
         )
     outcome = _from_client("linkedin", account_id, account, result, urn_key="post_urn")
+    return _follow_with_link_reply("linkedin", outcome, result.get("post_urn") if result else None,
+                                   client, token, comment_text, kept, standalone_id, account_id, db_path)
 
-    if comment_text and outcome["success"]:
-        # The post is live. Whatever happens to the comment is reported beside
-        # that fact and never instead of it: an exception here would make
-        # publish() call the post failed, and the scheduler would post it again.
+
+def _follow_with_link_reply(platform, outcome, post_id, client, token, reply_text, kept,
+                            standalone_id, account_id, db_path) -> dict:
+    """Post a live post's link comment, or note why its link stayed in it.
+
+    The post is live by the time this runs. Whatever happens to the comment is
+    reported beside that fact and never instead of it: an exception here would
+    make publish() call the post failed, and the scheduler would post it again.
+    A post that does not use it gets the result it always had.
+    """
+    if not outcome["success"]:
+        return outcome
+    if kept:
+        _save_link_note(standalone_id, kept, db_path)
+        outcome["first_comment"] = kept
+    elif reply_text:
         outcome["first_comment"] = _post_first_comment(
-            client, token, comment_text, result.get("post_urn"), standalone_id, db_path)
+            client, token, reply_text, post_id, standalone_id, db_path,
+            platform=platform, account_id=account_id)
     return outcome
 
 
-def _post_first_comment(client, token, comment_text, post_urn, standalone_id, db_path) -> dict:
+def _send_link_reply(platform, client, token, text, post_id) -> dict:
+    """Send one link comment (LinkedIn) or reply (Threads, X); the client's answer.
+
+    The answer gains ``comment_id`` here, because the three clients name the
+    new comment's id differently.
+    """
+    if platform == "linkedin":
+        reply = client.create_comment(
+            access_token=token["access_token"],
+            actor_urn=token["user_urn"],
+            post_urn=post_id,
+            text=text,
+        )
+        id_key = "comment_id"
+    elif platform == "threads":
+        reply = client.publish_reply(token["access_token"], post_id, text)
+        id_key = "post_id"
+    else:
+        reply = client.create_reply(token["access_token"], text, post_id)
+        id_key = "tweet_id"
+    reply = dict(reply or {})
+    reply["comment_id"] = reply.get(id_key)
+    return reply
+
+
+def _link_reply_error(platform, reply) -> str:
+    """The reason a refused comment gives, in words a person can act on."""
+    if reply.get("friendly"):
+        return str(reply["friendly"])
+    raw = reply.get("error")
+    if isinstance(raw, dict):
+        nested = raw.get("error") if isinstance(raw.get("error"), dict) else {}
+        raw = raw.get("message") or nested.get("message") or raw.get("detail") or raw.get("title")
+    return str(raw or f"{platform_name(platform)} gave no reason")
+
+
+def _refused_for_permission(platform, reply) -> bool:
+    """Whether the platform refused the comment because this connection may not make it.
+
+    Only these refusals block the account (see ``_split_for_link_reply``): a
+    rate limit or an outage says nothing about the next post.
+    """
+    if reply.get("status_code") == 403:
+        return True
+    if platform != "threads":
+        return False
+    raw = reply.get("error")
+    error = raw.get("error") if isinstance(raw, dict) and isinstance(raw.get("error"), dict) else {}
+    try:
+        code = int(error.get("code"))
+    except (TypeError, ValueError):
+        code = None
+    return code == 10 or (code is not None and 200 <= code < 300) \
+        or "permission" in str(error.get("message") or "").lower()
+
+
+# What to add to a permission refusal so the person knows the fix.
+_PERMISSION_HINTS = {
+    "threads": (" Threads needs the threads_manage_replies permission to reply. Use "
+                "\"Reconnect with reply permission\" on the Accounts page."),
+}
+
+
+def _save_link_note(standalone_id, note, db_path) -> None:
+    """Keep a post's link comment note on its row. Never raises."""
+    if not standalone_id:
+        return
+    try:
+        database.set_standalone_post_link_comment_state(standalone_id, note, db_path=db_path)
+    except Exception:  # noqa: BLE001 - the record is a convenience, the post is live
+        logger.exception("Could not save the link comment record for post %s", standalone_id)
+
+
+def _post_first_comment(client, token, comment_text, post_urn, standalone_id, db_path,
+                        platform="linkedin", account_id=None) -> dict:
     """Comment on a live post and keep the record. Never raises.
 
-    Returns the note ``{"status": "posted" | "failed", "text", "error",
-    "comment_id", "post_urn", "at"}``. It is also saved on the post's row, which
-    is what lets a failed comment be retried later, on the same post, with the
-    same words, without trusting the copy to be unchanged since.
+    On Threads and X the comment is a reply to the post. Returns the note
+    ``{"status": "posted" | "failed", "text", "error", "comment_id",
+    "post_urn", "at"}``, where ``post_urn`` is the platform's id for the post
+    (a URN on LinkedIn). It is also saved on the post's row, which is what
+    lets a failed comment be retried later, on the same post, with the same
+    words, without trusting the copy to be unchanged since. A refusal for want
+    of a permission also blocks the account (``account_id``) until it is
+    fixed; a comment that posts lifts that.
     """
+    name, noun = platform_name(platform), link_reply_noun(platform)
     note = {"status": "failed", "text": comment_text, "error": None,
             "comment_id": None, "post_urn": post_urn,
             "at": datetime.utcnow().isoformat(timespec="seconds")}
+    refused = False
     if not post_urn:
-        note["error"] = ("LinkedIn did not say which post this is, so the link could "
-                         "not be added as a comment. Add it by hand.")
+        note["error"] = (f"{name} did not say which post this is, so the link could "
+                         f"not be added as a {noun}. Add it by hand.")
     else:
         try:
-            reply = client.create_comment(
-                access_token=token["access_token"],
-                actor_urn=token["user_urn"],
-                post_urn=post_urn,
-                text=comment_text,
-            )
+            reply = _send_link_reply(platform, client, token, comment_text, post_urn)
         except Exception as exc:  # noqa: BLE001
-            reply = {"success": False, "friendly": f"The link comment failed: {exc}"}
-        if reply and reply.get("success"):
+            reply = {"success": False, "friendly": f"The link {noun} failed: {exc}"}
+        if reply.get("success"):
             note["status"] = "posted"
             note["comment_id"] = reply.get("comment_id")
         else:
-            raw = (reply or {}).get("error")
-            note["error"] = str(
-                (reply or {}).get("friendly")
-                or (raw.get("message") if isinstance(raw, dict) else raw)
-                or "LinkedIn gave no reason"
-            )
+            note["error"] = _link_reply_error(platform, reply)
+            refused = _refused_for_permission(platform, reply)
+            if refused:
+                note["error"] += _PERMISSION_HINTS.get(platform, "")
     if note["status"] == "failed":
-        logger.warning("LinkedIn link comment failed for %s: %s", post_urn, note["error"])
+        logger.warning("%s link %s failed for %s: %s", name, noun, post_urn, note["error"])
 
-    if standalone_id:
+    _save_link_note(standalone_id, note, db_path)
+    if account_id and (refused or note["status"] == "posted"):
         try:
-            database.set_standalone_post_link_comment_state(
-                standalone_id, note, db_path=db_path)
-        except Exception:  # noqa: BLE001 - the record is a convenience, the post is live
-            logger.exception("Could not save the link comment record for post %s", standalone_id)
+            database.set_social_account_link_reply_blocked(
+                account_id,
+                {"error": note["error"], "at": note["at"]} if refused else None,
+                db_path=db_path)
+        except Exception:  # noqa: BLE001 - same: never let the record fail the post
+            logger.exception("Could not record the link %s block for account %s", noun, account_id)
     return note
 
 
 def retry_first_comment(standalone_id, *, db_path: str | None = None) -> dict:
-    """Post again a link comment LinkedIn refused, on the post that is live.
+    """Post again a link comment the platform refused, on the post that is live.
 
     Only the comment is sent; the post is never touched. It uses the words and
     the post id saved when the comment failed and the token of the account the
@@ -445,27 +588,31 @@ def retry_first_comment(standalone_id, *, db_path: str | None = None) -> dict:
     """
     db_path = db_path or database.DB_PATH
     row = database.get_standalone_post(standalone_id, db_path=db_path)
+    platform = row["platform"] if row is not None and row["platform"] in LINK_REPLY_PLATFORMS \
+        else "linkedin"
+    noun = link_reply_noun(platform)
     state = database.link_comment_state(row)
     if not state or state.get("status") != "failed":
-        return _result("linkedin", None, None, False, permanent=True,
-                       error="There is no failed link comment to retry for this post")
+        return _result(platform, None, None, False, permanent=True,
+                       error=f"There is no failed link {noun} to retry for this post")
     if not state.get("post_urn") or not state.get("text"):
-        return _result("linkedin", None, None, False, permanent=True,
-                       error="The post's id was not recorded, so the comment cannot be "
+        return _result(platform, None, None, False, permanent=True,
+                       error=f"The post's id was not recorded, so the {noun} cannot be "
                              "retried. Add the link to the post by hand.")
 
-    account, error = resolve_target("linkedin", row["account_id"], db_path=db_path)
+    account, error = resolve_target(platform, row["account_id"], db_path=db_path)
     if error:
-        return _result("linkedin", row["account_id"], None, False, error=error, permanent=True)
+        return _result(platform, row["account_id"], None, False, error=error, permanent=True)
     account_id = account["id"] if account is not None else None
 
-    client, token, failure = _linkedin_session(account_id, account, db_path)
+    client, token, failure = _SESSIONS[platform](account_id, account, db_path)
     if failure:
         return failure
 
     note = _post_first_comment(
-        client, token, state["text"], state["post_urn"], standalone_id, db_path)
-    outcome = _result("linkedin", account_id, account, note["status"] == "posted",
+        client, token, state["text"], state["post_urn"], standalone_id, db_path,
+        platform=platform, account_id=account_id)
+    outcome = _result(platform, account_id, account, note["status"] == "posted",
                       error=note["error"])
     outcome["first_comment"] = note
     return outcome
@@ -497,7 +644,12 @@ def _threads_session(account_id, account, db_path):
 
 
 def _threads(account_id, account, text, image_url, standalone_id, social_id,
-             article_title, db_path, video_url=None):
+             article_title, db_path, video_url=None, link_in_comment=None):
+    text, reply_text, kept, failure = _split_for_link_reply(
+        "threads", account, text, link_in_comment, standalone_id, db_path)
+    if failure:
+        return failure
+
     client, token, failure = _threads_session(account_id, account, db_path)
     if failure:
         return failure
@@ -509,7 +661,9 @@ def _threads(account_id, account, text, image_url, standalone_id, social_id,
         result = client.publish_image_post(token["access_token"], body, image_url)
     else:
         result = client.publish_text_post(token["access_token"], body)
-    return _from_client("threads", account_id, account, result)
+    outcome = _from_client("threads", account_id, account, result)
+    return _follow_with_link_reply("threads", outcome, result.get("post_id") if result else None,
+                                   client, token, reply_text, kept, standalone_id, account_id, db_path)
 
 
 def _twitter_session(account_id, account, db_path):
@@ -543,7 +697,12 @@ def _twitter_session(account_id, account, db_path):
 
 
 def _twitter(account_id, account, text, image_url, standalone_id, social_id,
-             article_title, db_path, video_url=None):
+             article_title, db_path, video_url=None, link_in_comment=None):
+    text, reply_text, kept, failure = _split_for_link_reply(
+        "twitter", account, text, link_in_comment, standalone_id, db_path)
+    if failure:
+        return failure
+
     client, token, failure = _twitter_session(account_id, account, db_path)
     if failure:
         return failure
@@ -559,7 +718,9 @@ def _twitter(account_id, account, text, image_url, standalone_id, social_id,
         )
     else:
         result = client.create_post(access_token=token["access_token"], text=body)
-    return _from_client("twitter", account_id, account, result)
+    outcome = _from_client("twitter", account_id, account, result)
+    return _follow_with_link_reply("twitter", outcome, result.get("tweet_id") if result else None,
+                                   client, token, reply_text, kept, standalone_id, account_id, db_path)
 
 
 def _facebook_session(account_id, account, db_path):

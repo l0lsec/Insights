@@ -820,7 +820,7 @@ def actions_functions(source):
              "noteCardLeftList",
              "deletePost", "postNowConfirmText", "publishAllConfirmText", "publishCardToAll", "queueCardToAll",
              "publishCardPlatform", "markChipPosted", "postedUrlFrom", "platformConnected",
-             "noteFirstComment", "renderLinkCommentState",
+             "noteFirstComment", "renderLinkCommentState", "linkCommentNoun",
              "adjustPostCountBadge", "loadMoreControls", "setLoadMoreLabels", "cardPostIds", "cardPlatforms"]
     return (platform_tables(source) + "\n" + lift(source, names)
             + "\nvar searchReplacePostData = [];\nvar openSearchEdits = {};\n")

@@ -350,14 +350,16 @@ def section_off():
                   f"{name} / {kind}: the result must have only the keys it always had: {sorted(result)}")
             check(state_of(database, pid) is None, f"{name}: nothing may be recorded about a comment")
 
-    # other platforms never see it, even when a caller asks
+    # a platform that does not take it never sees it, even when a caller asks
+    # (Threads and X do take it: check_link_reply.py covers them)
     database, web, publisher, client, ids, rec, clients = rig()
-    connect(database, "threads", "th-1", "Thr")
-    out = publisher.publish("threads", None, content=content, link_in_comment=True, db_path=database.DB_PATH)
-    check(out["success"] and set(out) == LEGACY_RESULT_KEYS, f"threads result changed: {sorted(out)}")
-    check(clients["threads"].calls == [{"kind": "text", "token": "token-threads-th-1", "text": content}],
-          f"Threads must get the copy untouched, link included: {clients['threads'].calls}")
-    check(rec.calls == [], "LinkedIn must not be called for a Threads post")
+    connect(database, "facebook", "fb-1", "Page")
+    out = publisher.publish("facebook", None, content=content, link_in_comment=True, db_path=database.DB_PATH)
+    check(out["success"] and set(out) == LEGACY_RESULT_KEYS, f"facebook result changed: {sorted(out)}")
+    check(clients["facebook"].calls == [{"kind": "text", "token": "token-facebook-fb-1", "page": "fb-1",
+                                         "text": content}],
+          f"Facebook must get the copy untouched, link included: {clients['facebook'].calls}")
+    check(rec.calls == [], "LinkedIn must not be called for a Facebook post")
 
     # a failed post stays a failed post, with no comment attempt
     database, web, publisher, client, ids, rec, clients = rig()
@@ -881,11 +883,12 @@ def section_routes():
           and setting(a) == 0, "the JSON form must work too")
     check(setting(b) == 0, "one account's setting must not touch another")
 
-    threads_account = connect(database, "threads", "th-1", "Thr")
-    reply = account(threads_account, "true")
-    check(reply.status_code == 400 and "LinkedIn" in reply.get_json()["error"], f"only LinkedIn accounts: {reply.get_json()}")
-    check(database.get_social_account(threads_account, db_path=P)["link_in_comment"] in (0, None),
-          "a Threads account must not be switched on")
+    facebook_account = connect(database, "facebook", "fb-1", "Page")
+    reply = account(facebook_account, "true")
+    check(reply.status_code == 400 and "LinkedIn, Threads or X" in reply.get_json()["error"],
+          f"only LinkedIn, Threads and X accounts: {reply.get_json()}")
+    check(database.get_social_account(facebook_account, db_path=P)["link_in_comment"] in (0, None),
+          "a Facebook account must not be switched on")
     check(account(999999, "true").status_code == 404, "unknown account -> 404")
 
     listing = client.get("/accounts/list").get_json()
@@ -893,7 +896,7 @@ def section_routes():
     check(summaries and all("link_in_comment" in s for s in summaries), f"the accounts list must carry the setting: {summaries}")
 
     print("routes: the card route sets every LinkedIn row of the card and nothing else and refuses bad input "
-          "unwritten; ticking and bulk-adding a LinkedIn target inherit it; the account route is LinkedIn-only")
+          "unwritten; ticking and bulk-adding a LinkedIn target inherit it; the account route refuses Facebook")
     print("LINK_COMMENT_ROUTES_OK")
 
 
@@ -1013,43 +1016,43 @@ def section_ui():
     # a LinkedIn card: the control, each state
     pid = make_post(database, ids[0], text)
     soup, html = card_soup(client, pid, [pid])
-    box = soup.select_one(f"#li-link-comment-{pid}")
+    box = soup.select_one(f"#link-comment-linkedin-{pid}")
     check(box is not None, "a LinkedIn card must have the link control")
-    select = box.select_one(f"#li-link-mode-{pid}")
+    select = box.select_one(f"#link-mode-linkedin-{pid}")
     options = {o["value"]: o for o in select.find_all("option")}
     check(set(options) == {"default", "on", "off"}, f"the choices are default, on and off: {list(options)}")
     check("selected" in options["default"].attrs and "selected" not in options["on"].attrs, "a new post follows the account")
     check("Account setting (in the post)" in options["default"].get_text(), f"default label: {options['default'].get_text()}")
-    check(f"saveLinkComment({pid})" in select.get("onchange", ""), "the select must save on change")
-    check("stays in the post" in box.select_one(".li-link-hint").get_text(), "hint for links in the post")
-    check(hidden(box.select_one(".li-link-failed")) and hidden(box.select_one(".li-link-posted")), "no state, nothing shown")
-    check(hidden(box.select_one(".li-link-error")), "no error shown at first")
+    check(f"saveLinkComment({pid}, 'linkedin')" in select.get("onchange", ""), "the select must save on change")
+    check("stays in the post" in box.select_one(".link-hint").get_text(), "hint for links in the post")
+    check(hidden(box.select_one(".link-failed")) and hidden(box.select_one(".link-posted")), "no state, nothing shown")
+    check(hidden(box.select_one(".link-error")), "no error shown at first")
 
     database.set_social_account_link_in_comment(ids[0], True, db_path=P)
     soup, _ = card_soup(client, pid, [pid])
-    box = soup.select_one(f"#li-link-comment-{pid}")
+    box = soup.select_one(f"#link-comment-linkedin-{pid}")
     check("Account setting (first comment)" in box.select("option")[0].get_text(),
           "the default option must say what the account does")
-    check("first comment, not in the post" in box.select_one(".li-link-hint").get_text(), "hint for the first comment")
+    check("first comment, not in the post" in box.select_one(".link-hint").get_text(), "hint for the first comment")
 
     for stored, want in ((1, "on"), (0, "off")):
         database.set_standalone_post_link_comment(pid, bool(stored), db_path=P)
         soup, _ = card_soup(client, pid, [pid])
-        selected = [o["value"] for o in soup.select(f"#li-link-mode-{pid} option[selected]")]
+        selected = [o["value"] for o in soup.select(f"#link-mode-linkedin-{pid} option[selected]")]
         check(selected == [want], f"a post set to {want} must show it: {selected}")
-    check("stays in the post" in soup.select_one(".li-link-hint").get_text(), "off beats the account's setting in the hint")
+    check("stays in the post" in soup.select_one(".link-hint").get_text(), "off beats the account's setting in the hint")
 
     # failed: the warning, the reason, the link to paste, and Retry
     database.set_standalone_post_link_comment_state(
         pid, {"status": "failed", "text": LINK, "error": reason, "post_urn": "urn:li:share:1"}, db_path=P)
     soup, _ = card_soup(client, pid, [pid])
-    failed = soup.select_one(f"#li-link-comment-{pid} .li-link-failed")
-    check(not hidden(failed) and reason in failed.get_text() and failed.select_one(".li-link-text").get_text() == LINK,
+    failed = soup.select_one(f"#link-comment-linkedin-{pid} .link-failed")
+    check(not hidden(failed) and reason in failed.get_text() and failed.select_one(".link-text").get_text() == LINK,
           f"a failed comment must show its reason and the link: {failed}")
     button = failed.find("button")
-    check(button and f"retryLinkComment({pid}" in button.get("onclick", "") and "Retry" in button.get_text(),
+    check(button and f"retryLinkComment({pid}, 'linkedin'" in button.get("onclick", "") and "Retry comment" in button.get_text(),
           "a failed comment must offer Retry")
-    check(hidden(soup.select_one(f"#li-link-comment-{pid} .li-link-posted")), "failed is not posted")
+    check(hidden(soup.select_one(f"#link-comment-linkedin-{pid} .link-posted")), "failed is not posted")
 
     # a reason from outside is text, never markup
     nasty = "<script>alert(1)</script><img src=x onerror=alert(2)>"
@@ -1063,25 +1066,26 @@ def section_ui():
     database.set_standalone_post_link_comment_state(
         pid, {"status": "posted", "text": LINK, "comment_id": "c1", "post_urn": "urn:li:share:1"}, db_path=P)
     soup, _ = card_soup(client, pid, [pid])
-    check(not hidden(soup.select_one(f"#li-link-comment-{pid} .li-link-posted"))
-          and hidden(soup.select_one(f"#li-link-comment-{pid} .li-link-failed")), "a posted comment shows the note only")
+    check(not hidden(soup.select_one(f"#link-comment-linkedin-{pid} .link-posted"))
+          and hidden(soup.select_one(f"#link-comment-linkedin-{pid} .link-failed")), "a posted comment shows the note only")
 
-    # a card with no LinkedIn row has no control
-    th = make_post(database, None, text, platform="threads")
-    soup, html = card_soup(client, th, [th])
-    check(soup.select_one(".li-link-comment") is None and "retryLinkComment" not in html,
-          "a card that does not go to LinkedIn must not show the link control")
+    # a card with no LinkedIn, Threads or X row has no control
+    fb = make_post(database, None, text, platform="facebook")
+    soup, html = card_soup(client, fb, [fb])
+    check(soup.select_one(".link-comment") is None and "retryLinkComment" not in html,
+          "a card that goes to none of them must not show the link control")
 
-    # accounts page: the setting only on LinkedIn accounts, and it shows the stored value
-    threads_account = connect(database, "threads", "th-1", "Thr")
+    # accounts page: the setting on LinkedIn accounts (and Threads and X: check_link_reply.py),
+    # never on Facebook, and it shows the stored value
+    connect(database, "facebook", "fb-1", "Page")
     database.set_social_account_link_in_comment(ids[1], False, db_path=P)
     from bs4 import BeautifulSoup
     page = client.get("/accounts")
     check(page.status_code == 200, f"the accounts page did not render: {page.status_code}")
     soup = BeautifulSoup(page.get_data(as_text=True), "html.parser")
     linkedin_rows = soup.select('.account-platform[data-platform="linkedin"] .account-row')
-    threads_rows = soup.select('.account-platform[data-platform="threads"] .account-row')
-    check(len(linkedin_rows) == 2 and threads_rows, "setup: two LinkedIn rows and a Threads row")
+    facebook_rows = soup.select('.account-platform[data-platform="facebook"] .account-row')
+    check(len(linkedin_rows) == 2 and facebook_rows, "setup: two LinkedIn rows and a Facebook row")
     states = {}
     for row in linkedin_rows:
         toggle = row.select_one("input.link-in-comment-toggle")
@@ -1090,12 +1094,12 @@ def section_ui():
               "the toggle must call setLinkInComment with its account")
         states[int(row["data-account-id"])] = toggle.has_attr("checked")
     check(states == {ids[0]: True, ids[1]: False}, f"the toggles must show each account's setting: {states}")
-    check(all(row.select_one("input.link-in-comment-toggle") is None for row in threads_rows),
-          "only LinkedIn accounts offer it")
+    check(all(row.select_one("input.link-in-comment-toggle") is None for row in facebook_rows),
+          "a Facebook account does not offer it")
 
     print("ui: the card shows the choice with the account default spelled out, the failure with Retry and "
-          "the link, the posted note, escapes a hostile reason, and only on LinkedIn cards; the Accounts "
-          "page offers the setting on LinkedIn accounts only, showing each stored value")
+          "the link, the posted note, escapes a hostile reason, and not on a card for none of its platforms; "
+          "the Accounts page offers the setting on LinkedIn accounts and not Facebook, showing each stored value")
     print("LINK_COMMENT_UI_OK")
 
 
@@ -1118,6 +1122,7 @@ def fn_source(html, name):
 
 
 JS_FUNCTIONS = (
+    "linkCommentBox", "linkCommentNoun",
     "showLinkCommentError", "renderLinkCommentState", "renderLinkComment", "saveLinkComment",
     "retryLinkComment", "noteFirstComment", "publishCardPlatform", "publishCardToAll",
     "markChipPosted", "postedUrlFrom",
@@ -1144,16 +1149,17 @@ const node = (extra) => {
 };
 // one LinkedIn card's control: the same classes the template draws
 function makeBox() {
-  const box = node();
+  const box = node({ dataset: { platform: 'linkedin', noun: 'comment' } });
   box.children = {
-    '.li-link-error': node({ classes: new Set(['d-none']) }),
-    '.li-link-hint': node({ textContent: 'The link stays in the post.' }),
-    '.li-link-failed': node({ classes: new Set(['d-none']) }),
-    '.li-link-posted': node({ classes: new Set(['d-none']) }),
+    '.link-error': node({ classes: new Set(['d-none']) }),
+    '.link-hint': node({ textContent: 'The link stays in the post.' }),
+    '.link-failed': node({ classes: new Set(['d-none']) }),
+    '.link-posted': node({ classes: new Set(['d-none']) }),
+    '.link-kept': node({ classes: new Set(['d-none']) }),
     'select': node({ value: 'default' }),
   };
-  const failed = box.children['.li-link-failed'];
-  failed.children = { '.li-link-error-text': node(), '.li-link-text': node() };
+  const failed = box.children['.link-failed'];
+  failed.children = { '.link-error-text': node(), '.link-text': node() };
   return box;
 }
 
@@ -1164,7 +1170,7 @@ function world(opts = {}) {
   chip.appended = [];
   chip.appendChild = (c) => chip.appended.push(c);
   const postItem = { dataset: { postIds: '5,6' },
-    querySelector: (sel) => sel === '.li-link-comment' ? box : (sel.startsWith('.platform-chip') ? chip : null) };
+    querySelector: (sel) => sel === '.link-comment[data-platform="linkedin"]' ? box : (sel.startsWith('.platform-chip') ? chip : null) };
   const select = box ? box.children['select'] : null;
   const ctx = {
     FormData: FakeFormData,
@@ -1174,7 +1180,7 @@ function world(opts = {}) {
     alert: (m) => log.alerts.push(m),
     showToast: (m, kind) => log.toasts.push([m, kind]),
     document: {
-      getElementById: (id) => id === 'li-link-comment-5' ? box : (id === 'li-link-mode-5' ? select : null),
+      getElementById: (id) => id === 'link-comment-linkedin-5' ? box : (id === 'link-mode-linkedin-5' ? select : null),
       createElement: () => node(),
     },
     fetch: async (url, init) => {
@@ -1189,13 +1195,13 @@ function world(opts = {}) {
   return { ctx, log, box, postItem, chip, select };
 }
 const view = (box) => ({
-  hint: box.children['.li-link-hint'].textContent,
-  errorText: box.children['.li-link-error'].textContent,
-  errorHidden: box.children['.li-link-error'].classes.has('d-none'),
-  failedHidden: box.children['.li-link-failed'].classes.has('d-none'),
-  failedReason: box.children['.li-link-failed'].children['.li-link-error-text'].textContent,
-  failedLink: box.children['.li-link-failed'].children['.li-link-text'].textContent,
-  postedHidden: box.children['.li-link-posted'].classes.has('d-none'),
+  hint: box.children['.link-hint'].textContent,
+  errorText: box.children['.link-error'].textContent,
+  errorHidden: box.children['.link-error'].classes.has('d-none'),
+  failedHidden: box.children['.link-failed'].classes.has('d-none'),
+  failedReason: box.children['.link-failed'].children['.link-error-text'].textContent,
+  failedLink: box.children['.link-failed'].children['.link-text'].textContent,
+  postedHidden: box.children['.link-posted'].classes.has('d-none'),
   select: box.children['select'].value,
 });
 
@@ -1244,7 +1250,7 @@ const out = {};
     link_comment: { mode: 'on', effective: true, account_default: false, state: POSTED } } }] });
   w.ctx.renderLinkCommentState(w.box, FAILED);
   const btn = { disabled: false };
-  const pending = w.ctx.retryLinkComment(5, btn);
+  const pending = w.ctx.retryLinkComment(5, 'linkedin', btn);
   out.retryDuring = btn.disabled;
   out.retryOk = { returned: await pending, sent: w.log.fetch, view: view(w.box), toasts: w.log.toasts, btn: btn.disabled };
 
@@ -1252,14 +1258,14 @@ const out = {};
     link_comment: { mode: 'on', effective: true, account_default: false,
                     state: { status: 'failed', error: 'no luck', text: 'https://blog.test/post-1' } } } }] });
   w.ctx.renderLinkCommentState(w.box, FAILED);
-  out.retryRefused = { returned: await w.ctx.retryLinkComment(5, { disabled: false }), view: view(w.box) };
+  out.retryRefused = { returned: await w.ctx.retryLinkComment(5, 'linkedin', { disabled: false }), view: view(w.box) };
 
   w = world({ replies: [{ status: 400, body: { error: 'There is no failed link comment to retry for this post' } }] });
-  out.retryNothing = { returned: await w.ctx.retryLinkComment(5, null), view: view(w.box) };
+  out.retryNothing = { returned: await w.ctx.retryLinkComment(5, 'linkedin', null), view: view(w.box) };
 
   w = world({ fetchThrows: true });
   const btn2 = { disabled: false };
-  out.retryOffline = { returned: await w.ctx.retryLinkComment(5, btn2), view: view(w.box), btn: btn2.disabled };
+  out.retryOffline = { returned: await w.ctx.retryLinkComment(5, 'linkedin', btn2), view: view(w.box), btn: btn2.disabled };
 
   // --- a publish result's comment
   w = world();
@@ -1335,7 +1341,7 @@ def section_js():
     s = out["saveOk"]
     check(s["returned"] is True and len(s["sent"]) == 1, f"saving: {s}")
     check(s["sent"][0]["url"] == "/compose/post/5/link-comment" and s["sent"][0]["method"] == "POST"
-          and fields(s["sent"][0]) == [["mode", "on"], ["post_ids", "5,6"]],
+          and fields(s["sent"][0]) == [["mode", "on"], ["platform", "linkedin"], ["post_ids", "5,6"]],
           f"saving must send the mode and the whole card to the card route: {s['sent']}")
     check(s["view"]["hint"] == on_hint and s["view"]["select"] == "on" and s["view"]["errorHidden"]
           and s["view"]["failedHidden"] and s["view"]["postedHidden"], f"saving 'on' redraw: {s['view']}")
@@ -1366,7 +1372,7 @@ def section_js():
     r = out["retryOk"]
     check(r["returned"] is True and r["btn"] is False, f"a retry that works: {r}")
     check(len(r["sent"]) == 1 and r["sent"][0]["url"] == "/compose/post/5/link-comment/retry"
-          and fields(r["sent"][0]) == [["post_ids", "5,6"]], f"the retry request: {r['sent']}")
+          and fields(r["sent"][0]) == [["platform", "linkedin"], ["post_ids", "5,6"]], f"the retry request: {r['sent']}")
     check(r["view"]["failedHidden"] and not r["view"]["postedHidden"] and r["toasts"] == [["Link posted as the first comment", "success"]],
           f"a retry that works must show it posted: {r}")
     r = out["retryRefused"]

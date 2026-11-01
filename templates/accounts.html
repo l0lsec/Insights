@@ -141,15 +141,33 @@
             <div class="account-handle">
                 {% if account.handle %}{{ account.handle }}{% else %}{{ account.display_name or account.external_id }}{% endif %}
             </div>
-            {% if entry.platform == 'linkedin' %}
-            {# LinkedIn holds back posts that link out. With this on, a post's link goes out as
-               its first comment instead; any one post can still choose otherwise in Compose. #}
-            <label class="account-option" title="LinkedIn holds back posts that link out. With this on, each post's link is posted as its first comment instead. A post can still choose otherwise.">
+            {% if entry.platform in ('linkedin', 'threads', 'twitter') %}
+            {# LinkedIn, Threads and X show posts that link out to fewer people. With this on, a
+               post's link goes out as its first comment (a first reply on Threads and X) instead;
+               any one post can still choose otherwise in Compose. #}
+            {% set noun = 'comment' if entry.platform == 'linkedin' else 'reply' %}
+            <label class="account-option" title="{{ entry.name }} shows posts that link out to fewer people. With this on, each post's link is posted as its first {{ noun }} instead. A post can still choose otherwise.">
                 <input type="checkbox" class="link-in-comment-toggle"
                        {% if account.link_in_comment %}checked{% endif %}
                        onchange="setLinkInComment({{ account.id }}, this)">
-                Post links as the first comment
+                Post links as the first {{ noun }}
             </label>
+            {% if entry.platform == 'threads' %}
+            {# Plain Connect does not ask for the reply permission, so a Threads account that
+               should post its links as replies is reconnected once with it. #}
+            <div class="account-handle link-reply-permission">
+                Replying needs the threads_manage_replies permission.
+                <a href="/threads/auth?replies=1" class="account-configure-link">Reconnect with reply permission</a>
+            </div>
+            {% endif %}
+            {% if account.link_reply_blocked %}
+            {# The platform refused this account's last link comment for want of a permission,
+               so its links stay in the post until it is reconnected (or this is saved again). #}
+            <div class="account-warn link-reply-blocked">
+                ⚠ Links stay in the post for now: {{ entry.name }} refused the last link {{ noun }}.
+                {{ account.link_reply_blocked.error }}
+            </div>
+            {% endif %}
             {% endif %}
             {% if account.needs_attention %}
             <div class="account-warn">

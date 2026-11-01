@@ -208,7 +208,35 @@ class TwitterClient:
         payload: dict = {"text": text}
         if media_ids:
             payload["media"] = {"media_ids": media_ids}
+        return self._send_post(access_token, payload)
 
+    def create_reply(
+        self,
+        access_token: str,
+        text: str,
+        reply_to: str,
+    ) -> dict:
+        """Post ``text`` as a reply to the post ``reply_to``.
+
+        Used to post a link as the first reply to one's own post. X lets apps
+        on self-serve tiers reply only where they were mentioned or quoted, but a
+        reply to the account's own post is a thread and is not restricted.
+        Nothing is truncated (cutting a link would break it), so the caller
+        checks the length, and a reply with no target is refused here rather
+        than sent as a new post.
+        """
+        if not str(reply_to or "").strip():
+            return {
+                "success": False,
+                "error": {"message": "No post to reply to"},
+            }
+        return self._send_post(access_token, {
+            "text": text,
+            "reply": {"in_reply_to_tweet_id": str(reply_to)},
+        })
+
+    def _send_post(self, access_token: str, payload: dict) -> dict:
+        """POST one tweet body and read X's answer; shared by posts and replies."""
         try:
             response = requests.post(
                 TWITTER_TWEETS_URL,

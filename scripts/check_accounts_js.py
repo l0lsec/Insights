@@ -351,8 +351,8 @@ COMPOSE_FUNCTIONS = (
     "queueAllFromCard", "markChipPosted", "postedUrlFrom", "togglePostPlatform",
     # the requests the card's publish-all and queue-all share with Find & Replace
     "publishAllConfirmText", "publishCardToAll", "queueCardToAll",
-    # a LinkedIn post that lands but loses its link comment is reported by both publishers
-    "noteFirstComment", "renderLinkCommentState",
+    # a post that lands but loses its link comment (or reply) is reported by both publishers
+    "noteFirstComment", "renderLinkCommentState", "linkCommentNoun",
 )
 
 
