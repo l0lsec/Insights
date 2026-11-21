@@ -450,12 +450,46 @@ OUTREACH_GATES = [
 
 # check_*.py files that are deliberately not gates, with the reason. Empty is the
 # healthy state: a script that is not a gate should not carry the check_ prefix.
+# The Inbox: one conversation per person, and Instagram and Facebook DMs.
+INBOX_GATES = [
+    ("check_inbox.py", "INBOX_SCHEMA_OK",
+     "the inbox tables upgrade an old database, and a conversation's state follows a person who becomes a lead or merges",
+     ("schema",)),
+    ("check_inbox.py", "INBOX_STATE_OK",
+     "inbox filters, status rules (reopen on a new message, snooze ends on time), read marks and refusals hold",
+     ("state",)),
+    ("check_inbox.py", "INBOX_REPLY_OK",
+     "an Inbox reply goes through the Outreach sender once, with every rule, and a note sends nothing",
+     ("reply",)),
+    ("check_inbox.py", "INBOX_DM_READ_OK",
+     "the worker reads Instagram and Facebook DMs into leads and conversations, and never sends",
+     ("dm_read",)),
+    ("check_inbox.py", "INBOX_DM_SEND_OK",
+     "a DM matches the Send API and is refused outside Meta's 24-hour window and the other rules",
+     ("dm_send",)),
+    ("check_inbox.py", "INBOX_DM_AUTH_OK",
+     "Reconnect with DM permissions adds messaging scopes; plain Connect and engagement are unchanged",
+     ("dm_auth",)),
+    ("check_inbox.py", "INBOX_CANNED_OK",
+     "canned replies are created, edited and deleted with unique, validated short codes",
+     ("canned",)),
+    ("check_inbox.py", "INBOX_UI_OK",
+     "the Inbox page renders every control wired to real endpoints, and its script parses",
+     ("ui",)),
+    ("check_inbox.py", "INBOX_DOCS_OK",
+     "every Inbox section is registered, and the README and .env.example describe it",
+     ("docs",)),
+    ("check_inbox.py", "INBOX_NO_DASHES_OK",
+     "the change carries no em dash",
+     ("dashes",)),
+]
+
 NOT_GATES = {}
 
 ALL_GATES = (ACCOUNT_GATES + ACCOUNT_JS_GATES + LIBRARY_GATES + COMPOSE_GATES
              + VIDEO_GATES + MANUAL_POST_GATES + QUEUE_GATES + PAGING_GATES
              + IG_PEOPLE_GATES + FIND_RESULTS_GATES + LINK_COMMENT_GATES
-             + OUTREACH_GATES)
+             + OUTREACH_GATES + INBOX_GATES)
 
 
 def _unpack(entry):

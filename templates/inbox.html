@@ -1,0 +1,1021 @@
+{% extends "base.html" %}
+{% block title %}Inbox | Insights{% endblock %}
+{% block header %}Inbox{% endblock %}
+{% block subtitle %}<p class="page-subtitle">
+    Texts, comments and DMs from everyone, one conversation per person. Reply on any channel
+    they used; the same rules as Outreach decide what can go out.
+</p>{% endblock %}
+{% block page_actions %}
+    <button class="btn btn-outline-secondary" id="check-now-btn" type="button">Check for new messages</button>
+    <button class="btn btn-outline-secondary" type="button" data-bs-toggle="modal" data-bs-target="#canned-modal">Canned replies</button>
+    <button class="btn btn-outline-secondary" type="button" data-bs-toggle="modal" data-bs-target="#channels-modal">Channels</button>
+{% endblock %}
+{% block content %}
+<style>
+    .inbox-shell { display: grid; grid-template-columns: 340px minmax(0, 1fr) 270px; gap: 0;
+        background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg);
+        box-shadow: var(--shadow-sm); height: calc(100vh - 220px); min-height: 520px; overflow: hidden; }
+    .inbox-pane { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+    .inbox-list-pane { border-right: 1px solid var(--line); }
+    .inbox-contact-pane { border-left: 1px solid var(--line); padding: 16px; overflow-y: auto; }
+    .inbox-filters { padding: 12px; border-bottom: 1px solid var(--line); display: grid; gap: 8px; }
+    .inbox-status-tabs { display: flex; gap: 4px; flex-wrap: wrap; }
+    .inbox-status-tabs .btn { min-height: 36px; }
+    .inbox-filter-row { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+    .inbox-filter-row .form-select { width: auto; flex: 1 1 90px; min-height: 36px; }
+    #conversation-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; }
+    .conv-item { display: block; width: 100%; text-align: left; border: 0; background: transparent;
+        border-bottom: 1px solid var(--line); padding: 12px 14px; min-height: 64px; color: var(--text); }
+    .conv-item:hover { background: var(--brand-50); }
+    .conv-item[aria-current="true"] { background: var(--brand-100); box-shadow: inset 3px 0 0 var(--brand-500); }
+    .conv-top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+    .conv-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .conv-item.unread .conv-name::after { content: ""; display: inline-block; width: 8px; height: 8px;
+        border-radius: 50%; background: var(--brand-500); margin-left: 6px; vertical-align: middle; }
+    .conv-time { color: var(--muted); font-size: .78rem; white-space: nowrap; }
+    .conv-preview { color: var(--muted); font-size: .86rem; overflow: hidden; text-overflow: ellipsis;
+        white-space: nowrap; margin-top: 2px; }
+    .conv-meta { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+    .chip { display: inline-block; font-size: .72rem; padding: 1px 7px; border-radius: 999px;
+        border: 1px solid var(--line-strong); color: var(--muted); background: var(--surface); }
+    .chip-label { border-color: var(--brand-300); color: var(--brand-700); background: var(--brand-50); }
+    .chip-wait { border-color: var(--brand-400); color: var(--brand-700); }
+    .inbox-thread-head { padding: 12px 16px; border-bottom: 1px solid var(--line); display: flex;
+        gap: 10px; align-items: center; flex-wrap: wrap; }
+    .inbox-thread-head h2 { font-size: 1.1rem; margin: 0; flex: 1 1 160px; min-width: 0;
+        overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .inbox-thread-head .btn, .inbox-thread-head .form-select { min-height: 40px; }
+    #thread { flex: 1; overflow-y: auto; padding: 16px; background: var(--canvas); }
+    .msg { max-width: 78%; margin-bottom: 12px; }
+    .msg-in { margin-right: auto; }
+    .msg-out { margin-left: auto; }
+    .msg-bubble { padding: 9px 12px; border-radius: 12px; white-space: pre-wrap; word-wrap: break-word;
+        background: var(--surface); border: 1px solid var(--line); }
+    .msg-out .msg-bubble { background: var(--brand-50); border-color: var(--brand-300); }
+    .msg-failed .msg-bubble { border-style: dashed; }
+    .msg-note { margin-left: auto; margin-right: auto; max-width: 90%; }
+    .msg-note .msg-bubble { border-style: dashed; }
+    .msg-meta { font-size: .74rem; color: var(--muted); margin-top: 3px; display: flex; gap: 6px;
+        flex-wrap: wrap; }
+    .msg-out .msg-meta { justify-content: flex-end; }
+    .msg-context { font-size: .78rem; color: var(--muted); margin-bottom: 3px; }
+    .composer { border-top: 1px solid var(--line); padding: 12px 16px; background: var(--surface); }
+    .composer-modes { display: flex; gap: 4px; margin-bottom: 8px; align-items: center; flex-wrap: wrap; }
+    .composer-modes .btn { min-height: 36px; }
+    .composer textarea { resize: vertical; min-height: 84px; }
+    .composer.note-mode textarea { border-style: dashed; }
+    .composer-foot { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+        margin-top: 8px; flex-wrap: wrap; }
+    #composer-send { min-width: 120px; min-height: 44px; }
+    .canned-picker { position: absolute; left: 0; right: 0; bottom: 100%; margin-bottom: 4px;
+        background: var(--surface); border: 1px solid var(--line-strong); border-radius: var(--radius);
+        box-shadow: var(--shadow-md); max-height: 220px; overflow-y: auto; z-index: 5; }
+    .canned-picker button { display: block; width: 100%; text-align: left; border: 0; background: transparent;
+        padding: 8px 12px; min-height: 40px; }
+    .canned-picker button[aria-selected="true"], .canned-picker button:hover { background: var(--brand-50); }
+    .inbox-empty { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+        color: var(--muted); text-align: center; padding: 24px; }
+    .contact-field { margin-bottom: 12px; }
+    .contact-field .label { font-size: .74rem; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+    .inbox-back { display: none; }
+    @media (max-width: 1199px) {
+        .inbox-shell { grid-template-columns: 320px minmax(0, 1fr); }
+        .inbox-contact-pane { display: none; }
+    }
+    @media (max-width: 767px) {
+        .inbox-shell { grid-template-columns: minmax(0, 1fr); height: auto; min-height: 70vh; }
+        .inbox-shell.show-thread .inbox-list-pane { display: none; }
+        .inbox-shell:not(.show-thread) .inbox-thread-pane { display: none; }
+        .inbox-list-pane { border-right: 0; }
+        #conversation-list { max-height: none; }
+        #thread { max-height: 60vh; }
+        .inbox-back { display: inline-block; }
+        .msg { max-width: 92%; }
+    }
+</style>
+
+{% if not worker_enabled %}
+<div class="alert alert-info" id="worker-off-banner">
+    New messages are read when you press <strong>Check for new messages</strong>. To read them on
+    their own every {{ dm_minutes }} minutes, set <code>OUTREACH_ENABLED=1</code>.
+</div>
+{% endif %}
+
+<div class="inbox-shell" id="inbox-shell">
+    {# ── Conversation list ── #}
+    <section class="inbox-pane inbox-list-pane" aria-label="Conversations">
+        <div class="inbox-filters">
+            <input type="search" class="form-control" id="inbox-search" placeholder="Search names, numbers, messages"
+                   aria-label="Search conversations">
+            <div class="inbox-status-tabs" role="tablist" aria-label="Status">
+                <button type="button" class="btn btn-sm btn-secondary" role="tab" data-status="open" aria-selected="true">Open <span class="count" data-count="open"></span></button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" role="tab" data-status="snoozed" aria-selected="false">Snoozed <span class="count" data-count="snoozed"></span></button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" role="tab" data-status="resolved" aria-selected="false">Resolved <span class="count" data-count="resolved"></span></button>
+                <button type="button" class="btn btn-sm btn-outline-secondary" role="tab" data-status="all" aria-selected="false">All</button>
+            </div>
+            <div class="inbox-filter-row">
+                <select class="form-select form-select-sm" id="filter-assignee" aria-label="Assigned to">
+                    <option value="all">Everyone's</option>
+                    <option value="mine">Mine</option>
+                    <option value="unassigned">Unassigned</option>
+                </select>
+                <select class="form-select form-select-sm" id="filter-channel" aria-label="Channel">
+                    <option value="">All channels</option>
+                    {% for key, name in channel_names.items() %}<option value="{{ key }}">{{ name }}</option>{% endfor %}
+                </select>
+                <select class="form-select form-select-sm" id="filter-label" aria-label="Label">
+                    <option value="">All labels</option>
+                    {% for label in labels %}<option value="{{ label }}">{{ label }}</option>{% endfor %}
+                </select>
+                <div class="form-check mb-0">
+                    <input class="form-check-input" type="checkbox" id="filter-needs-reply">
+                    <label class="form-check-label small" for="filter-needs-reply">Needs reply</label>
+                </div>
+            </div>
+        </div>
+        <ul id="conversation-list" aria-live="polite"></ul>
+    </section>
+
+    {# ── One conversation ── #}
+    <section class="inbox-pane inbox-thread-pane" aria-label="Conversation">
+        <div class="inbox-empty" id="thread-empty">
+            <p class="mb-1 fw-semibold">Pick a conversation</p>
+            <p class="small mb-0" id="thread-empty-hint">Everyone who texted, commented or sent a DM shows up on the left.</p>
+        </div>
+        <div class="inbox-pane d-none" id="thread-view" style="flex:1">
+            <div class="inbox-thread-head">
+                <button class="btn btn-outline-secondary inbox-back" type="button" id="back-btn">Back</button>
+                <h2 id="thread-name"></h2>
+                <span class="chip" id="thread-status"></span>
+                <select class="form-select" id="assign-select" aria-label="Assign to" style="width:auto">
+                    <option value="">Unassigned</option>
+                    {% for u in users %}<option value="{{ u.id }}">{{ u.name }}{% if u.id == me %} (you){% endif %}</option>{% endfor %}
+                </select>
+                <div class="dropdown">
+                    <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown"
+                            data-bs-auto-close="outside" aria-expanded="false" id="labels-btn">Labels</button>
+                    <div class="dropdown-menu p-3" style="min-width: 240px" id="labels-menu">
+                        <div id="labels-options" class="mb-2"></div>
+                        <div class="input-group input-group-sm">
+                            <input type="text" class="form-control" id="label-new" maxlength="30" placeholder="New label"
+                                   aria-label="New label">
+                            <button class="btn btn-outline-secondary" type="button" id="label-add">Add</button>
+                        </div>
+                        <div class="small text-danger mt-1" id="labels-error" role="alert"></div>
+                    </div>
+                </div>
+                <div class="dropdown" id="snooze-wrap">
+                    <button class="btn btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown"
+                            aria-expanded="false" id="snooze-btn">Snooze</button>
+                    <ul class="dropdown-menu dropdown-menu-end">
+                        <li><button class="dropdown-item" type="button" data-snooze="1h">For an hour</button></li>
+                        <li><button class="dropdown-item" type="button" data-snooze="tomorrow">Until tomorrow, 9:00</button></li>
+                        <li><button class="dropdown-item" type="button" data-snooze="next_week">Until next Monday, 9:00</button></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li class="px-3 pb-2">
+                            <label class="form-label small mb-1" for="snooze-custom">Until a date and time</label>
+                            <div class="input-group input-group-sm">
+                                <input type="datetime-local" class="form-control" id="snooze-custom">
+                                <button class="btn btn-outline-secondary" type="button" id="snooze-custom-btn">Snooze</button>
+                            </div>
+                        </li>
+                    </ul>
+                </div>
+                <button class="btn btn-primary" type="button" id="resolve-btn">Resolve</button>
+            </div>
+            <div class="small px-3 py-1 text-muted d-flex justify-content-between" id="thread-sub">
+                <span id="thread-channels"></span>
+                <button class="btn btn-link btn-sm p-0" type="button" id="unread-btn">Mark unread</button>
+            </div>
+            <div id="thread" aria-live="polite"></div>
+            <div class="composer" id="composer">
+                <div class="composer-modes" role="tablist" aria-label="Reply or note">
+                    <button type="button" class="btn btn-sm btn-secondary" id="mode-reply" role="tab" aria-selected="true">Reply</button>
+                    <button type="button" class="btn btn-sm btn-outline-secondary" id="mode-note" role="tab" aria-selected="false">Private note</button>
+                    <label class="small text-muted ms-2" for="reply-channel" id="reply-channel-label">on</label>
+                    <select class="form-select form-select-sm" id="reply-channel" style="width:auto" aria-label="Reply channel"></select>
+                </div>
+                <div class="small text-muted mb-1" id="composer-hint"></div>
+                <div class="position-relative">
+                    <div class="canned-picker d-none" id="canned-picker" role="listbox" aria-label="Canned replies"></div>
+                    <textarea class="form-control" id="composer-text" rows="3"
+                              placeholder="Write a reply. Type / for a canned reply."
+                              aria-describedby="composer-hint composer-count"></textarea>
+                </div>
+                <div class="composer-foot">
+                    <div>
+                        <div class="small" id="composer-status" role="status" aria-live="polite"></div>
+                        <div class="small text-muted" id="composer-count"></div>
+                    </div>
+                    <button class="btn btn-primary" type="button" id="composer-send">Send</button>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    {# ── Who they are ── #}
+    <aside class="inbox-contact-pane" aria-label="Contact" id="contact-pane">
+        <p class="text-muted small mb-0" id="contact-empty">Details about the person appear here.</p>
+        <div id="contact-body" class="d-none"></div>
+    </aside>
+</div>
+
+{# ── Canned replies ── #}
+<div class="modal fade" id="canned-modal" tabindex="-1" aria-labelledby="canned-title" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title fs-5" id="canned-title">Canned replies</h2>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <p class="small text-muted">Type <code>/</code> and the short code in any reply to insert one.</p>
+                <form id="canned-form" class="mb-4" novalidate>
+                    <input type="hidden" id="canned-id">
+                    <div class="row g-2">
+                        <div class="col-sm-4">
+                            <label class="form-label small" for="canned-code">Short code</label>
+                            <div class="input-group">
+                                <span class="input-group-text">/</span>
+                                <input class="form-control" id="canned-code" maxlength="30" placeholder="pricing" required>
+                            </div>
+                            <div class="form-text">Letters, digits, dashes or underscores.</div>
+                        </div>
+                        <div class="col-sm-8">
+                            <label class="form-label small" for="canned-content">Reply</label>
+                            <textarea class="form-control" id="canned-content" rows="3" maxlength="2000" required></textarea>
+                        </div>
+                    </div>
+                    <div class="d-flex justify-content-end align-items-center gap-2 mt-2">
+                        <span class="small" id="canned-status" role="status" aria-live="polite"></span>
+                        <button class="btn btn-outline-secondary d-none" type="button" id="canned-cancel">Cancel edit</button>
+                        <button class="btn btn-primary" type="submit" id="canned-save">Add canned reply</button>
+                    </div>
+                </form>
+                <ul class="list-group" id="canned-list"></ul>
+            </div>
+        </div>
+    </div>
+</div>
+
+{# ── Channels ── #}
+<div class="modal fade" id="channels-modal" tabindex="-1" aria-labelledby="channels-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-scrollable">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 class="modal-title fs-5" id="channels-title">Channels</h2>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <ul class="list-group mb-3">
+                    <li class="list-group-item d-flex justify-content-between align-items-start gap-2">
+                        <div><strong>Texts</strong><div class="small text-muted">{% if twilio_ready %}Your Twilio number sends and receives.{% else %}Twilio is not set up, so texts cannot be sent from here.{% endif %}</div></div>
+                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('outreach_page', tab='setup') }}">Setup</a>
+                    </li>
+                    <li class="list-group-item d-flex justify-content-between align-items-start gap-2">
+                        <div><strong>Comments</strong><div class="small text-muted">Replies and comments on your posts are read by Outreach.</div></div>
+                        <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('outreach_page', tab='setup') }}">Setup</a>
+                    </li>
+                </ul>
+                <h3 class="fs-6">Direct messages</h3>
+                <ul class="list-group" id="dm-sources">
+                    {% for s in sources %}
+                    <li class="list-group-item" data-source="{{ s.channel }}:{{ s.account_id }}">
+                        <div class="d-flex justify-content-between align-items-start gap-2">
+                            <div>
+                                <strong>{{ s.name }}</strong> <span class="text-muted">{{ s.handle }}</span>
+                                <div class="small">
+                                    {% if s.state == 'ok' %}Reading DMs.{% elif s.state == 'needs_permission' %}Needs permission: {{ s.friendly }}{% elif s.state == 'needs_reconnect' %}Reconnect needed: {{ s.friendly }}{% elif s.state == 'unchecked' %}Not read yet.{% else %}{{ s.friendly }}{% endif %}
+                                </div>
+                            </div>
+                            <a class="btn btn-sm {% if s.state in ('needs_permission', 'needs_reconnect') %}btn-outline-primary{% else %}btn-outline-secondary{% endif %} text-nowrap"
+                               href="{{ s.reconnect_url }}">Reconnect with DM permissions</a>
+                        </div>
+                    </li>
+                    {% else %}
+                    <li class="list-group-item small text-muted">Connect an Instagram account or a Facebook Page in
+                        <a href="{{ url_for('accounts_page') }}">Accounts</a> to read its DMs here.</li>
+                    {% endfor %}
+                </ul>
+                <p class="small text-muted mt-3 mb-0">Meta lets an app read and answer DMs only with the messaging
+                    permission (<code>instagram_business_manage_messages</code>, <code>pages_messaging</code>), which
+                    the Meta app must be granted through App Review before anyone other than its own testers can use it.
+                    Replies are allowed within 24 hours of the person's last message.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script id="inbox-data" type="application/json">{{ {
+    "me": me, "users": users, "canned": canned, "channelNames": channel_names
+} | tojson }}</script>
+<script>
+(function () {
+    'use strict';
+    var DATA = JSON.parse(document.getElementById('inbox-data').textContent);
+    var XHR = {'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/json'};
+    var POLL_MS = 30000;
+    var userNames = {};
+    DATA.users.forEach(function (u) { userNames[u.id] = u.name; });
+
+    var state = {
+        filters: {status: 'open', assignee: 'all', channel: '', label: '', needs_reply: false, q: ''},
+        list: [], current: null, detail: null, mode: 'reply', canned: DATA.canned || [],
+        drafts: {}, loadingList: false, pickerIndex: 0, pickerItems: [], undoCanned: null
+    };
+
+    var $ = function (id) { return document.getElementById(id); };
+    function esc(text) {
+        return String(text == null ? '' : text).replace(/[&<>"']/g, function (c) {
+            return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+        });
+    }
+    function when(utc) {
+        if (!utc) return '';
+        var d = new Date(utc.replace(' ', 'T') + 'Z');
+        if (isNaN(d)) return utc;
+        var now = new Date();
+        var mins = Math.round((now - d) / 60000);
+        if (mins < 1) return 'now';
+        if (mins < 60) return mins + 'm';
+        if (mins < 60 * 24 && d.getDate() === now.getDate()) {
+            return d.toLocaleTimeString([], {hour: 'numeric', minute: '2-digit'});
+        }
+        if (mins < 60 * 24 * 6) return d.toLocaleDateString([], {weekday: 'short'});
+        return d.toLocaleDateString([], {month: 'short', day: 'numeric'});
+    }
+    function fullTime(utc) {
+        if (!utc) return '';
+        var d = new Date(utc.replace(' ', 'T') + 'Z');
+        return isNaN(d) ? utc : d.toLocaleString([], {dateStyle: 'medium', timeStyle: 'short'});
+    }
+    function channelName(key) { return DATA.channelNames[key] || key; }
+
+    async function api(url, payload) {
+        var opts = payload === undefined ? {headers: {'X-Requested-With': 'XMLHttpRequest'}}
+            : {method: 'POST', headers: XHR, body: JSON.stringify(payload)};
+        var resp, body;
+        try {
+            resp = await fetch(url, opts);
+        } catch (e) {
+            return {ok: false, status: 0, data: {error: 'Could not reach Insights. Check your connection and try again.'}};
+        }
+        try { body = await resp.json(); } catch (e) { body = {}; }
+        if (!resp.ok && !body.error) body.error = 'Something went wrong (' + resp.status + '). Try again.';
+        return {ok: resp.ok, status: resp.status, data: body};
+    }
+
+    function busy(button, label) {
+        if (!button.dataset.label) button.dataset.label = button.textContent;
+        button.disabled = true;
+        button.textContent = label;
+        return function () { button.disabled = false; button.textContent = button.dataset.label; };
+    }
+
+    function setStatus(el, text, kind) {
+        el.textContent = text || '';
+        el.className = el.className.replace(/\btext-(danger|success|muted)\b/g, '').trim() +
+            (kind === 'error' ? ' text-danger' : kind === 'ok' ? ' text-success' : ' text-muted');
+    }
+
+    // ── List ───────────────────────────────────────────────────────────────
+    function listUrl() {
+        var f = state.filters, params = new URLSearchParams({status: f.status, assignee: f.assignee});
+        if (f.channel) params.set('channel', f.channel);
+        if (f.label) params.set('label', f.label);
+        if (f.needs_reply) params.set('needs_reply', '1');
+        if (f.q) params.set('q', f.q);
+        return '/inbox/conversations?' + params.toString();
+    }
+
+    async function loadList() {
+        state.loadingList = true;
+        var res = await api(listUrl());
+        state.loadingList = false;
+        var list = $('conversation-list');
+        if (!res.ok) {
+            list.innerHTML = '<li class="p-3 small text-danger">' + esc(res.data.error) + '</li>';
+            return;
+        }
+        state.list = res.data.conversations;
+        Object.keys(res.data.counts).forEach(function (k) {
+            var el = document.querySelector('[data-count="' + k + '"]');
+            if (el) el.textContent = res.data.counts[k] ? res.data.counts[k] : '';
+        });
+        refreshLabelFilter(res.data.labels || []);
+        renderList();
+        if (state.current) {
+            var item = state.list.find(function (c) { return c.id === state.current; });
+            if (item && state.detail && item.unread && state.detail.last_id !== undefined) {
+                // New messages arrived in the open conversation.
+                loadConversation(state.current, {keepScroll: false, quiet: true});
+            }
+        }
+    }
+
+    function refreshLabelFilter(labels) {
+        var select = $('filter-label'), current = select.value;
+        select.innerHTML = '<option value="">All labels</option>' + labels.map(function (l) {
+            return '<option value="' + esc(l) + '">' + esc(l) + '</option>';
+        }).join('');
+        select.value = labels.indexOf(current) === -1 ? '' : current;
+        state.allLabels = labels;
+    }
+
+    function renderList() {
+        var list = $('conversation-list');
+        if (!state.list.length) {
+            var f = state.filters, filtered = f.q || f.channel || f.label || f.needs_reply || f.assignee !== 'all';
+            list.innerHTML = '<li class="p-4 text-center text-muted small">' + (filtered
+                ? 'No conversations match these filters.'
+                : f.status === 'open' ? 'Nothing open. New texts, comments and DMs land here.'
+                : 'No ' + f.status + ' conversations.') + '</li>';
+            return;
+        }
+        list.innerHTML = state.list.map(function (c) {
+            var chips = c.channels.filter(function (ch) { return ch !== 'call'; }).map(function (ch) {
+                return '<span class="chip">' + esc(channelName(ch)) + '</span>';
+            }).join('');
+            var labels = c.labels.map(function (l) { return '<span class="chip chip-label">' + esc(l) + '</span>'; }).join('');
+            var extra = '';
+            if (c.assignee_id) extra += '<span class="chip">' + esc(userNames[c.assignee_id] || 'Assigned') + '</span>';
+            if (c.status === 'snoozed' && c.snoozed_until) extra += '<span class="chip">Until ' + esc(fullTime(c.snoozed_until)) + '</span>';
+            if (c.needs_reply) extra += '<span class="chip chip-wait">Waiting on you</span>';
+            return '<li><button type="button" class="conv-item' + (c.unread ? ' unread' : '') + '" data-id="' + c.id + '"' +
+                (c.id === state.current ? ' aria-current="true"' : '') + '>' +
+                '<div class="conv-top"><span class="conv-name">' + esc(c.name) + '</span>' +
+                '<span class="conv-time">' + esc(when(c.last_at)) + '</span></div>' +
+                '<div class="conv-preview">' + (c.preview_from_us ? 'You: ' : '') + esc(c.preview || '(no text)') + '</div>' +
+                '<div class="conv-meta">' + chips + labels + extra +
+                (c.unread ? '<span class="visually-hidden">' + c.unread + ' unread</span>' : '') + '</div>' +
+                '</button></li>';
+        }).join('');
+    }
+
+    $('conversation-list').addEventListener('click', function (e) {
+        var btn = e.target.closest('.conv-item');
+        if (!btn) return;
+        openConversation(parseInt(btn.dataset.id, 10));
+    });
+
+    document.querySelectorAll('[data-status]').forEach(function (tab) {
+        tab.addEventListener('click', function () {
+            document.querySelectorAll('[data-status]').forEach(function (t) {
+                var on = t === tab;
+                t.classList.toggle('btn-secondary', on);
+                t.classList.toggle('btn-outline-secondary', !on);
+                t.setAttribute('aria-selected', on ? 'true' : 'false');
+            });
+            state.filters.status = tab.dataset.status;
+            loadList();
+        });
+    });
+    $('filter-assignee').addEventListener('change', function () { state.filters.assignee = this.value; loadList(); });
+    $('filter-channel').addEventListener('change', function () { state.filters.channel = this.value; loadList(); });
+    $('filter-label').addEventListener('change', function () { state.filters.label = this.value; loadList(); });
+    $('filter-needs-reply').addEventListener('change', function () { state.filters.needs_reply = this.checked; loadList(); });
+    var searchTimer = null;
+    $('inbox-search').addEventListener('input', function () {
+        clearTimeout(searchTimer);
+        var value = this.value.trim();
+        searchTimer = setTimeout(function () { state.filters.q = value; loadList(); }, 250);
+    });
+
+    // ── One conversation ───────────────────────────────────────────────────
+    function rememberDraft() {
+        if (!state.current) return;
+        var text = $('composer-text').value;
+        if (text.trim()) state.drafts[state.current + ':' + state.mode] = text;
+        else delete state.drafts[state.current + ':' + state.mode];
+        try { sessionStorage.setItem('inboxDrafts', JSON.stringify(state.drafts)); } catch (e) { /* private mode */ }
+    }
+    try { state.drafts = JSON.parse(sessionStorage.getItem('inboxDrafts') || '{}') || {}; } catch (e) { state.drafts = {}; }
+
+    function openConversation(id) {
+        if (state.current === id) {
+            $('inbox-shell').classList.add('show-thread');
+            return;
+        }
+        rememberDraft();
+        state.current = id;
+        state.mode = 'reply';
+        document.querySelectorAll('.conv-item').forEach(function (b) {
+            if (parseInt(b.dataset.id, 10) === id) b.setAttribute('aria-current', 'true');
+            else b.removeAttribute('aria-current');
+        });
+        $('inbox-shell').classList.add('show-thread');
+        $('thread-empty').classList.add('d-none');
+        $('thread-view').classList.remove('d-none');
+        $('thread').innerHTML = '<p class="text-muted small">Loading the conversation...</p>';
+        loadConversation(id, {});
+    }
+
+    async function loadConversation(id, opts) {
+        var res = await api('/inbox/conversations/' + id);
+        if (state.current !== id) return;
+        if (!res.ok) {
+            $('thread').innerHTML = '<p class="text-danger small">' + esc(res.data.error) + '</p>';
+            if (res.status === 410 || res.status === 404) loadList();
+            return;
+        }
+        var previousLast = state.detail && state.detail.id === id ? state.detail.last_in_id : null;
+        state.detail = res.data;
+        renderConversation(opts && opts.quiet && previousLast !== null);
+        if (res.data.unread) {
+            api('/inbox/conversations/' + id + '/read', {}).then(function () {
+                var item = state.list.find(function (c) { return c.id === id; });
+                if (item) { item.unread = 0; renderList(); }
+            });
+        }
+    }
+
+    function renderConversation(quiet) {
+        var d = state.detail;
+        $('thread-name').textContent = d.name;
+        var statusName = {open: 'Open', snoozed: 'Snoozed', resolved: 'Resolved'}[d.status] || d.status;
+        $('thread-status').textContent = d.status === 'snoozed' && d.snoozed_until
+            ? 'Snoozed until ' + fullTime(d.snoozed_until) : statusName;
+        $('resolve-btn').textContent = d.status === 'resolved' ? 'Reopen' : 'Resolve';
+        $('resolve-btn').dataset.label = $('resolve-btn').textContent;
+        $('snooze-btn').textContent = d.status === 'snoozed' ? 'Snoozed' : 'Snooze';
+        $('snooze-btn').dataset.label = $('snooze-btn').textContent;
+        $('assign-select').value = d.assignee_id ? String(d.assignee_id) : '';
+        $('thread-channels').textContent = d.channels.map(channelName).join(', ');
+        renderLabels();
+        renderTimeline();
+        renderContact();
+        if (!quiet) renderComposer();
+        else { renderChannelOptions(true); updateComposerHint(); }
+    }
+
+    function renderTimeline() {
+        var d = state.detail, thread = $('thread');
+        if (!d.timeline.length) {
+            thread.innerHTML = '<p class="text-muted small">No messages yet.</p>';
+            return;
+        }
+        thread.innerHTML = d.timeline.map(function (t) {
+            if (t.type === 'note') {
+                return '<div class="msg msg-note"><div class="msg-context">Private note' +
+                    (t.author ? ' by ' + esc(t.author) : '') + '</div><div class="msg-bubble bg-warning-subtle">' +
+                    esc(t.body) + '</div><div class="msg-meta"><span title="' + esc(fullTime(t.at)) + '">' + esc(when(t.at)) +
+                    '</span><button type="button" class="btn btn-link btn-sm p-0" data-delete-note="' + t.id + '">Delete</button></div></div>';
+            }
+            var cls = 'msg ' + (t.direction === 'in' ? 'msg-in' : 'msg-out') + (t.status === 'failed' ? ' msg-failed' : '');
+            var context = '';
+            if (t.post_text && t.direction === 'in') context = '<div class="msg-context">On your post: ' + esc(t.post_text) + '</div>';
+            var meta = [esc(t.channel_name), '<span title="' + esc(fullTime(t.at)) + '">' + esc(when(t.at)) + '</span>'];
+            if (t.direction === 'out') {
+                var label = {sent: 'Sent', delivered: 'Delivered', external: t.note || 'Sent outside Insights',
+                             unknown: 'Not confirmed yet', failed: 'Not sent', sending: 'Sending', logged: 'Logged'}[t.status];
+                if (label) meta.push(esc(label));
+            }
+            if (t.permalink) meta.push('<a href="' + esc(t.permalink) + '" target="_blank" rel="noopener">Open</a>');
+            var body = t.channel === 'call' ? 'Call' + (t.outcome ? ': ' + t.outcome.replace(/_/g, ' ') : '') + (t.body ? '\n' + t.body : '') : t.body;
+            return '<div class="' + cls + '">' + context + '<div class="msg-bubble">' + esc(body || '(no text)') + '</div>' +
+                '<div class="msg-meta">' + meta.join(' &middot; ') + '</div>' +
+                (t.status === 'failed' && t.error ? '<div class="small text-danger">' + esc(t.error) + '</div>' : '') +
+                (t.status === 'unknown' && t.error ? '<div class="small text-muted">' + esc(t.error) + '</div>' : '') +
+                '</div>';
+        }).join('');
+        thread.scrollTop = thread.scrollHeight;
+    }
+
+    $('thread').addEventListener('click', async function (e) {
+        var btn = e.target.closest('[data-delete-note]');
+        if (!btn) return;
+        var done = busy(btn, 'Deleting...');
+        var res = await api('/inbox/notes/' + btn.dataset.deleteNote + '/delete', {});
+        done();
+        if (!res.ok) { setStatus($('composer-status'), res.data.error, 'error'); return; }
+        loadConversation(state.current, {quiet: true});
+    });
+
+    function renderContact() {
+        var d = state.detail, c = d.contact, body = $('contact-body');
+        $('contact-empty').classList.add('d-none');
+        body.classList.remove('d-none');
+        if (!c) {
+            body.innerHTML = '<div class="contact-field"><div class="label">Name</div><div>' + esc(d.name) + '</div></div>' +
+                '<p class="small text-muted">Not a lead yet. Replying makes them one.</p>';
+            return;
+        }
+        var stageNames = {new: 'New', contacted: 'Contacted', replied: 'Replied', booked: 'Booked', enrolled: 'Enrolled', not_fit: 'Not a fit'};
+        var rows = [['Name', c.name], ['Phone', c.phone], ['Email', c.email], ['Stage', stageNames[c.stage] || c.stage]];
+        (c.identities || []).forEach(function (i) { rows.push([i.kind.replace('_', ' '), i.value]); });
+        var html = rows.filter(function (r) { return r[1]; }).map(function (r) {
+            return '<div class="contact-field"><div class="label">' + esc(r[0]) + '</div><div class="text-break">' + esc(r[1]) + '</div></div>';
+        }).join('');
+        if (c.opted_out_at || c.do_not_contact) html += '<p class="small text-danger">Asked not to be contacted.</p>';
+        else if (c.phone && !c.sms_consent) html += '<p class="small text-muted">No text consent on record: a text can only answer one of theirs within 24 hours.</p>';
+        if (c.notes) html += '<div class="contact-field"><div class="label">Lead notes</div><div class="small">' + esc(c.notes) + '</div></div>';
+        html += '<a class="btn btn-outline-secondary btn-sm w-100" href="/outreach?tab=leads&q=' + encodeURIComponent(c.name || c.phone || '') + '">Open in Outreach</a>';
+        body.innerHTML = html;
+    }
+
+    // ── Status, snooze, assign, labels ─────────────────────────────────────
+    async function change(path, payload, button, label) {
+        var done = button ? busy(button, label) : function () {};
+        var res = await api('/inbox/conversations/' + state.current + '/' + path, payload);
+        done();
+        if (!res.ok) { setStatus($('composer-status'), res.data.error, 'error'); return null; }
+        return res.data;
+    }
+
+    $('resolve-btn').addEventListener('click', async function () {
+        var reopening = state.detail.status === 'resolved';
+        var id = state.current;
+        var result = await change('status', {status: reopening ? 'open' : 'resolved'}, this, reopening ? 'Reopening...' : 'Resolving...');
+        if (!result) return;
+        setStatus($('composer-status'), reopening ? 'Reopened.' : 'Resolved. It reopens if they write again.', 'ok');
+        if (!reopening) offerUndo(id, state.detail.status);
+        loadConversation(id, {quiet: true});
+        loadList();
+    });
+
+    function offerUndo(id, previous) {
+        var el = $('composer-status');
+        var undo = document.createElement('button');
+        undo.type = 'button';
+        undo.className = 'btn btn-link btn-sm p-0 ms-2';
+        undo.textContent = 'Undo';
+        undo.addEventListener('click', async function () {
+            undo.disabled = true;
+            var res = await api('/inbox/conversations/' + id + '/status', {status: previous === 'snoozed' ? 'open' : previous});
+            if (res.ok) { setStatus(el, 'Back to open.', 'ok'); loadConversation(id, {quiet: true}); loadList(); }
+            else setStatus(el, res.data.error, 'error');
+        });
+        el.appendChild(undo);
+    }
+
+    async function snooze(payload, button) {
+        var result = await change('status', Object.assign({status: 'snoozed'}, payload), button, 'Snoozing...');
+        if (!result) return;
+        setStatus($('composer-status'), 'Snoozed until ' + fullTime(result.snoozed_until) + '. A new message wakes it sooner.', 'ok');
+        loadConversation(state.current, {quiet: true});
+        loadList();
+    }
+    document.querySelectorAll('[data-snooze]').forEach(function (b) {
+        b.addEventListener('click', function () { snooze({preset: b.dataset.snooze}, $('snooze-btn')); });
+    });
+    $('snooze-custom-btn').addEventListener('click', function () {
+        var value = $('snooze-custom').value;
+        if (!value) { setStatus($('composer-status'), 'Pick a date and time to snooze until.', 'error'); return; }
+        snooze({until: value}, this);
+    });
+
+    $('assign-select').addEventListener('change', async function () {
+        var select = this, value = select.value;
+        select.disabled = true;
+        var result = await change('assign', {assignee_id: value || null});
+        select.disabled = false;
+        if (!result) { select.value = state.detail.assignee_id ? String(state.detail.assignee_id) : ''; return; }
+        state.detail.assignee_id = result.assignee_id;
+        setStatus($('composer-status'), result.assignee_id ? 'Assigned to ' + (userNames[result.assignee_id] || 'them') + '.' : 'Unassigned.', 'ok');
+        loadList();
+    });
+
+    function renderLabels() {
+        var mine = state.detail.labels || [];
+        var all = (state.allLabels || []).slice();
+        mine.forEach(function (l) { if (all.indexOf(l) === -1) all.push(l); });
+        $('labels-btn').textContent = mine.length ? 'Labels (' + mine.length + ')' : 'Labels';
+        $('labels-options').innerHTML = all.length ? all.map(function (l, i) {
+            return '<div class="form-check"><input class="form-check-input" type="checkbox" id="lbl-' + i + '" value="' + esc(l) + '"' +
+                (mine.indexOf(l) !== -1 ? ' checked' : '') + '><label class="form-check-label" for="lbl-' + i + '">' + esc(l) + '</label></div>';
+        }).join('') : '<p class="small text-muted mb-0">No labels yet. Add one below.</p>';
+    }
+
+    async function saveLabels(labels) {
+        $('labels-error').textContent = '';
+        var res = await api('/inbox/conversations/' + state.current + '/labels', {labels: labels});
+        if (!res.ok) { $('labels-error').textContent = res.data.error; renderLabels(); return false; }
+        state.detail.labels = res.data.labels;
+        renderLabels();
+        loadList();
+        return true;
+    }
+    $('labels-options').addEventListener('change', function () {
+        var picked = Array.prototype.map.call(this.querySelectorAll('input:checked'), function (i) { return i.value; });
+        saveLabels(picked);
+    });
+    async function addLabel() {
+        var input = $('label-new'), value = input.value.trim();
+        if (!value) { $('labels-error').textContent = 'Type a label first.'; return; }
+        if (await saveLabels((state.detail.labels || []).concat([value]))) input.value = '';
+    }
+    $('label-add').addEventListener('click', addLabel);
+    $('label-new').addEventListener('keydown', function (e) { if (e.key === 'Enter') { e.preventDefault(); addLabel(); } });
+
+    $('unread-btn').addEventListener('click', async function () {
+        var result = await change('read', {unread: true}, this, 'Marking...');
+        if (result) { setStatus($('composer-status'), 'Marked unread.', 'ok'); loadList(); }
+    });
+
+    $('back-btn').addEventListener('click', function () { $('inbox-shell').classList.remove('show-thread'); });
+
+    // ── Composer ───────────────────────────────────────────────────────────
+    function currentOption() {
+        var channel = $('reply-channel').value;
+        return (state.detail.reply_options || []).find(function (o) { return o.channel === channel; });
+    }
+
+    function renderChannelOptions(keepSelection) {
+        var d = state.detail, select = $('reply-channel'), previous = select.value;
+        select.innerHTML = (d.reply_options || []).map(function (o) {
+            return '<option value="' + o.channel + '"' + (o.enabled ? '' : ' disabled') + '>' + esc(o.short) +
+                (o.enabled ? '' : ' (unavailable)') + '</option>';
+        }).join('');
+        var usable = function (ch) {
+            return (d.reply_options || []).some(function (o) { return o.channel === ch && o.enabled; });
+        };
+        if (keepSelection && previous && usable(previous)) select.value = previous;
+        else if (d.default_channel) select.value = d.default_channel;
+        // Nothing usable: show the first channel (marked unavailable) rather than a blank box.
+        if (select.selectedIndex === -1 && select.options.length) select.selectedIndex = 0;
+    }
+
+    function renderComposer() {
+        var d = state.detail, select = $('reply-channel');
+        renderChannelOptions(false);
+        setMode(state.mode, true);
+        var saved = state.drafts[state.current + ':' + state.mode];
+        var draft = d.drafts && d.drafts[select.value];
+        $('composer-text').value = saved || (state.mode === 'reply' && draft ? draft.body : '');
+        setStatus($('composer-status'), '', 'muted');
+        updateComposerHint();
+    }
+
+    function setMode(mode, silent) {
+        if (!silent) rememberDraft();
+        state.mode = mode;
+        var note = mode === 'note';
+        $('composer').classList.toggle('note-mode', note);
+        $('mode-reply').className = 'btn btn-sm ' + (note ? 'btn-outline-secondary' : 'btn-secondary');
+        $('mode-note').className = 'btn btn-sm ' + (note ? 'btn-secondary' : 'btn-outline-secondary');
+        $('mode-reply').setAttribute('aria-selected', note ? 'false' : 'true');
+        $('mode-note').setAttribute('aria-selected', note ? 'true' : 'false');
+        $('reply-channel').classList.toggle('d-none', note);
+        $('reply-channel-label').classList.toggle('d-none', note);
+        $('composer-text').placeholder = note ? 'Write a note only your team sees.' : 'Write a reply. Type / for a canned reply.';
+        $('composer-send').textContent = note ? 'Add note' : 'Send';
+        $('composer-send').dataset.label = $('composer-send').textContent;
+        if (!silent) {
+            $('composer-text').value = state.drafts[state.current + ':' + mode] || '';
+            updateComposerHint();
+            $('composer-text').focus();
+        }
+    }
+    $('mode-reply').addEventListener('click', function () { setMode('reply'); });
+    $('mode-note').addEventListener('click', function () { setMode('note'); });
+
+    function updateComposerHint() {
+        var hint = $('composer-hint'), send = $('composer-send'), text = $('composer-text').value;
+        if (state.mode === 'note') {
+            hint.textContent = 'Notes stay inside Insights. Nothing is sent.';
+            send.disabled = !text.trim();
+            $('composer-count').textContent = '';
+            return;
+        }
+        var option = currentOption();
+        var d = state.detail;
+        if (!option) {
+            var reasons = (d.reply_options || []).filter(function (o) { return !o.enabled; }).map(function (o) { return o.reason; });
+            hint.textContent = reasons[0] || 'There is no channel to reply on yet.';
+            send.disabled = true;
+            $('composer-count').textContent = '';
+            return;
+        }
+        var draft = d.drafts && d.drafts[option.channel];
+        var parts = [];
+        if (!option.enabled) parts.push(option.reason);
+        else if (option.answers) parts.push('Answers: "' + option.answers + '"');
+        if (draft && draft.body) parts.push('Insights drafted a reply here; edit it or send as is.');
+        hint.textContent = parts.join(' ');
+        $('composer-count').textContent = text.length + ' / ' + option.limit;
+        $('composer-count').classList.toggle('text-danger', text.length > option.limit);
+        send.disabled = !option.enabled || !text.trim() || text.length > option.limit;
+        send.title = !option.enabled ? option.reason : (!text.trim() ? 'Write a reply first' : '');
+    }
+    $('reply-channel').addEventListener('change', function () {
+        var draft = state.detail.drafts && state.detail.drafts[this.value];
+        if (!$('composer-text').value.trim() && draft) $('composer-text').value = draft.body;
+        updateComposerHint();
+    });
+    $('composer-text').addEventListener('input', function () { updateComposerHint(); updatePicker(); });
+
+    async function submitComposer() {
+        var send = $('composer-send'), text = $('composer-text').value, status = $('composer-status');
+        if (send.disabled) return;
+        var id = state.current;
+        if (state.mode === 'note') {
+            var doneNote = busy(send, 'Saving...');
+            var noteRes = await api('/inbox/conversations/' + id + '/notes', {body: text});
+            doneNote();
+            if (!noteRes.ok) { setStatus(status, noteRes.data.error, 'error'); updateComposerHint(); return; }
+            $('composer-text').value = '';
+            delete state.drafts[id + ':note'];
+            setStatus(status, 'Note added.', 'ok');
+            loadConversation(id, {quiet: true});
+            return;
+        }
+        var option = currentOption();
+        var done = busy(send, 'Sending...');
+        setStatus(status, 'Sending on ' + option.short + '...', 'muted');
+        var res = await api('/inbox/conversations/' + id + '/reply',
+            {channel: option.channel, body: text, seen_id: state.detail.last_in_id});
+        done();
+        if (!res.ok) {
+            // Their words stay in the box; the reason says what to do.
+            setStatus(status, res.data.error, 'error');
+            if (res.data.reload || res.data.status === 'failed' || res.data.status === 'unknown') {
+                loadConversation(id, {quiet: true});
+                loadList();
+            }
+            updateComposerHint();
+            return;
+        }
+        $('composer-text').value = '';
+        delete state.drafts[id + ':reply'];
+        setStatus(status, 'Sent on ' + option.short + '.', 'ok');
+        if (res.data.conversation_id && res.data.conversation_id !== id) {
+            state.current = res.data.conversation_id;
+        }
+        loadConversation(state.current, {quiet: true});
+        loadList();
+    }
+    $('composer-send').addEventListener('click', submitComposer);
+
+    // ── Canned replies in the composer ("/" picker) ────────────────────────
+    function slashQuery() {
+        var area = $('composer-text'), upto = area.value.slice(0, area.selectionStart);
+        var match = /(^|\s)\/([A-Za-z0-9_-]*)$/.exec(upto);
+        return match ? {query: match[2].toLowerCase(), start: upto.length - match[2].length - 1} : null;
+    }
+
+    function updatePicker() {
+        var picker = $('canned-picker'), q = state.mode === 'reply' ? slashQuery() : null;
+        if (!q) { picker.classList.add('d-none'); state.pickerItems = []; return; }
+        state.pickerItems = state.canned.filter(function (c) {
+            return c.short_code.toLowerCase().indexOf(q.query) === 0 || c.content.toLowerCase().indexOf(q.query) !== -1;
+        }).slice(0, 8);
+        state.pickerIndex = 0;
+        if (!state.pickerItems.length) {
+            picker.innerHTML = '<div class="p-2 small text-muted">' + (state.canned.length
+                ? 'No canned reply starts with /' + esc(q.query) + '.'
+                : 'No canned replies yet. Add them with the Canned replies button.') + '</div>';
+        } else {
+            picker.innerHTML = state.pickerItems.map(function (c, i) {
+                return '<button type="button" role="option" data-pick="' + i + '" aria-selected="' + (i === 0) + '">' +
+                    '<strong>/' + esc(c.short_code) + '</strong> <span class="text-muted small">' + esc(c.content.slice(0, 80)) + '</span></button>';
+            }).join('');
+        }
+        picker.classList.remove('d-none');
+    }
+
+    function pickCanned(index) {
+        var item = state.pickerItems[index], q = slashQuery(), area = $('composer-text');
+        if (!item || !q) return;
+        var before = area.value.slice(0, q.start), after = area.value.slice(area.selectionStart);
+        area.value = before + item.content + after;
+        var caret = (before + item.content).length;
+        area.setSelectionRange(caret, caret);
+        $('canned-picker').classList.add('d-none');
+        state.pickerItems = [];
+        area.focus();
+        updateComposerHint();
+    }
+
+    $('canned-picker').addEventListener('mousedown', function (e) {
+        var btn = e.target.closest('[data-pick]');
+        if (!btn) return;
+        e.preventDefault();
+        pickCanned(parseInt(btn.dataset.pick, 10));
+    });
+
+    $('composer-text').addEventListener('keydown', function (e) {
+        if (state.pickerItems.length && !$('canned-picker').classList.contains('d-none')) {
+            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                e.preventDefault();
+                var n = state.pickerItems.length;
+                state.pickerIndex = (state.pickerIndex + (e.key === 'ArrowDown' ? 1 : n - 1)) % n;
+                document.querySelectorAll('#canned-picker [data-pick]').forEach(function (b, i) {
+                    b.setAttribute('aria-selected', i === state.pickerIndex ? 'true' : 'false');
+                });
+                return;
+            }
+            if (e.key === 'Enter' || e.key === 'Tab') { e.preventDefault(); pickCanned(state.pickerIndex); return; }
+            if (e.key === 'Escape') { $('canned-picker').classList.add('d-none'); state.pickerItems = []; return; }
+        }
+        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitComposer(); }
+    });
+    $('composer-text').addEventListener('blur', function () {
+        setTimeout(function () { $('canned-picker').classList.add('d-none'); }, 150);
+        rememberDraft();
+    });
+
+    // ── Canned replies manager ─────────────────────────────────────────────
+    function renderCanned() {
+        var list = $('canned-list');
+        if (!state.canned.length) {
+            list.innerHTML = '<li class="list-group-item small text-muted">No canned replies yet. Add the answers you give most often.</li>';
+            return;
+        }
+        list.innerHTML = state.canned.map(function (c) {
+            return '<li class="list-group-item d-flex justify-content-between align-items-start gap-2">' +
+                '<div class="text-break"><strong>/' + esc(c.short_code) + '</strong><div class="small" style="white-space:pre-wrap">' + esc(c.content) + '</div></div>' +
+                '<div class="d-flex gap-1"><button type="button" class="btn btn-sm btn-outline-secondary" data-edit-canned="' + c.id + '">Edit</button>' +
+                '<button type="button" class="btn btn-sm btn-outline-danger" data-delete-canned="' + c.id + '">Delete</button></div></li>';
+        }).join('');
+    }
+
+    function resetCannedForm() {
+        $('canned-id').value = '';
+        $('canned-code').value = '';
+        $('canned-content').value = '';
+        $('canned-save').textContent = 'Add canned reply';
+        $('canned-cancel').classList.add('d-none');
+    }
+
+    async function refreshCanned() {
+        var res = await api('/inbox/canned');
+        if (res.ok) { state.canned = res.data.canned; renderCanned(); }
+    }
+
+    $('canned-form').addEventListener('submit', async function (e) {
+        e.preventDefault();
+        var id = $('canned-id').value, status = $('canned-status');
+        var done = busy($('canned-save'), 'Saving...');
+        var res = await api(id ? '/inbox/canned/' + id : '/inbox/canned',
+            {short_code: $('canned-code').value, content: $('canned-content').value});
+        done();
+        if (!res.ok) { setStatus(status, res.data.error, 'error'); return; }
+        setStatus(status, (id ? 'Saved ' : 'Added ') + '/' + res.data.canned.short_code + '.', 'ok');
+        resetCannedForm();
+        refreshCanned();
+    });
+    $('canned-cancel').addEventListener('click', resetCannedForm);
+
+    $('canned-list').addEventListener('click', async function (e) {
+        var edit = e.target.closest('[data-edit-canned]'), del = e.target.closest('[data-delete-canned]');
+        if (edit) {
+            var item = state.canned.find(function (c) { return String(c.id) === edit.dataset.editCanned; });
+            $('canned-id').value = item.id;
+            $('canned-code').value = item.short_code;
+            $('canned-content').value = item.content;
+            $('canned-save').textContent = 'Save changes';
+            $('canned-save').dataset.label = 'Save changes';
+            $('canned-cancel').classList.remove('d-none');
+            $('canned-code').focus();
+            return;
+        }
+        if (del) {
+            var gone = state.canned.find(function (c) { return String(c.id) === del.dataset.deleteCanned; });
+            var done = busy(del, 'Deleting...');
+            var res = await api('/inbox/canned/' + gone.id + '/delete', {});
+            done();
+            var status = $('canned-status');
+            if (!res.ok) { setStatus(status, res.data.error, 'error'); return; }
+            setStatus(status, 'Deleted /' + gone.short_code + '.', 'ok');
+            var undo = document.createElement('button');
+            undo.type = 'button';
+            undo.className = 'btn btn-link btn-sm p-0 ms-2';
+            undo.textContent = 'Undo';
+            undo.addEventListener('click', async function () {
+                undo.disabled = true;
+                var back = await api('/inbox/canned', {short_code: gone.short_code, content: gone.content});
+                if (back.ok) { setStatus(status, 'Restored /' + gone.short_code + '.', 'ok'); refreshCanned(); }
+                else setStatus(status, back.data.error, 'error');
+            });
+            status.appendChild(undo);
+            refreshCanned();
+        }
+    });
+    renderCanned();
+
+    // ── Checking for new messages ──────────────────────────────────────────
+    $('check-now-btn').addEventListener('click', async function () {
+        var done = busy(this, 'Checking...');
+        var res = await api('/inbox/check', {});
+        done();
+        var hint = $('thread-empty-hint');
+        if (!res.ok) { setStatus($('composer-status'), res.data.error, 'error'); return; }
+        var found = (res.data.new_texts || 0) + (res.data.new_dms || 0);
+        var message = found ? found + ' new message' + (found === 1 ? '' : 's') + '.' : 'No new messages.';
+        if (res.data.errors && res.data.errors.length) message += ' ' + res.data.errors.join(' ');
+        this.title = message;
+        if (state.current) setStatus($('composer-status'), message, res.data.errors.length ? 'error' : 'ok');
+        else hint.textContent = message;
+        loadList();
+    });
+
+    setInterval(function () {
+        if (document.hidden || state.loadingList) return;
+        loadList();
+    }, POLL_MS);
+    window.addEventListener('beforeunload', rememberDraft);
+
+    loadList();
+})();
+</script>
+{% endblock %}

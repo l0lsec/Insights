@@ -57,6 +57,24 @@ ENGAGE_SCOPES = {
     "twitter": [],
 }
 
+# Direct messages (Instagram DMs, Facebook Page Messenger). They are their own
+# channels: a DM has Meta's 24-hour reply window and a recipient id instead of
+# a comment to answer, so it never shares rules with a public reply.
+DM_CHANNELS = ("instagram_dm", "facebook_dm")
+DM_PLATFORM = {"instagram_dm": "instagram", "facebook_dm": "facebook"}
+DM_NAMES = {"instagram_dm": "Instagram DM", "facebook_dm": "Messenger"}
+# The longest text each Send API takes.
+DM_LIMITS = {"instagram_dm": 1000, "facebook_dm": 2000}
+# Meta's standard messaging window: a business may answer within 24 hours of
+# the person's last message, and not after.
+DM_WINDOW_HOURS = 24
+# What "Reconnect with DM permissions" asks for on top of the engagement scopes.
+DM_SCOPES = {
+    "instagram": ["instagram_business_manage_messages"],
+    "facebook": ["pages_messaging"],
+}
+DM_MESSAGES_PER_THREAD = 25
+
 _sleep = time.sleep
 
 
@@ -481,3 +499,125 @@ def reply(platform: str, account_id, in_reply_to: str, text: str, db_path: str |
         return _simple_reply("facebook", f"{FACEBOOK_API}/{in_reply_to}/comments",
                              {"message": text, "access_token": token["page_access_token"]})
     return _x_reply(token["access_token"], in_reply_to, text)
+
+
+# ── Direct messages ─────────────────────────────────────────────────────────
+#
+# Instagram (Instagram API with Instagram Login) and a Facebook Page's
+# Messenger inbox share one shape: a list of conversations with their last
+# update, and each conversation's recent messages. Reads return the usual
+# ``{ok, items, state, friendly}``; a message item carries the thread id as
+# ``root_id`` and the sender's platform id as ``author_id``, which is who a
+# reply goes to.
+
+def _dm_base(platform: str, token: dict) -> tuple[str, dict, str]:
+    """(API root, auth params, conversations URL) for one DM platform."""
+    if platform == "instagram":
+        return (INSTAGRAM_API, {"access_token": token["access_token"]},
+                f"{INSTAGRAM_API}/me/conversations")
+    return (FACEBOOK_API, {"access_token": token["page_access_token"]},
+            f"{FACEBOOK_API}/{token['page_id']}/conversations")
+
+
+def dm_conversations(platform: str, token: dict) -> dict:
+    """The account's DM threads, newest first: ``items`` of ``{id, updated}``."""
+    _root, auth, url = _dm_base(platform, token)
+    result = _get_paged(platform, url, {
+        "platform": "instagram" if platform == "instagram" else "messenger",
+        "fields": "id,updated_time", "limit": 25, **auth})
+    if result["ok"]:
+        result["items"] = [{"id": str(c.get("id")), "updated": _utc(c.get("updated_time"))}
+                           for c in result["items"] if c.get("id")]
+    return result
+
+
+def dm_messages(platform: str, token: dict, conversation_id: str, own_id: str = "",
+                own_handle: str = "") -> dict:
+    """The recent messages of one DM thread, oldest first, in the item shape."""
+    root, auth, _url = _dm_base(platform, token)
+    try:
+        response = requests.get(f"{root}/{conversation_id}", params={
+            "fields": f"messages.limit({DM_MESSAGES_PER_THREAD})"
+                      "{id,created_time,from,to,message}", **auth}, timeout=TIMEOUT)
+    except requests.exceptions.RequestException as exc:
+        return _unreachable(platform, exc)
+    if response.status_code != 200:
+        return _failed(platform, response)
+    raw = ((_payload(response).get("messages") or {}).get("data")) or []
+    # Tokens come back as rows or dicts depending on the platform.
+    page_id = token["page_id"] if token is not None and "page_id" in token.keys() else None
+    own_ids = {str(i) for i in (own_id, page_id) if i}
+    handle = (own_handle or "").lstrip("@").lower()
+    items = []
+    for m in raw:
+        sender = m.get("from") or {}
+        username = sender.get("username") or ""
+        sender_id = str(sender.get("id") or "")
+        own = sender_id in own_ids or (bool(handle) and username.lower() == handle)
+        recipients = ((m.get("to") or {}).get("data")) or []
+        items.append(_item(
+            id=m.get("id"), text=m.get("message") or "",
+            author=username or sender.get("name") or "", author_id=sender_id,
+            author_name=sender.get("name") or "", created=_utc(m.get("created_time")),
+            root_id=str(conversation_id), parent_id=None, own=own,
+            recipient_id=str((recipients[0] or {}).get("id") or "") if recipients else ""))
+    items.sort(key=lambda i: (i.get("created") or "", str(i.get("id") or "")))
+    return {"ok": True, "items": items, "state": "ok", "friendly": ""}
+
+
+def _dm_post(channel: str, url: str, payload: dict, params=None, headers=None) -> dict:
+    name = DM_NAMES[channel]
+    platform = DM_PLATFORM[channel]
+    try:
+        response = requests.post(url, json=payload, params=params, headers=headers, timeout=TIMEOUT)
+    except requests.exceptions.ConnectTimeout as exc:
+        return {"success": False, "friendly": f"Could not reach {name} "
+                                              f"({exc.__class__.__name__}). Nothing was sent."}
+    except requests.exceptions.RequestException:
+        return {"success": False, "ambiguous": True,
+                "friendly": f"{name} did not answer, so this message may or may not have been "
+                            "delivered. Insights will check rather than send it again."}
+    if response.status_code >= 500:
+        return {"success": False, "ambiguous": True,
+                "friendly": f"{name} had a problem, so this message may or may not have been "
+                            "delivered. Insights will check rather than send it again."}
+    body = _payload(response)
+    if response.status_code != 200 or not body.get("message_id"):
+        error = body.get("error") or {}
+        if isinstance(error, dict) and str(error.get("error_subcode")) == "2534022" \
+                or "outside of allowed window" in str(error).lower():
+            return {"success": False, "state": "window",
+                    "friendly": f"{name} only allows a reply within 24 hours of their last "
+                                "message. Wait for them to write again."}
+        state, friendly = classify_error(platform, response.status_code, body)
+        return {"success": False, "friendly": friendly, "state": state}
+    return {"success": True, "id": body["message_id"], "permalink": None}
+
+
+def direct_message(channel: str, account_id, recipient_id: str, text: str,
+                   db_path: str | None = None) -> dict:
+    """Send ``text`` as a DM to ``recipient_id`` from one of the owner's accounts.
+
+    Only ``outreach_sender`` calls this. Returns ``{success, id, friendly,
+    ambiguous, state}``; a request whose answer was lost is ``ambiguous``, so a
+    message that may have arrived is never sent twice.
+    """
+    if channel not in DM_CHANNELS:
+        return {"success": False, "friendly": f"Insights cannot send a direct message on {channel}."}
+    if not str(recipient_id or "").strip():
+        return {"success": False, "friendly": "This conversation has no recipient to send to."}
+    if not (text or "").strip():
+        return {"success": False, "friendly": "The message is empty."}
+    platform = DM_PLATFORM[channel]
+    client, token, account, failure = social_publisher.session(platform, account_id, db_path=db_path)
+    if failure:
+        return {"success": False, "friendly": failure.get("error") or "That account is not usable",
+                "state": "needs_reconnect" if failure.get("needs_reconnect") else "error"}
+    text = text[:DM_LIMITS[channel]]
+    payload = {"recipient": {"id": str(recipient_id)}, "message": {"text": text}}
+    if platform == "instagram":
+        return _dm_post(channel, f"{INSTAGRAM_API}/me/messages", payload,
+                        headers={"Authorization": f"Bearer {token['access_token']}"})
+    payload["messaging_type"] = "RESPONSE"
+    return _dm_post(channel, f"{FACEBOOK_API}/{token['page_id']}/messages", payload,
+                    params={"access_token": token["page_access_token"]})

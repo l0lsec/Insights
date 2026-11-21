@@ -20,6 +20,8 @@ A public reply on Threads, Instagram, Facebook or X (``_social_guard``) has its
 own rules: no consent or texting hours, but never after an opt-out, never
 without the comment it answers, never past a newer message in that
 conversation, at most 3 a day to one person, and only the owner's links.
+An Instagram or Facebook DM (``_dm_guard``) follows Meta's 24-hour reply
+window instead.
 
 The checks and the draft -> sending claim happen in one database transaction
 (``database.claim_outreach_message``), so a double click or a second tab sends
@@ -134,10 +136,58 @@ def _social_guard(conn, message: dict, lead: dict | None, *, text: str, profile:
     return None
 
 
+def _dm_guard(conn, message: dict, lead: dict | None, *, text: str, now) -> tuple | None:
+    """Why a direct message may not go out now, as ``(http_status, reason)``, or None.
+
+    A DM answers someone who wrote to the owner privately. Meta's own rule
+    applies: a reply only within 24 hours of their last message. Also never
+    after an opt-out or do-not-contact, never on an account that is gone, and
+    never past the platform's length. Every DM is written by the owner in the
+    Inbox, so the agent's offers-only link rule does not apply.
+    """
+    channel = message["channel"]
+    name = outreach_social.DM_NAMES[channel]
+    context = message.get("context") or {}
+    if lead is None:
+        return 409, "This message has no lead"
+    who = lead.get("name") or "This person"
+    if lead.get("opted_out_at") or lead.get("do_not_contact"):
+        return 403, f"{who} asked not to be contacted. Insights will not message them."
+    account = conn.execute("SELECT platform, status FROM social_accounts WHERE id = ?",
+                           (context.get("account_id"),)).fetchone()
+    if not account or account[0] != outreach_social.DM_PLATFORM[channel] or account[1] == "removed":
+        return 409, f"The account this {name} conversation is on is no longer connected."
+    if not str(context.get("recipient_id") or "").strip():
+        return 400, "This conversation has no recipient to send to."
+    if not text.strip():
+        return 400, "The message is empty."
+    limit = outreach_social.DM_LIMITS[channel]
+    if len(text) > limit:
+        return 400, f"{name} messages can be at most {limit} characters; this one is {len(text)}."
+    root = str(context.get("root_id") or "")
+    last_in = conn.execute(
+        "SELECT id, COALESCE(sent_at, created_at) FROM outreach_messages WHERE lead_id = ? "
+        "AND channel = ? AND direction = 'in' AND status = 'received' "
+        "AND json_extract(context, '$.root_id') = ? ORDER BY id DESC LIMIT 1",
+        (lead["id"], channel, root)).fetchone()
+    if not last_in:
+        return 409, f"{who} has not written to you on {name}, so there is nothing to answer."
+    if last_in[0] > max(message["id"], message.get("based_on_message_id") or 0):
+        return 409, f"{who} wrote again since this was written. Read it first."
+    last_at = parse_utc(last_in[1])
+    if not last_at or hours_between(now, last_at) > outreach_social.DM_WINDOW_HOURS:
+        return 403, (f"{name} only allows a reply within {outreach_social.DM_WINDOW_HOURS} hours of "
+                     f"their last message, and {who} last wrote on {str(last_in[1])[:16]} UTC. "
+                     "Wait for them to write again.")
+    return None
+
+
 def _guard(conn, message: dict, lead: dict | None, *, text: str, profile: dict, now) -> tuple | None:
     """Why this message may not go out now, as ``(http_status, reason)``, or None."""
     if message["direction"] == "out" and message["channel"] in outreach_social.SOCIAL_CHANNELS:
         return _social_guard(conn, message, lead, text=text, profile=profile, now=now)
+    if message["direction"] == "out" and message["channel"] in outreach_social.DM_CHANNELS:
+        return _dm_guard(conn, message, lead, text=text, now=now)
     if message["channel"] != "sms" or message["direction"] != "out":
         return 400, "Only texts and social replies can be sent from here"
     if profile.get("sms_paused_reason"):
@@ -245,7 +295,8 @@ def send(message_id: int, body: str, user_id: int, now=None, client=None) -> dic
         return _refusal(404, "That message no longer exists")
     lead = database.get_lead(message["lead_id"]) if message.get("lead_id") else None
     social = message["channel"] in outreach_social.SOCIAL_CHANNELS
-    if social:
+    dm = message["channel"] in outreach_social.DM_CHANNELS
+    if social or dm:
         text = plain_text(body)
     else:
         first = bool(lead) and not database.lead_reached_before(lead["id"], "sms")
@@ -263,6 +314,8 @@ def send(message_id: int, body: str, user_id: int, now=None, client=None) -> dic
         return _refusal(*refusal)
     if social:
         return _send_social(message, lead, text, now)
+    if dm:
+        return _send_dm(message, lead, text, now)
 
     client = client or twilio_client.get_twilio_client()
     result = client.send_sms(lead["phone"], text)
@@ -310,3 +363,22 @@ def _send_social(message: dict, lead: dict, text: str, now) -> dict:
     database.record_outreach_sent(message["id"], None, "failed", error=friendly)
     return {"ok": False, "status": "failed", "http_status": 502, "error": friendly,
             "open_url": result.get("open_url")}
+
+
+def _send_dm(message: dict, lead: dict, text: str, now) -> dict:
+    """Send a claimed direct message and record what happened."""
+    context = message.get("context") or {}
+    result = outreach_social.direct_message(message["channel"], context.get("account_id"),
+                                            context.get("recipient_id"), text)
+    if result.get("success"):
+        database.record_outreach_sent(message["id"], str(result.get("id") or ""), "sent")
+        changes = {"last_contact_at": fmt_utc(now)}
+        changes["score"] = lead_score({**lead, **changes}, now)
+        database.update_lead(lead["id"], **changes)
+        return {"ok": True, "status": "sent", "id": result.get("id"), "text": text}
+    friendly = result.get("friendly") or "The platform did not send it"
+    if result.get("ambiguous"):
+        database.record_outreach_sent(message["id"], None, "unknown", error=friendly)
+        return {"ok": False, "status": "unknown", "http_status": 502, "error": friendly}
+    database.record_outreach_sent(message["id"], None, "failed", error=friendly)
+    return {"ok": False, "status": "failed", "http_status": 502, "error": friendly}

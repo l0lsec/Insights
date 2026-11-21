@@ -478,7 +478,7 @@ _NEVER_SEND_MODULES = ("outreach_worker.py", "outreach_agent.py", "lead_import.p
 # Calls that send a text or post a reply. The worker may read through
 # outreach_social, never call these.
 _SENDING_CALLS = ("send_sms", "post", "reply", "reply_to_comment", "_threads_reply", "_x_reply",
-                  "_simple_reply", "publish", "publish_targets")
+                  "_simple_reply", "publish", "publish_targets", "direct_message", "_dm_post")
 
 
 def _sends_in(path):
@@ -1134,6 +1134,9 @@ def _listener_routes(extra_conversation=()):
         "/PAGE1_9/comments": g.data({"id": "PAGE1_9_c1", "message": "Is the mentorship remote?",
                                      "from": {"id": "555", "name": "Jane Doe"}, "created_time": g.iso(NOON - timedelta(hours=4)),
                                      "permalink_url": "https://facebook.com/c1"}),
+        # The worker also reads DMs (the Inbox); these accounts have none.
+        "/me/conversations": g.data(),
+        "/PAGE1/conversations": g.data(),
         "/users/42/mentions": g.FakeResponse(200, {
             "data": [{"id": "X1", "text": "@northwind_x is a bootcamp worth it?", "author_id": "77",
                       "created_at": "2026-10-21T11:00:00.000Z", "conversation_id": "X1"}],
@@ -1182,16 +1185,22 @@ def section_listener():
     check(database.get_lead(database.find_lead_by_identity("facebook", "555"))["name"] == "Jane Doe", "names come along")
     check(summary["social_inbound"] == 7 and summary["skipped_by_agent"] == 1, f"summary: {summary}")
     states = {k: v["state"] for k, v in database.get_outreach_profile()["runtime_state"]["sources"].items()}
-    check(all(v == "ok" for v in states.values()) and len(states) == 4,
+    # Four comment sources and the two DM sources (Instagram, the Page); search is not one.
+    check(all(v == "ok" for v in states.values())
+          and sorted(k.split(":")[0] for k in states) == ["facebook", "facebook_dm", "instagram",
+                                                          "instagram_dm", "threads", "twitter"],
           f"every source reads fine, and search (no keywords set) is not one: {states}")
     prompts = "\n".join(llm.prompts())
     check("Their message (@maria.codes)" in prompts and "Cert roadmap" in prompts,
           "the model sees who wrote and which post they answered")
 
     # The next pass, inside the listening interval, reads nothing.
-    gets = len(http.gets)
+    # (DM threads have their own, shorter interval: OUTREACH_DM_MINUTES.)
+    def comment_reads():
+        return [r for r in http.gets if "/conversations" not in r["url"]]
+    gets = len(comment_reads())
     outreach_worker.run_once(now=NOON + minutes(10))
-    check(len(http.gets) == gets, "within the listening interval nothing is read again")
+    check(len(comment_reads()) == gets, "within the listening interval nothing is read again")
 
     # After it: nothing is stored twice; an unchanged comment count is not fetched;
     # the owner's own answer to R4 closes R4's draft.

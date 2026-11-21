@@ -158,6 +158,10 @@ Catalogue a media archive by year and category, browse it by either, review disc
 Work your lead list: import opt-ins from Kartra, let an agent draft personal texts and replies around the clock, approve each one before it goes out through Twilio, and prepare and log the calls you make yourself.
 
 
+### Inbox
+One shared inbox for every conversation: texts, calls, comments on your posts, and Instagram and Facebook DMs, grouped by person. Resolve, snooze, assign and label conversations, keep private notes, and answer with canned replies on any channel the person used.
+
+
 ---
 
 ## Project Structure
@@ -841,6 +845,63 @@ with whoever handles your compliance.
 
 Verify with `python scripts/check_outreach.py <section>` (see the file for the
 sections). Twilio and the model are faked, so nothing is sent.
+
+### Inbox
+
+The **Inbox** page (`/inbox`) shows everyone who wrote to you as one
+conversation per person, whatever the channel: texts, logged calls, comments
+and replies on your posts, and Instagram and Facebook Page DMs. Once the person
+is a lead, all their channels are one thread; before that, they are grouped by
+their phone number or handle, and the conversation follows them when they
+become a lead (or when two leads are merged).
+
+- **Status.** Conversations are Open, Snoozed or Resolved. **Resolve** closes
+  one (with Undo); **Snooze** hides it for an hour, until tomorrow 9:00, until
+  next Monday 9:00, or until a time you pick (in the time zone from Outreach
+  Setup). A new message from the person reopens a resolved or snoozed
+  conversation, and a snooze ends on its own at its time.
+- **Filters.** Mine, Unassigned, by channel, by label, *Needs reply* (their
+  message is the latest), and search over names, numbers and message text.
+- **Assign and label.** Assign a conversation to any Insights user, and give it
+  up to 10 labels.
+- **Private note.** The composer's *Private note* mode keeps a note in the
+  thread that only your team sees. Nothing is sent.
+- **Canned replies.** Save the answers you give most often under a short code
+  (**Canned replies** button), then type `/` and the code in any reply to insert
+  one.
+- **Replying.** Pick the channel (the one they wrote on last is preselected).
+  The reply goes out through the same sender as the Outreach queue, so every
+  rule still holds: text consent or a text from them in the last 24 hours,
+  texting hours, opt-outs, daily caps, and your offers-only links for texts and
+  public replies. A refused reply stays in the box with the reason. Replying to
+  someone who is not a lead yet makes them one. If the agent already drafted a
+  reply on that channel, the composer starts with it. A second press of Send
+  never sends the same words twice.
+
+**Instagram and Facebook DMs.** The worker reads the DM threads of each
+connected Instagram account and Facebook Page every `OUTREACH_DM_MINUTES`
+(default 5) while `OUTREACH_ENABLED` is on; **Check for new messages** reads
+them now. A thread is fetched again only when it changed. Each person who sends
+a DM becomes a lead. Meta only lets a business answer within 24 hours of the
+person's last message, so past that the DM channel is shown disabled with the
+reason. A DM whose delivery was not confirmed is never resent: it is settled
+when it shows up in the thread, or marked not sent an hour later.
+
+DMs need Meta's messaging permission, which plain **Connect** does not ask for:
+`instagram_business_manage_messages` for Instagram and `pages_messaging` for a
+Facebook Page. Add it to the Meta app, then press
+**Reconnect with DM permissions** in the Inbox's **Channels** dialog (it asks for the configured
+scopes, the engagement scopes and the messaging scope). Until Meta's App Review
+approves the permission, only the app's own testers' accounts can use it. The
+Channels dialog shows each DM source's state (reading, needs permission, needs
+reconnect).
+
+Not built: a website chat widget, email and WhatsApp channels, and Meta's
+webhooks (DMs are read by polling, so they need no public URL).
+
+Verify with `python scripts/check_inbox.py <section>` (schema, state, reply,
+dm_read, dm_send, dm_auth, canned, ui, docs, dashes). Twilio and Meta are faked,
+so nothing is sent.
 
 ## Completion Gates
 

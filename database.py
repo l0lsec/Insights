@@ -838,6 +838,7 @@ def init_db(db_path: str = DB_PATH) -> None:
 
         _migrate_tokens_to_accounts(conn)
         _init_outreach_tables(conn)
+        _init_inbox_tables(conn)
         conn.commit()
 
 
@@ -7193,6 +7194,8 @@ def merge_leads(keep_id: int, drop_id: int, db_path: str = DB_PATH) -> None:
         conn.execute("DELETE FROM leads WHERE id = ?", (drop_id,))
         conn.commit()
     update_lead(keep_id, db_path=db_path, **merged)
+    # Their Inbox conversation (status, labels, notes) folds into the kept one.
+    rekey_inbox_conversation(f"lead:{drop_id}", f"lead:{keep_id}", db_path=db_path)
 
 
 def create_lead_import_batch(filename: str, form_name: str, consent_types, consent_wording: str,
@@ -7320,7 +7323,8 @@ def list_outreach_queue(db_path: str = DB_PATH) -> list:
     """Everything waiting on the owner: drafts, failures to look at, unmatched texts.
 
     Social messages never wait here on their own: the worker triages each one
-    into a draft (which does) or a skip.
+    into a draft (which does) or a skip. Direct messages are answered from the
+    Inbox, so their sends never wait here either.
     """
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
@@ -7328,7 +7332,7 @@ def list_outreach_queue(db_path: str = DB_PATH) -> list:
             """
             SELECT * FROM outreach_messages
             WHERE (direction = 'out' AND status IN ('draft', 'needs_review', 'unknown', 'failed')
-                   AND channel != 'call')
+                   AND channel NOT IN ('call', 'instagram_dm', 'facebook_dm'))
                OR (direction = 'in' AND channel = 'sms' AND lead_id IS NULL AND status = 'received')
             ORDER BY CASE status WHEN 'unknown' THEN 0 WHEN 'received' THEN 1
                                  WHEN 'failed' THEN 2 WHEN 'needs_review' THEN 3 ELSE 4 END,
@@ -7629,3 +7633,399 @@ def outreach_messages_in_conversation(channel: str, root_id: str, db_path: str =
             "AND json_extract(context, '$.root_id') = ? ORDER BY COALESCE(sent_at, created_at), id",
             (channel, str(root_id))).fetchall()
         return [_message_dict(r) for r in rows]
+
+
+# ── Inbox ───────────────────────────────────────────────────────────────────
+#
+# The Inbox is a view over outreach_messages: one conversation per person,
+# whatever channel they used. These tables hold only what the view adds: each
+# conversation's status, assignee, labels and read mark, the team's private
+# notes, and canned replies. A conversation is named by a key: "lead:<id>" once
+# the person is a lead, otherwise "<platform>:<identity>" (the same kind and
+# value a lead identity would have), so a person found again later is the same
+# conversation.
+
+INBOX_STATUSES = ("open", "snoozed", "resolved")
+
+# Direct-message channels. Their rows live in outreach_messages beside texts
+# and comments; the platform's thread id is kept as the conversation root.
+DM_CHANNELS = ("instagram_dm", "facebook_dm")
+
+# Which lead-identity kind each channel's people are recognised by.
+INBOX_IDENTITY_KIND = {
+    "sms": "phone", "threads": "threads", "instagram": "instagram",
+    "instagram_dm": "instagram", "facebook": "facebook", "facebook_dm": "facebook",
+    "twitter": "twitter",
+}
+
+# What a conversation shows: everything that arrived, and what went out or may
+# have. Drafts live in the composer, not the thread.
+INBOX_VISIBLE_OUT = ("sending", "sent", "delivered", "external", "unknown", "failed", "logged")
+
+_INBOX_KEY_SQL = """
+    CASE
+      WHEN m.lead_id IS NOT NULL THEN 'lead:' || m.lead_id
+      WHEN m.channel = 'sms' THEN 'phone:' || COALESCE(m.peer, '')
+      WHEN m.channel IN ('facebook', 'facebook_dm', 'twitter') THEN
+        (CASE m.channel WHEN 'twitter' THEN 'twitter:' ELSE 'facebook:' END) ||
+        COALESCE(NULLIF(json_extract(m.context, '$.author_id'), ''),
+                 LOWER(COALESCE(json_extract(m.context, '$.author'), '')))
+      WHEN m.channel IN ('instagram', 'instagram_dm') THEN
+        'instagram:' || LOWER(COALESCE(json_extract(m.context, '$.author'), ''))
+      WHEN m.channel = 'threads' THEN
+        'threads:' || LOWER(COALESCE(json_extract(m.context, '$.author'), ''))
+      ELSE 'message:' || m.id
+    END
+"""
+
+_INBOX_VISIBLE_SQL = (
+    "(m.direction = 'in' OR m.status IN ({out}) OR m.channel = 'call') "
+    "AND NOT (m.lead_id IS NULL AND m.direction = 'in' "
+    "AND COALESCE(json_extract(m.context, '$.triage'), '') = 'skip')"
+).format(out=", ".join(f"'{s}'" for s in INBOX_VISIBLE_OUT))
+
+
+def _init_inbox_tables(conn) -> None:
+    """Create the inbox tables. Called from init_db; safe to run repeatedly."""
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inbox_conversations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            key TEXT NOT NULL UNIQUE,
+            status TEXT NOT NULL DEFAULT 'open',
+            status_mark INTEGER DEFAULT 0,
+            snoozed_until TEXT,
+            assignee_id INTEGER,
+            labels TEXT DEFAULT '[]',
+            read_mark INTEGER DEFAULT 0,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS inbox_notes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL,
+            user_id INTEGER,
+            body TEXT NOT NULL,
+            created_at TEXT,
+            FOREIGN KEY(conversation_id) REFERENCES inbox_conversations(id) ON DELETE CASCADE
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS canned_responses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            short_code TEXT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TEXT,
+            updated_at TEXT
+        )
+        """
+    )
+    for stmt in (
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_canned_short_code "
+        "ON canned_responses(short_code COLLATE NOCASE)",
+        "CREATE INDEX IF NOT EXISTS idx_inbox_notes_conversation "
+        "ON inbox_notes(conversation_id, created_at)",
+    ):
+        conn.execute(stmt)
+
+
+def _inbox_state_dict(row) -> dict | None:
+    if row is None:
+        return None
+    state = dict(row)
+    state["labels"] = _json_or(state.get("labels"), [])
+    return state
+
+
+def inbox_message_key(message: dict) -> str:
+    """The conversation key of one stored message, as the SQL grouping computes it."""
+    if message.get("lead_id"):
+        return f"lead:{message['lead_id']}"
+    channel = message.get("channel")
+    context = message.get("context") or {}
+    if channel == "sms":
+        return f"phone:{message.get('peer') or ''}"
+    author = (context.get("author") or "").lower()
+    if channel in ("facebook", "facebook_dm", "twitter"):
+        prefix = "twitter" if channel == "twitter" else "facebook"
+        return f"{prefix}:{context.get('author_id') or author}"
+    if channel in ("instagram", "instagram_dm", "threads"):
+        prefix = "threads" if channel == "threads" else "instagram"
+        return f"{prefix}:{author}"
+    return f"message:{message.get('id')}"
+
+
+def inbox_groups(db_path: str = DB_PATH) -> list:
+    """Every conversation with its latest activity, unread count and stored state.
+
+    One row per key, newest activity first. Keys with no stored state come back
+    with ``state`` None (an open conversation nobody has touched).
+    """
+    sql = f"""
+        WITH v AS (
+            SELECT m.id, m.lead_id, m.channel, m.direction, m.status,
+                   COALESCE(m.sent_at, m.created_at) AS at, {_INBOX_KEY_SQL} AS key
+            FROM outreach_messages m WHERE {_INBOX_VISIBLE_SQL}
+        )
+        SELECT v.key, MAX(v.id) AS last_id,
+               MAX(CASE WHEN v.direction = 'in' THEN v.id END) AS last_in_id,
+               MAX(CASE WHEN v.direction = 'out' THEN v.id END) AS last_out_id,
+               MAX(v.at) AS last_at, MAX(v.lead_id) AS lead_id,
+               GROUP_CONCAT(DISTINCT v.channel) AS channels,
+               SUM(CASE WHEN v.direction = 'in' AND v.id > COALESCE(c.read_mark, 0)
+                        THEN 1 ELSE 0 END) AS unread,
+               c.id AS state_id
+        FROM v LEFT JOIN inbox_conversations c ON c.key = v.key
+        GROUP BY v.key
+        ORDER BY last_at DESC, last_id DESC
+    """
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        groups = [dict(r) for r in conn.execute(sql)]
+        states = {r["id"]: _inbox_state_dict(r)
+                  for r in conn.execute("SELECT * FROM inbox_conversations")}
+    for group in groups:
+        group["channels"] = sorted(set((group.get("channels") or "").split(",")) - {""})
+        group["state"] = states.get(group.pop("state_id"))
+    return groups
+
+
+def inbox_messages_for_key(key: str, db_path: str = DB_PATH) -> list:
+    """Every visible message of one conversation, oldest first."""
+    sql = (f"SELECT m.* FROM outreach_messages m WHERE {_INBOX_VISIBLE_SQL} "
+           f"AND ({_INBOX_KEY_SQL}) = ? ORDER BY COALESCE(m.sent_at, m.created_at), m.id")
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return [_message_dict(r) for r in conn.execute(sql, (key,))]
+
+
+def inbox_open_drafts_for_key(key: str, db_path: str = DB_PATH) -> list:
+    """The agent's open drafts in one conversation (one per channel at most)."""
+    marks = ", ".join("?" for _ in OUTREACH_OPEN_STATUSES)
+    sql = (f"SELECT m.* FROM outreach_messages m WHERE m.direction = 'out' "
+           f"AND m.status IN ({marks}) AND ({_INBOX_KEY_SQL}) = ? ORDER BY m.id")
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return [_message_dict(r) for r in conn.execute(sql, (*OUTREACH_OPEN_STATUSES, key))]
+
+
+def get_inbox_state(conversation_id: int | None = None, key: str | None = None,
+                    db_path: str = DB_PATH) -> dict | None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        if conversation_id is not None:
+            row = conn.execute("SELECT * FROM inbox_conversations WHERE id = ?",
+                               (conversation_id,)).fetchone()
+        else:
+            row = conn.execute("SELECT * FROM inbox_conversations WHERE key = ?", (key,)).fetchone()
+        return _inbox_state_dict(row)
+
+
+def ensure_inbox_state(key: str, db_path: str = DB_PATH) -> dict:
+    """The stored state of a conversation, created (open, unread) if it has none."""
+    now = outreach_now()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO inbox_conversations (key, status, created_at, updated_at) "
+            "VALUES (?, 'open', ?, ?)", (key, now, now))
+        conn.commit()
+    return get_inbox_state(key=key, db_path=db_path)
+
+
+_INBOX_UPDATABLE = {"status", "status_mark", "snoozed_until", "assignee_id", "labels", "read_mark"}
+
+
+def update_inbox_state(conversation_id: int, db_path: str = DB_PATH, **fields) -> None:
+    data = {k: v for k, v in fields.items() if k in _INBOX_UPDATABLE}
+    if "labels" in data and not isinstance(data["labels"], str):
+        data["labels"] = json.dumps(list(data["labels"] or []))
+    if not data:
+        return
+    data["updated_at"] = outreach_now()
+    sets = ", ".join(f"{key} = ?" for key in data)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(f"UPDATE inbox_conversations SET {sets} WHERE id = ?",
+                     (*data.values(), conversation_id))
+        conn.commit()
+
+
+def _merge_inbox_rows(conn, keep_id: int, drop_id: int) -> None:
+    """Fold one conversation's state into another: labels join, notes move,
+    the kept row's status and assignee win unless it has none."""
+    rows = {r[0]: r for r in conn.execute(
+        "SELECT id, labels, assignee_id, read_mark FROM inbox_conversations WHERE id IN (?, ?)",
+        (keep_id, drop_id))}
+    keep, drop = rows.get(keep_id), rows.get(drop_id)
+    if not keep or not drop:
+        return
+    labels = list(dict.fromkeys(_json_or(keep[1], []) + _json_or(drop[1], [])))
+    conn.execute(
+        "UPDATE inbox_conversations SET labels = ?, assignee_id = COALESCE(assignee_id, ?), "
+        "read_mark = MAX(COALESCE(read_mark, 0), ?), updated_at = ? WHERE id = ?",
+        (json.dumps(labels), drop[2], drop[3] or 0, outreach_now(), keep_id))
+    conn.execute("UPDATE inbox_notes SET conversation_id = ? WHERE conversation_id = ?",
+                 (keep_id, drop_id))
+    conn.execute("DELETE FROM inbox_conversations WHERE id = ?", (drop_id,))
+
+
+def rekey_inbox_conversation(old_key: str, new_key: str, db_path: str = DB_PATH) -> None:
+    """A person's messages now group under ``new_key`` (they became a lead, or two
+    leads merged): their conversation's state follows them."""
+    if old_key == new_key:
+        return
+    with sqlite3.connect(db_path) as conn:
+        old = conn.execute("SELECT id FROM inbox_conversations WHERE key = ?", (old_key,)).fetchone()
+        if not old:
+            return
+        new = conn.execute("SELECT id FROM inbox_conversations WHERE key = ?", (new_key,)).fetchone()
+        if new:
+            _merge_inbox_rows(conn, new[0], old[0])
+        else:
+            conn.execute("UPDATE inbox_conversations SET key = ?, updated_at = ? WHERE id = ?",
+                         (new_key, outreach_now(), old[0]))
+        conn.commit()
+
+
+def adopt_orphan_inbox_states(live_keys, db_path: str = DB_PATH) -> int:
+    """Conversation states whose key no longer has messages, because the person
+    became a lead since: move each onto its lead's conversation. Returns how many moved."""
+    live = set(live_keys)
+    moved = 0
+    with sqlite3.connect(db_path) as conn:
+        orphans = [r for r in conn.execute("SELECT id, key FROM inbox_conversations")
+                   if r[1] not in live and not r[1].startswith("lead:")]
+    for _row_id, key in orphans:
+        kind, _sep, value = key.partition(":")
+        lead_id = find_lead_by_identity(kind, value, db_path=db_path) if value else None
+        if lead_id:
+            rekey_inbox_conversation(key, f"lead:{lead_id}", db_path=db_path)
+            moved += 1
+    return moved
+
+
+def add_inbox_note(conversation_id: int, user_id: int | None, body: str,
+                   db_path: str = DB_PATH) -> int:
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO inbox_notes (conversation_id, user_id, body, created_at) VALUES (?, ?, ?, ?)",
+            (conversation_id, user_id, body, outreach_now()))
+        conn.commit()
+        return cur.lastrowid
+
+
+def list_inbox_notes(conversation_id: int, db_path: str = DB_PATH) -> list:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute(
+            "SELECT n.*, u.username FROM inbox_notes n LEFT JOIN users u ON u.id = n.user_id "
+            "WHERE n.conversation_id = ? ORDER BY n.created_at, n.id", (conversation_id,))]
+
+
+def delete_inbox_note(note_id: int, db_path: str = DB_PATH) -> bool:
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM inbox_notes WHERE id = ?", (note_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def inbox_label_names(db_path: str = DB_PATH) -> list:
+    """Every label in use, for the label picker."""
+    names = set()
+    with sqlite3.connect(db_path) as conn:
+        for (labels,) in conn.execute("SELECT labels FROM inbox_conversations"):
+            names.update(_json_or(labels, []))
+    return sorted(names, key=str.lower)
+
+
+# --- Canned replies ---
+
+def list_canned_responses(db_path: str = DB_PATH) -> list:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM canned_responses ORDER BY short_code COLLATE NOCASE")]
+
+
+def get_canned_response(canned_id: int, db_path: str = DB_PATH) -> dict | None:
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM canned_responses WHERE id = ?", (canned_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def save_canned_response(short_code: str, content: str, canned_id: int | None = None,
+                         db_path: str = DB_PATH) -> int | None:
+    """Create or edit a canned reply. Returns its id, or None when the short code is taken."""
+    now = outreach_now()
+    try:
+        with sqlite3.connect(db_path) as conn:
+            if canned_id:
+                conn.execute("UPDATE canned_responses SET short_code = ?, content = ?, updated_at = ? "
+                             "WHERE id = ?", (short_code, content, now, canned_id))
+                conn.commit()
+                return canned_id
+            cur = conn.execute("INSERT INTO canned_responses (short_code, content, created_at, "
+                               "updated_at) VALUES (?, ?, ?, ?)", (short_code, content, now, now))
+            conn.commit()
+            return cur.lastrowid
+    except sqlite3.IntegrityError:
+        return None
+
+
+def delete_canned_response(canned_id: int, db_path: str = DB_PATH) -> bool:
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM canned_responses WHERE id = ?", (canned_id,))
+        conn.commit()
+        return cur.rowcount > 0
+
+
+def outreach_messages_by_ids(ids, db_path: str = DB_PATH) -> dict:
+    """``{id: message}`` for the given ids (missing ones are left out)."""
+    ids = [int(i) for i in ids if i]
+    if not ids:
+        return {}
+    marks = ", ".join("?" for _ in ids)
+    with sqlite3.connect(db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        return {r["id"]: _message_dict(r) for r in conn.execute(
+            f"SELECT * FROM outreach_messages WHERE id IN ({marks})", ids)}
+
+
+def inbox_keys_matching(text: str, db_path: str = DB_PATH) -> set:
+    """Conversation keys with a visible message, or a sender, containing ``text``."""
+    like = f"%{text}%"
+    sql = (f"SELECT DISTINCT ({_INBOX_KEY_SQL}) FROM outreach_messages m WHERE {_INBOX_VISIBLE_SQL} "
+           "AND (m.body LIKE ? OR m.peer LIKE ? OR json_extract(m.context, '$.author') LIKE ? "
+           "OR json_extract(m.context, '$.author_name') LIKE ?)")
+    with sqlite3.connect(db_path) as conn:
+        return {r[0] for r in conn.execute(sql, (like, like, like, like))}
+
+
+def link_inbox_key_to_lead(key: str, lead_id: int, db_path: str = DB_PATH) -> int:
+    """Give every lead-less message of one conversation to ``lead_id``, and move
+    the conversation's state with them. Returns how many messages moved."""
+    sql = (f"UPDATE outreach_messages SET lead_id = ?, updated_at = ? WHERE id IN ("
+           f"SELECT m.id FROM outreach_messages m WHERE m.lead_id IS NULL "
+           f"AND ({_INBOX_KEY_SQL}) = ?)")
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute(sql, (lead_id, outreach_now(), key))
+        conn.commit()
+        moved = cur.rowcount
+    rekey_inbox_conversation(key, f"lead:{lead_id}", db_path=db_path)
+    return moved
+
+
+def discard_unsent_draft(message_id: int, db_path: str = DB_PATH) -> bool:
+    """Delete a draft the Inbox created for a send that was refused, so it does
+    not linger in the Outreach queue. Only a row still in draft is removed."""
+    with sqlite3.connect(db_path) as conn:
+        cur = conn.execute("DELETE FROM outreach_messages WHERE id = ? AND status = 'draft' "
+                           "AND direction = 'out'", (message_id,))
+        conn.commit()
+        return cur.rowcount > 0

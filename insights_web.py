@@ -331,6 +331,7 @@ import content_agent
 # them up. outreach_worker drafts; only outreach_sender sends, from the Send route.
 import lead_import
 import outreach_agent
+import inbox
 import outreach_sender
 import outreach_social
 import outreach_worker
@@ -12505,13 +12506,19 @@ def _threads_reply_scopes():
 def _outreach_engage_scopes(platform: str):
     """The scopes for an OAuth start: the configured ones, plus the engagement
     ones when the owner pressed "Reconnect with engagement permissions"."""
-    if request.args.get('engage') != '1':
+    engage = request.args.get('engage')
+    if engage not in ('1', 'dm'):
         return None
     configured = {"threads": threads_client_module.THREADS_SCOPES,
                   "instagram": instagram_client_module.INSTAGRAM_SCOPES,
                   "facebook": facebook_client_module.FACEBOOK_SCOPES}[platform]
     update_outreach_runtime(engage_requested={platform: outreach_utc_now().strftime('%Y-%m-%d %H:%M:%S')})
-    return outreach_social.merge_scopes(configured, outreach_social.ENGAGE_SCOPES[platform])
+    extra = list(outreach_social.ENGAGE_SCOPES[platform])
+    if engage == 'dm':
+        # "Reconnect with DM permissions" (Inbox) asks for messaging on top of
+        # the engagement scopes, so one reconnect covers comments and DMs.
+        extra += outreach_social.DM_SCOPES.get(platform, [])
+    return outreach_social.merge_scopes(configured, extra)
 
 
 def _outreach_sources(profile: dict) -> list:
@@ -12604,6 +12611,221 @@ def outreach_starter():
     set_content_brief_schedule(brief_id, next_run_at=_compute_next_run_at(get_content_brief(brief_id)))
     update_outreach_profile(starter_brief_id=brief_id)
     return jsonify({"success": True, "created": True, "brief_id": brief_id})
+
+
+# ── Inbox ───────────────────────────────────────────────────────────────────
+#
+# One conversation per person across texts, calls, comments and DMs (inbox.py).
+# Every write is an XHR from the Inbox page; replies go through
+# outreach_sender.send, the same guarded path as the Outreach queue.
+
+def _inbox_error(exc: 'inbox.InboxError'):
+    return jsonify({"error": str(exc), **exc.extra}), exc.status
+
+
+def _inbox_xhr_required():
+    if request.headers.get('X-Requested-With') != 'XMLHttpRequest':
+        return jsonify({"error": "Use the Inbox page for this"}), 400
+    return None
+
+
+def _inbox_sources() -> list:
+    """The DM sources the worker reads, with what happened on the last read."""
+    profile = get_outreach_profile()
+    runtime = profile.get('runtime_state') or {}
+    sources = runtime.get('sources') or {}
+    rows = []
+    for account in list_social_accounts():
+        platform = account['platform']
+        if platform not in outreach_social.DM_SCOPES:
+            continue
+        channel = f"{platform}_dm"
+        entry = sources.get(f"{channel}:{account['id']}") or {}
+        rows.append({
+            "channel": channel, "name": outreach_social.DM_NAMES[channel],
+            "account_id": account['id'],
+            "handle": account['handle'] or account['display_name'] or account['label'] or '',
+            "state": entry.get('state') or 'unchecked', "friendly": entry.get('friendly') or '',
+            "at": entry.get('at'), "reconnect_url": f"/{platform}/auth?engage=dm",
+        })
+    return rows
+
+
+@app.route('/inbox')
+def inbox_page():
+    """Every conversation in one place: texts, calls, comments and DMs."""
+    users = [{"id": u['id'], "name": u['username']} for u in list_users()]
+    twilio_ready = twilio_client.get_twilio_client().can_send()
+    return render_template(
+        'inbox.html', users=users, me=session.get('user_id'),
+        channel_names=inbox.CHANNEL_SHORT, labels=database.inbox_label_names(),
+        canned=database.list_canned_responses(), sources=_inbox_sources(),
+        twilio_ready=twilio_ready, worker_enabled=outreach_worker.enabled(),
+        dm_minutes=outreach_worker.dm_minutes(),
+        snooze_presets=inbox.SNOOZE_PRESETS,
+    )
+
+
+@app.route('/inbox/conversations')
+def inbox_conversations():
+    status = request.args.get('status', 'open')
+    if status not in inbox.STATUS_FILTERS:
+        return jsonify({"error": "Unknown status filter"}), 400
+    assignee = request.args.get('assignee', 'all')
+    if assignee not in inbox.ASSIGNEE_FILTERS:
+        return jsonify({"error": "Unknown assignee filter"}), 400
+    channel = request.args.get('channel') or None
+    if channel and channel not in inbox.CHANNEL_NAMES:
+        return jsonify({"error": "Unknown channel"}), 400
+    result = inbox.list_conversations(
+        session.get('user_id'), outreach_utc_now(), status=status, assignee=assignee,
+        channel=channel, label=(request.args.get('label') or '').strip() or None,
+        needs_reply=request.args.get('needs_reply') == '1',
+        search=(request.args.get('q') or '').strip()[:100] or None)
+    result["labels"] = database.inbox_label_names()
+    return jsonify(result)
+
+
+@app.route('/inbox/conversations/<int:conversation_id>')
+def inbox_conversation(conversation_id):
+    try:
+        detail = inbox.conversation_detail(conversation_id, outreach_utc_now(),
+                                           twilio_client.get_twilio_client().can_send())
+    except inbox.InboxError as exc:
+        return _inbox_error(exc)
+    return jsonify(detail)
+
+
+def _inbox_write(fn):
+    """Run one change to a conversation for an XHR, answering errors as JSON."""
+    refused = _inbox_xhr_required()
+    if refused:
+        return refused
+    try:
+        return jsonify({"success": True, **fn(request.get_json(silent=True) or {})})
+    except inbox.InboxError as exc:
+        return _inbox_error(exc)
+
+
+@app.route('/inbox/conversations/<int:conversation_id>/status', methods=['POST'])
+def inbox_set_status(conversation_id):
+    return _inbox_write(lambda data: inbox.set_status(
+        conversation_id, data.get('status'), outreach_utc_now(), preset=data.get('preset'),
+        custom=data.get('until'), zone=get_outreach_profile().get('timezone')))
+
+
+@app.route('/inbox/conversations/<int:conversation_id>/assign', methods=['POST'])
+def inbox_assign(conversation_id):
+    return _inbox_write(lambda data: inbox.set_assignee(
+        conversation_id, data.get('assignee_id'), outreach_utc_now()))
+
+
+@app.route('/inbox/conversations/<int:conversation_id>/labels', methods=['POST'])
+def inbox_labels(conversation_id):
+    return _inbox_write(lambda data: inbox.set_labels(
+        conversation_id, data.get('labels'), outreach_utc_now()))
+
+
+@app.route('/inbox/conversations/<int:conversation_id>/read', methods=['POST'])
+def inbox_read(conversation_id):
+    return _inbox_write(lambda data: inbox.mark_read(
+        conversation_id, outreach_utc_now(), unread=bool(data.get('unread'))))
+
+
+@app.route('/inbox/conversations/<int:conversation_id>/notes', methods=['POST'])
+def inbox_add_note(conversation_id):
+    return _inbox_write(lambda data: inbox.add_note(
+        conversation_id, session.get('user_id'), data.get('body'), outreach_utc_now()))
+
+
+@app.route('/inbox/notes/<int:note_id>/delete', methods=['POST'])
+def inbox_delete_note(note_id):
+    refused = _inbox_xhr_required()
+    if refused:
+        return refused
+    if not database.delete_inbox_note(note_id):
+        return jsonify({"error": "That note no longer exists"}), 404
+    return jsonify({"success": True})
+
+
+@app.route('/inbox/conversations/<int:conversation_id>/reply', methods=['POST'])
+def inbox_reply(conversation_id):
+    """Send the owner's reply on one channel, through the Outreach sender's rules."""
+    refused = _inbox_xhr_required()
+    if refused:
+        return refused
+    data = request.get_json(silent=True) or {}
+    body = (data.get('body') or '').strip()
+    try:
+        prepared = inbox.prepare_reply(conversation_id, data.get('channel'), body,
+                                       data.get('seen_id'), outreach_utc_now())
+    except inbox.InboxError as exc:
+        return _inbox_error(exc)
+    try:
+        result = outreach_sender.send(prepared['message_id'], body, session.get('user_id'))
+    except outreach_sender.NotFromSendButton as exc:
+        if prepared['created']:
+            database.discard_unsent_draft(prepared['message_id'])
+        return jsonify({"error": str(exc)}), 403
+    # Replying may have made the person a lead, which moves the conversation
+    # under the lead; the page follows it by this id.
+    sent = get_outreach_message(prepared['message_id'])
+    if sent and sent.get('lead_id'):
+        result['conversation_id'] = database.ensure_inbox_state(f"lead:{sent['lead_id']}")['id']
+    if result.get('ok'):
+        try:
+            inbox.mark_read(result.get('conversation_id', conversation_id), outreach_utc_now())
+        except inbox.InboxError:
+            pass
+        return jsonify(result)
+    if 'status' not in result and prepared['created']:
+        # Refused before anything left: no draft is left behind in the Outreach queue.
+        database.discard_unsent_draft(prepared['message_id'])
+    return jsonify(result), result.get('http_status', 400)
+
+
+@app.route('/inbox/check', methods=['POST'])
+def inbox_check():
+    """Read new texts and DMs now instead of waiting for the next pass."""
+    refused = _inbox_xhr_required()
+    if refused:
+        return refused
+    now = outreach_utc_now()
+    summary = {"errors": [], "inbound": 0, "unmatched": 0, "opted_out": 0, "dm_inbound": 0}
+    client = twilio_client.get_twilio_client()
+    if client.can_read():
+        outreach_worker.poll_inbound(client, now, summary)
+    outreach_worker.dm_pass(get_outreach_profile(), now, summary, force=True)
+    return jsonify({"success": True, "new_texts": summary.get("inbound", 0),
+                    "new_dms": summary.get("dm_inbound", 0), "errors": summary["errors"],
+                    "sources": _inbox_sources()})
+
+
+@app.route('/inbox/canned')
+def inbox_canned_list():
+    return jsonify({"canned": database.list_canned_responses()})
+
+
+@app.route('/inbox/canned', methods=['POST'])
+def inbox_canned_create():
+    return _inbox_write(lambda data: {"canned": inbox.save_canned(data.get('short_code'),
+                                                                  data.get('content'))})
+
+
+@app.route('/inbox/canned/<int:canned_id>', methods=['POST'])
+def inbox_canned_update(canned_id):
+    return _inbox_write(lambda data: {"canned": inbox.save_canned(
+        data.get('short_code'), data.get('content'), canned_id)})
+
+
+@app.route('/inbox/canned/<int:canned_id>/delete', methods=['POST'])
+def inbox_canned_delete(canned_id):
+    refused = _inbox_xhr_required()
+    if refused:
+        return refused
+    if not database.delete_canned_response(canned_id):
+        return jsonify({"error": "That canned reply no longer exists"}), 404
+    return jsonify({"success": True})
 
 
 _EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response></Response>'

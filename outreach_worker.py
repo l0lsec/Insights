@@ -80,6 +80,12 @@ def search_minutes() -> int:
     return max(1, int(os.getenv("OUTREACH_SEARCH_MINUTES", "60") or 60))
 
 
+def dm_minutes() -> int:
+    """How often Instagram and Facebook DMs are read. A DM is a chat, so this is
+    shorter than the comment listener's interval."""
+    return max(1, int(os.getenv("OUTREACH_DM_MINUTES", "5") or 5))
+
+
 def run_once(now=None, client=None) -> dict:
     """One full pass. Returns a summary; a pass already in progress is not doubled."""
     if not _run_lock.acquire(blocking=False):
@@ -114,6 +120,7 @@ def _run(now, client) -> dict:
                                  + ", ".join(client.missing()))
     profile = database.get_outreach_profile()
     social_pass(profile, now, summary)
+    dm_pass(database.get_outreach_profile(), now, summary)
     search_pass(profile, now, summary)
     draft_pass(database.get_outreach_profile(), now, summary)
     database.update_outreach_profile(
@@ -487,6 +494,160 @@ def _give_up_unseen_replies(fetched_roots: set, now) -> None:
                     message["id"], status="failed",
                     error="The reply is not on the post an hour later, so it did not go out. "
                           "Safe to send again.")
+
+
+# ── 2b. Direct messages ─────────────────────────────────────────────────────
+
+def dm_pass(profile: dict, now, summary: dict, force: bool = False) -> None:
+    """Read Instagram and Facebook DMs into the Inbox. Reads only.
+
+    A thread is fetched only when its last update changed since the previous
+    read, or when it holds a DM whose delivery is still unknown (so that DM is
+    settled either way). The person behind a DM becomes a lead on their first
+    message: they wrote to the owner directly.
+    """
+    runtime = profile.get("runtime_state") or {}
+    if not force and not _due(runtime.get("last_dm_at"), dm_minutes(), now):
+        return
+    for account in database.list_social_accounts():
+        platform = account["platform"]
+        if platform not in outreach_social.DM_PLATFORM.values():
+            continue
+        channel = f"{platform}_dm"
+        if not force and _source_resting(runtime, channel, platform, account["id"], now):
+            continue
+        client, token, _account, failure = social_publisher.session(platform, account["id"])
+        if failure:
+            _set_source(channel, account, "needs_reconnect",
+                        failure.get("error") or "Reconnect this account", now)
+            continue
+        try:
+            outcome = _read_dms(channel, account, token, now, summary)
+        except Exception as exc:  # noqa: BLE001 - one account must not stop the rest
+            logger.exception("DM read failed for %s account %s", platform, account["id"])
+            outcome = {"ok": False, "state": "error", "friendly": f"{exc.__class__.__name__}"}
+        _set_source(channel, account, "ok" if outcome["ok"] else outcome["state"],
+                    outcome.get("friendly") or "", now)
+        if not outcome["ok"] and outcome["state"] != "needs_permission":
+            summary["errors"].append(f"{outreach_social.DM_NAMES[channel]}: {outcome['friendly']}")
+    database.update_outreach_runtime(last_dm_at=fmt_utc(now))
+
+
+def _read_dms(channel: str, account, token, now, summary) -> dict:
+    platform = outreach_social.DM_PLATFORM[channel]
+    seen_key = _source_key(channel, account["id"])
+    seen = dict(((database.get_outreach_profile()["runtime_state"].get("dm_seen") or {})
+                 .get(seen_key)) or {})
+    threads = outreach_social.dm_conversations(platform, token)
+    if not threads["ok"]:
+        return threads
+    pending = {str((m.get("context") or {}).get("root_id") or "")
+               for status in ("unknown", "sending")
+               for m in database.outreach_messages_with_status(status, channel=channel)
+               if (m.get("context") or {}).get("account_id") == account["id"]}
+    own_id = str(account["external_id"] or "")
+    handle = (account["handle"] or "").lstrip("@")
+    latest = {}
+    for thread in threads["items"]:
+        latest[thread["id"]] = thread["updated"] or ""
+        if seen.get(thread["id"]) == latest[thread["id"]] and thread["id"] not in pending:
+            continue
+        messages = outreach_social.dm_messages(platform, token, thread["id"], own_id, handle)
+        if not messages["ok"]:
+            return messages
+        items = messages["items"]
+        for item in items:
+            if not item["own"]:
+                ingest_dm(item, channel, account, summary)
+        for item in items:
+            if item["own"]:
+                _own_dm_seen(item, channel, account)
+        _give_up_unseen_dms(channel, thread["id"], now)
+    # Remember only the threads the platform still lists, so the cursor stays small.
+    database.update_outreach_runtime(dm_seen={seen_key: latest})
+    return {"ok": True, "state": "ok", "friendly": ""}
+
+
+def _dm_identity(channel: str, item: dict) -> tuple[str, str]:
+    """Instagram people are known by username (as their comments are); a Page's
+    Messenger senders by their id. With no username, the id is the fallback."""
+    if channel == "instagram_dm":
+        if item.get("author"):
+            return "instagram", item["author"].lower()
+        return "instagram_id", str(item.get("author_id") or "")
+    return "facebook", str(item.get("author_id") or "")
+
+
+def ingest_dm(item: dict, channel: str, account, summary: dict) -> int | None:
+    """Store one DM someone sent the owner, and make sure they are a lead."""
+    if not item.get("id") or database.find_outreach_message(channel, str(item["id"])):
+        return None
+    kind, value = _dm_identity(channel, item)
+    lead_id = database.find_lead_by_identity(kind, value) if value else None
+    if lead_id is None:
+        if item.get("author_name"):
+            name = item["author_name"]
+        elif item.get("author"):
+            name = "@" + item["author"]
+        else:
+            name = f"Someone on {outreach_social.DM_NAMES[channel]}"
+        lead_id = database.create_lead([(kind, value)] if value else [], name=name, source=channel,
+                                       stage="replied",
+                                       last_inbound_at=item.get("created") or database.outreach_now())
+    context = {"source": "dm", "account_id": account["id"], "root_id": str(item.get("root_id") or ""),
+               "author": item.get("author") or "", "author_id": str(item.get("author_id") or ""),
+               "author_name": item.get("author_name") or ""}
+    author = item.get("author") or ""
+    peer = f"@{author}" if author and channel == "instagram_dm" else (item.get("author_name") or author)
+    row_id = database.add_outreach_message(
+        channel, "in", "received", item.get("text") or "", lead_id=lead_id, kind="inbound",
+        context=context, external_id=str(item["id"]), peer=peer, sent_at=item.get("created"))
+    if row_id:
+        summary["dm_inbound"] = summary.get("dm_inbound", 0) + 1
+        database.update_lead(lead_id, last_inbound_at=item.get("created") or database.outreach_now())
+    return row_id
+
+
+def _own_dm_seen(item: dict, channel: str, account) -> None:
+    """A message from the owner in a DM thread: it settles a DM Insights sent
+    whose outcome was unknown, or it was sent from the app and joins the thread."""
+    item_id = str(item["id"])
+    if database.find_outreach_message(channel, item_id):
+        return
+    root = str(item.get("root_id") or "")
+    thread = database.outreach_messages_in_conversation(channel, root)
+    body = (item.get("text") or "").strip()
+    for message in thread:
+        if message["direction"] == "out" and message["status"] in ("unknown", "sending") \
+                and (message.get("body") or "").strip() == body:
+            database.record_outreach_sent(message["id"], item_id, "sent")
+            return
+    lead_id = next((m.get("lead_id") for m in reversed(thread)
+                    if m["direction"] == "in" and m.get("lead_id")), None)
+    if lead_id is None:
+        return
+    database.add_outreach_message(
+        channel, "out", "external", item.get("text") or "", lead_id=lead_id, kind="external",
+        context={"root_id": root, "account_id": account["id"], "note": "Sent from the app"},
+        external_id=item_id, sent_at=item.get("created"))
+
+
+def _give_up_unseen_dms(channel: str, root: str, now) -> None:
+    """A DM with an unknown outcome that is still not in its thread an hour later never went out."""
+    stale = fmt_utc(now - timedelta(minutes=STALE_SENDING_MINUTES))
+    for message in database.outreach_messages_with_status("sending", older_than=stale, channel=channel):
+        if str((message.get("context") or {}).get("root_id") or "") == root:
+            database.update_outreach_message(
+                message["id"], status="unknown",
+                error="Insights stopped before Meta answered. Checking the conversation for it.")
+    cutoff = fmt_utc(now - timedelta(minutes=SOCIAL_UNKNOWN_GIVE_UP_MINUTES))
+    for message in database.outreach_messages_with_status("unknown", channel=channel):
+        if str((message.get("context") or {}).get("root_id") or "") == root \
+                and (message.get("sent_at") or "") < cutoff:
+            database.update_outreach_message(
+                message["id"], status="failed",
+                error="The message is not in the conversation an hour later, so it did not go "
+                      "out. Safe to send again.")
 
 
 # ── 2c. Threads keyword search ──────────────────────────────────────────────
