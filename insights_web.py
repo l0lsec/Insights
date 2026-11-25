@@ -345,6 +345,7 @@ from outreach_rules import (
 )
 import document_extractor
 from starter_prompts import grouped_starter_prompts
+import linkedin_client
 from linkedin_client import (
     LinkedInClient,
     get_linkedin_client,
@@ -3618,6 +3619,63 @@ def linkedin_auth():
     return redirect(auth_url)
 
 
+_OIDC_SCOPES = ("openid", "profile", "email")
+
+
+def _linkedin_connect_error(message, steps=(), detail=None):
+    """The page a LinkedIn connection that did not finish lands on."""
+    again = {'return': 'accounts'} if session.get('oauth_return') == 'accounts' else {}
+    return render_template(
+        'connect_error.html', platform='LinkedIn', message=message,
+        steps=list(steps), detail=detail, retry_url=url_for('linkedin_auth', **again),
+    )
+
+
+def _linkedin_scope_refusal(description):
+    """Say which permission LinkedIn refused, and the two ways to fix it.
+
+    LinkedIn answers ``unauthorized_scope_error`` when the app in the developer
+    portal lacks the product that grants a scope Insights asked for, for example
+    ``openid`` without "Sign In with LinkedIn using OpenID Connect".
+    """
+    scope = linkedin_client.refused_scope(description)
+    requested = linkedin_client.LINKEDIN_SCOPES.split()
+    asked = " ".join(requested)
+    if os.environ.get('LINKEDIN_SCOPES') is None:
+        asked_from = f'Insights asks for "{asked}", its built-in list, because LINKEDIN_SCOPES is not set in .env.'
+    else:
+        asked_from = f'Insights asks for "{asked}", from LINKEDIN_SCOPES in .env.'
+    if not scope:
+        return _linkedin_connect_error(
+            "LinkedIn refused one of the permissions Insights asked for, so nothing was "
+            "connected. Any LinkedIn account already connected still works.",
+            steps=[
+                "In the LinkedIn Developer Portal, check your app's Products tab: every "
+                "permission Insights asks for needs the product that grants it. " + asked_from,
+                "Then press Try again.",
+            ],
+            detail=f"LinkedIn said: {unescape(description or '')}",
+        )
+    product = linkedin_client.SCOPE_PRODUCTS.get(scope)
+    drop = _OIDC_SCOPES if scope in _OIDC_SCOPES else (scope,)
+    keep = " ".join(s for s in requested if s not in drop) or "w_member_social"
+    add = (f'In the LinkedIn Developer Portal, open your app, go to Products and add '
+           f'"{product}". Then press Try again.') if product else (
+           f'In the LinkedIn Developer Portal, add the product that grants "{scope}" to '
+           f'your app. Then press Try again.')
+    without = (f'Or stop asking for it. {asked_from} Set LINKEDIN_SCOPES="{keep}" in .env, '
+               f'restart Insights, then press Try again.')
+    if scope in _OIDC_SCOPES:
+        without += (f' Without "{scope}", Insights cannot read your LinkedIn name and member '
+                    'ID, so after connecting it asks you for your Member ID once.')
+    return _linkedin_connect_error(
+        f'Your LinkedIn app is not allowed the "{scope}" permission, so LinkedIn refused '
+        f'the connection. Nothing changed in Insights: any LinkedIn account already '
+        f'connected still works.',
+        steps=[add, without],
+    )
+
+
 @app.route('/linkedin/callback')
 def linkedin_callback():
     """Handle LinkedIn OAuth callback."""
@@ -3625,9 +3683,16 @@ def linkedin_callback():
     if error:
         error_desc = request.args.get('error_description', 'Unknown error')
         app.logger.error("LinkedIn OAuth error: %s - %s", error, error_desc)
-        return render_template(
-            'article_error.html',
-            error=f"LinkedIn authorization failed: {error_desc}",
+        if error == 'unauthorized_scope_error':
+            return _linkedin_scope_refusal(error_desc)
+        if error in ('user_cancelled_authorize', 'user_cancelled_login'):
+            return _linkedin_connect_error(
+                "You cancelled on LinkedIn, so nothing was connected. Any LinkedIn "
+                "account already connected still works.")
+        return _linkedin_connect_error(
+            "LinkedIn did not finish connecting, so nothing was connected. Any LinkedIn "
+            "account already connected still works.",
+            detail=f"LinkedIn said: {unescape(error_desc)}",
         )
     
     code = request.args.get('code')
@@ -3637,16 +3702,13 @@ def linkedin_callback():
     stored_state = session.pop('linkedin_oauth_state', None)
     if not stored_state or stored_state != state:
         app.logger.warning("LinkedIn OAuth state mismatch")
-        return render_template(
-            'article_error.html',
-            error="Security verification failed. Please try again.",
-        )
+        return _linkedin_connect_error(
+            "This LinkedIn sign-in expired or was finished in another window, so Insights "
+            "stopped to keep your account safe. Nothing was connected.")
     
     if not code:
-        return render_template(
-            'article_error.html',
-            error="No authorization code received from LinkedIn.",
-        )
+        return _linkedin_connect_error(
+            "LinkedIn came back without a sign-in code, so nothing was connected.")
     
     client = get_linkedin_client()
     
@@ -3704,9 +3766,9 @@ def linkedin_callback():
         
     except Exception as e:
         app.logger.exception("LinkedIn OAuth exchange failed")
-        return render_template(
-            'article_error.html',
-            error=f"Failed to connect to LinkedIn: {str(e)}",
+        return _linkedin_connect_error(
+            "Insights could not finish connecting LinkedIn.",
+            detail=f"Details: {e}",
         )
 
 

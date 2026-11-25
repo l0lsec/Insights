@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{# A connection to a platform did not finish. Says what happened, how to fix it
+   when there is something to fix, and offers Try again. Used by the LinkedIn
+   OAuth callback; the other platforms still use article_error.html. #}
+{% block title %}{{ platform }} didn't connect | Insights{% endblock %}
+{% block header %}{{ platform }} didn't connect{% endblock %}
+{% block content %}
+<div class="alert alert-danger" role="alert" id="connect-error-message">
+    <p class="mb-0">{{ message }}</p>
+</div>
+
+{% if steps %}
+<section class="mt-4" aria-labelledby="connect-error-fix">
+    <h2 class="h5" id="connect-error-fix">How to fix it</h2>
+    <ol class="mb-0" id="connect-error-steps">
+        {% for step in steps %}
+        <li class="mb-2">{{ step }}</li>
+        {% endfor %}
+    </ol>
+</section>
+{% endif %}
+
+{% if detail %}
+<p class="text-muted small mt-3 mb-0" id="connect-error-detail">{{ detail }}</p>
+{% endif %}
+
+<div class="mt-4 d-flex flex-wrap gap-2">
+    <a href="{{ retry_url }}" class="btn btn-primary">Try again</a>
+    <a href="{{ url_for('accounts_page') }}" class="btn btn-outline-secondary">Back to Accounts</a>
+</div>
+{% endblock %}

@@ -8,6 +8,7 @@ import logging
 import secrets
 import time
 from datetime import datetime, timedelta
+from html import unescape
 from urllib.parse import quote, urlencode
 from typing import Optional
 
@@ -145,6 +146,25 @@ LINKEDIN_SCOPES = os.environ.get(
     "LINKEDIN_SCOPES",
     "openid profile w_member_social"
 )
+
+# The LinkedIn developer-portal product that grants each scope Insights asks for.
+SCOPE_PRODUCTS = {
+    "openid": "Sign In with LinkedIn using OpenID Connect",
+    "profile": "Sign In with LinkedIn using OpenID Connect",
+    "email": "Sign In with LinkedIn using OpenID Connect",
+    "w_member_social": "Share on LinkedIn",
+    "w_member_social_feed": "Community Management API",
+}
+
+
+def refused_scope(description: str | None) -> str | None:
+    """The scope LinkedIn names in an ``unauthorized_scope_error``.
+
+    LinkedIn sends the description HTML-escaped inside the query string, as in
+    ``Scope &quot;openid&quot; is not authorized for your application``.
+    """
+    match = re.search(r'\bscope\s+"([^"\s]+)"', unescape(description or ""), re.I)
+    return match.group(1) if match else None
 
 
 class LinkedInClient:
