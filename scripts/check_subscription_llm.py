@@ -39,6 +39,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 sys.path.insert(0, ROOT)
+# Pin the default provider to the app's own default, as on CI. insights_web's
+# load_dotenv() searches parent folders, so from a worktree it reaches the main
+# checkout's .env; a live LLM_PROVIDER=claude-code there would change what the
+# checks below see. load_dotenv never overrides a variable already set.
+os.environ["LLM_PROVIDER"] = "openai"
 from _accounts_gate import isolated_app, check  # noqa: E402
 
 PY = sys.executable
