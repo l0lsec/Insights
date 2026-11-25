@@ -615,6 +615,11 @@
                 <label class="btn btn-outline-primary" for="provider-openai">OpenAI</label>
                 <input type="radio" class="btn-check" name="aiProvider" id="provider-anthropic" value="anthropic">
                 <label class="btn btn-outline-primary" for="provider-anthropic">Anthropic</label>
+                <input type="radio" class="btn-check" name="aiProvider" id="provider-subscription" value="subscription">
+                <label class="btn btn-outline-primary" for="provider-subscription" id="provider-subscription-label"
+                       title="Uses Claude Code or Codex signed in on this computer, so it counts against your Claude or ChatGPT plan instead of API credits">
+                    <span id="subscription-status-dot" class="me-1 text-muted" aria-hidden="true">●</span> My subscription
+                </label>
                 <input type="radio" class="btn-check" name="aiProvider" id="provider-local" value="local">
                 <label class="btn btn-outline-success" for="provider-local">
                     <span id="ollama-status-dot" class="me-1">●</span> Local (Ollama)
@@ -623,6 +628,7 @@
             <label for="model-select" class="fw-bold small mb-0 ms-2">Model:</label>
             <select id="model-select" class="form-select form-select-sm" style="width:auto;"></select>
             <span id="ollama-status-text" class="small text-muted ms-1"></span>
+            <span id="subscription-status-text" class="small ms-1 d-none" role="status" aria-live="polite"></span>
         </div>
         
         <!-- Tab Content -->
@@ -1293,6 +1299,7 @@
             <select class="form-select form-select-sm" style="width: auto;" id="filter-source" onchange="applyPostFilters()">
                 <option value="">All Sources</option>
                 <option value="agent">🤖 Agent</option>
+                <option value="assistant">🤝 Claude or Codex</option>
                 <option value="manual">✍️ Manual</option>
             </select>
             {% if brief_filter_options %}
@@ -2620,8 +2627,57 @@ let _ollamaAvailable = false;
 let _ollamaModels = [];  // discovered from the Ollama status endpoint
 const MODEL_OPTIONS = {{ model_options | tojson }};
 
-function currentProvider() {
+/* The radio the user picked: openai, anthropic, subscription or local. */
+function currentProviderChoice() {
     return document.querySelector('input[name="aiProvider"]:checked')?.value || 'openai';
+}
+
+/* The provider the server should call. "My subscription" is one choice on the
+   page but two CLIs on the server, told apart by the picked model's group. */
+function currentProvider() {
+    const choice = currentProviderChoice();
+    if (choice !== 'subscription') return choice;
+    const opt = document.getElementById('model-select')?.selectedOptions?.[0];
+    return (opt && opt.dataset.provider) || MODEL_OPTIONS.default_subscription || 'claude-code';
+}
+
+/* Which subscription CLIs can take a call; null until the status check answers. */
+let _subscriptionStatus = null;
+const SUBSCRIPTION_LABELS = {'claude-code': 'Claude Code', 'codex': 'Codex'};
+
+function subscriptionReady(provider) {
+    if (!_subscriptionStatus) return true;   // unknown yet: let the server say
+    const info = (_subscriptionStatus.providers || {})[provider];
+    return !!(info && info.available && info.signed_in);
+}
+
+function populateSubscriptionModels(sel) {
+    const prev = sel.value;
+    const prevProvider = sel.selectedOptions?.[0]?.dataset.provider;
+    sel.innerHTML = '';
+    let firstReady = null;
+    ['claude-code', 'codex'].forEach(provider => {
+        const group = document.createElement('optgroup');
+        const ready = subscriptionReady(provider);
+        group.label = SUBSCRIPTION_LABELS[provider] + (ready ? '' : ' (not signed in)');
+        (MODEL_OPTIONS.models[provider] || []).forEach(m => {
+            const opt = document.createElement('option');
+            opt.value = m;
+            opt.textContent = m;
+            opt.dataset.provider = provider;
+            opt.disabled = !ready;
+            group.appendChild(opt);
+            if (ready && !firstReady) firstReady = opt;
+        });
+        sel.appendChild(group);
+    });
+    const options = Array.from(sel.options);
+    const pick = options.find(o => !o.disabled && o.value === prev && o.dataset.provider === prevProvider)
+        || options.find(o => !o.disabled && o.dataset.provider === MODEL_OPTIONS.default_subscription
+                         && o.value === MODEL_OPTIONS.defaults[o.dataset.provider])
+        || options.find(o => !o.disabled && o.value === MODEL_OPTIONS.defaults[o.dataset.provider])
+        || firstReady;
+    if (pick) pick.selected = true;
 }
 
 function cloudFallbackButton() {
@@ -2632,7 +2688,12 @@ function cloudFallbackButton() {
 function populateModelDropdown() {
     const sel = document.getElementById('model-select');
     if (!sel) return;
-    const provider = currentProvider();
+    const provider = currentProviderChoice();
+    showSubscriptionStatus();
+    if (provider === 'subscription') {
+        populateSubscriptionModels(sel);
+        return;
+    }
     let models, def;
     if (provider === 'local') {
         models = _ollamaModels.length ? _ollamaModels
@@ -2688,6 +2749,55 @@ function checkOllamaStatus() {
         });
 }
 
+/* Says, beside the picker, which subscription CLIs are signed in, and only
+   while "My subscription" is the choice. */
+function showSubscriptionStatus() {
+    const txt = document.getElementById('subscription-status-text');
+    if (!txt) return;
+    const chosen = currentProviderChoice() === 'subscription';
+    txt.classList.toggle('d-none', !chosen);
+    if (!chosen) return;
+    if (!_subscriptionStatus) {
+        txt.className = 'small ms-1 text-muted';
+        txt.textContent = 'Checking Claude Code and Codex\u2026';
+        return;
+    }
+    const providers = _subscriptionStatus.providers || {};
+    const ready = _subscriptionStatus.ready || [];
+    const parts = ['claude-code', 'codex'].map(p =>
+        SUBSCRIPTION_LABELS[p] + ': ' + ((providers[p] && providers[p].detail) || 'unknown'));
+    txt.className = 'small ms-1 ' + (ready.length ? 'text-muted' : 'text-danger');
+    txt.textContent = (ready.length ? 'No API credits used. ' : 'Neither is ready. ') + parts.join(' ');
+}
+
+function checkSubscriptionStatus(refresh) {
+    const dot = document.getElementById('subscription-status-dot');
+    const radio = document.getElementById('provider-subscription');
+    const label = document.getElementById('provider-subscription-label');
+    if (!radio) return Promise.resolve();
+    return fetch('{{ url_for("compose_subscription_status") }}' + (refresh ? '?refresh=1' : ''))
+        .then(r => r.json())
+        .then(data => {
+            _subscriptionStatus = data;
+            const ready = data.ready || [];
+            if (dot) dot.className = 'me-1 ' + (ready.length ? 'text-success' : 'text-danger');
+            // Not set up: say so, and keep it from being picked by accident.
+            // When it is the configured default it stays picked, so a missing
+            // sign-in never silently turns into paid API calls.
+            const isDefault = MODEL_OPTIONS.default_provider === 'subscription';
+            radio.disabled = !ready.length && !isDefault;
+            if (label) label.title = ready.length
+                ? 'Uses ' + ready.map(p => SUBSCRIPTION_LABELS[p]).join(' or ') + ' on this computer: no API credits'
+                : 'Not set up: install Claude Code or Codex on this computer and sign in';
+            populateModelDropdown();
+        })
+        .catch(() => {
+            if (dot) dot.className = 'me-1 text-danger';
+            _subscriptionStatus = {providers: {}, ready: []};
+            populateModelDropdown();
+        });
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     // Default the provider selection to the server-configured provider.
     (document.getElementById('provider-' + MODEL_OPTIONS.default_provider)
@@ -2696,6 +2806,7 @@ document.addEventListener('DOMContentLoaded', () => {
         r.addEventListener('change', populateModelDropdown));
     populateModelDropdown();
     checkOllamaStatus();
+    checkSubscriptionStatus();
     document.querySelectorAll('#sourceTypeTabs .nav-link').forEach(tab => {
         tab.addEventListener('shown.bs.tab', checkOllamaStatus);
     });

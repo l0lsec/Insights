@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "insights": {
+      "command": "/path/to/Insights/venv/bin/python",
+      "args": ["/path/to/Insights/insights_mcp.py", "--db", "/path/to/Insights/insights.db"]
+    }
+  }
+}

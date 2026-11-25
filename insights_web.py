@@ -3114,7 +3114,7 @@ def bulk_replace_posts():
         })
     except Exception as exc:
         app.logger.exception("Failed to bulk replace posts")
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _error_text(exc)}), 500
 
 
 @app.route('/article/<int:article_id>/refine', methods=['POST'])
@@ -4833,7 +4833,7 @@ def schedule_add():
         
     except Exception as e:
         app.logger.exception("Failed to schedule post")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
 
 def _scheduled_entry_view(row):
@@ -5199,7 +5199,7 @@ def schedule_post_now(scheduled_id: int):
         result = _publish_scheduled_entry(post)
     except Exception as e:  # noqa: BLE001
         app.logger.exception("Error posting now for post %d", scheduled_id)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
     if result['success']:
         message = f"Posted to {result['account_label']}!"
@@ -5231,7 +5231,7 @@ def schedule_retry(scheduled_id: int):
         result = _publish_scheduled_entry(post)
     except Exception as e:  # noqa: BLE001
         app.logger.exception("Error retrying post %d", scheduled_id)
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
     if result['success']:
         return jsonify({
@@ -6182,6 +6182,16 @@ def _valid_post_platform(raw):
 _POST_FILTER_KEYS = ('used', 'queued', 'image', 'source', 'brief')
 
 
+def _post_source_kind(source_type):
+    """The Source filter's bucket for a row: the content agent, Claude or Codex
+    through the MCP connector (``insights_mcp.py``), or written in the app."""
+    if source_type == 'agent':
+        return 'agent'
+    if source_type == 'mcp':
+        return 'assistant'
+    return 'manual'
+
+
 # Sort orders for the Compose list, keyed by the <select> values. The default
 # ('' / unknown) is the newest-first order list_standalone_posts() already
 # returns. Sorts are ascending by key: 'longest' negates the length rather than
@@ -6246,7 +6256,7 @@ def _group_matches_filters(rows, filters, scheduled_info):
 
     source = filters.get('source')
     if source:
-        kinds = {'agent' if row['source_type'] == 'agent' else 'manual' for row in rows}
+        kinds = {_post_source_kind(row['source_type']) for row in rows}
         if source not in kinds:
             return False
 
@@ -6593,7 +6603,7 @@ def compose_posts_replace():
         )
     except Exception as exc:
         app.logger.exception("Failed to replace in saved posts")
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _error_text(exc)}), 500
 
     return jsonify({
         "success": True,
@@ -6742,7 +6752,7 @@ def compose_clear_prompts():
         })
     except Exception as e:
         app.logger.exception("Failed to clear prompts")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
 
 @app.route('/compose/delete-prompt', methods=['POST'])
@@ -6762,7 +6772,7 @@ def compose_delete_prompt():
         })
     except Exception as e:
         app.logger.exception("Failed to delete prompt")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
 
 @app.route('/compose/delete-prompts-bulk', methods=['POST'])
@@ -6783,7 +6793,7 @@ def compose_delete_prompts_bulk():
         })
     except Exception as e:
         app.logger.exception("Failed to delete prompts")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -6834,7 +6844,7 @@ def compose_library_save():
         })
     except Exception as e:
         app.logger.exception("Failed to save library prompt")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
 
 @app.route('/compose/library/update', methods=['POST'])
@@ -6865,7 +6875,7 @@ def compose_library_update():
         })
     except Exception as e:
         app.logger.exception("Failed to update library prompt")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
 
 @app.route('/compose/library/delete', methods=['POST'])
@@ -6887,14 +6897,36 @@ def compose_library_delete():
         })
     except Exception as e:
         app.logger.exception("Failed to delete library prompt")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
+
+
+def _error_text(exc):
+    """The message to show for a failed request.
+
+    Generators wrap their failures ("Failed to generate posts from prompt"), which
+    hides the part the user can act on. A refusal or a subscription CLI problem
+    ("Claude Code is not signed in. Run `claude` ...") is found anywhere in the
+    cause chain and shown instead; anything else reads as before.
+    """
+    import subscription_llm
+    from insights import LLMRefusal
+
+    seen, current = set(), exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, (subscription_llm.SubscriptionLLMError, LLMRefusal)):
+            return str(current)
+        current = current.__cause__ or current.__context__
+    return str(exc)
 
 
 def _parse_ai_provider(form):
     """Parse the compose AI-provider selection into ``(provider, model, use_local)``.
 
-    ``provider`` is "openai"/"anthropic" for an explicit cloud choice, or ``None``
-    to use the configured default (``LLM_PROVIDER``). ``use_local`` is True for the
+    ``provider`` is "openai"/"anthropic" for an explicit API choice,
+    "claude-code"/"codex" for a signed-in subscription CLI (the page sends the
+    one whose model was picked under "My subscription"), or ``None`` to use the
+    configured default (``LLM_PROVIDER``). ``use_local`` is True for the
     local (Ollama) option. Falls back to the legacy ``use_local`` form field when
     no ``provider`` field is sent.
     """
@@ -7252,13 +7284,31 @@ def compose_generate():
         
     except Exception as e:
         app.logger.exception("Failed to generate posts")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
 
 @app.route('/compose/ollama-status', methods=['GET'])
 def compose_ollama_status():
     """Return Ollama availability and installed vision models."""
     return jsonify(check_ollama_status())
+
+
+@app.route('/compose/subscription-status', methods=['GET'])
+def compose_subscription_status():
+    """Say whether Claude Code and Codex are installed and signed in to a plan.
+
+    The page enables "My subscription" only when one of them can take a call,
+    and says why not otherwise. ``?refresh=1`` skips the one-minute cache, for
+    after the user has just signed in.
+    """
+    import subscription_llm
+
+    refresh = request.args.get('refresh', '').lower() in ('1', 'true', 'yes')
+    providers = subscription_llm.all_status(refresh=refresh)
+    return jsonify({
+        "providers": providers,
+        "ready": [p for p, info in providers.items() if info.get("available") and info.get("signed_in")],
+    })
 
 
 @app.route('/compose/post/<int:post_id>', methods=['GET'])
@@ -11269,7 +11319,7 @@ def compose_generate_from_source():
         
     except Exception as e:
         app.logger.exception("Failed to generate posts from source")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
 
 # ============================================================================
@@ -11305,7 +11355,7 @@ def thumbnails_fetch_metadata():
         return jsonify({"success": True, "metadata": metadata})
     except Exception as e:
         app.logger.exception("Failed to fetch YouTube metadata")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
 
 @app.route('/thumbnails/suggest-prompt', methods=['POST'])
@@ -11330,7 +11380,7 @@ def thumbnails_suggest_prompt():
         return jsonify({"success": True, "prompt": prompt})
     except Exception as e:
         app.logger.exception("Failed to build suggested prompt")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
 
 @app.route('/thumbnails/generate', methods=['POST'])
@@ -11392,7 +11442,7 @@ def thumbnails_generate():
         })
     except Exception as e:
         app.logger.exception("Failed to generate thumbnail")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": _error_text(e)}), 500
 
 
 @app.route('/thumbnails/saved')
@@ -14120,7 +14170,7 @@ def library_reveal(file_id: int):
     try:
         subprocess.run(["open", "-R", row["path"]], check=False, timeout=10)
     except (OSError, subprocess.SubprocessError) as exc:
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _error_text(exc)}), 500
     return jsonify({"ok": True, "path": row["path"]})
 
 
@@ -14154,7 +14204,7 @@ def library_open_file(file_id: int):
     try:
         subprocess.run(["open", path], check=False, timeout=15)
     except (OSError, subprocess.SubprocessError) as exc:
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": _error_text(exc)}), 500
     return jsonify({"ok": True, "downloaded": not local, "size": row["size"]})
 
 

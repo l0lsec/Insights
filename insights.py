@@ -13,13 +13,20 @@ import types
 from typing import List
 from urllib.parse import urlparse, parse_qs
 
-# Which cloud LLM backend to use for text/vision generation: "openai" or "anthropic".
-# Defaults to OpenAI so existing deployments are unaffected. Local generation is
-# selected per-call via ``use_local`` and always uses the Ollama (OpenAI-compatible)
-# path regardless of this setting.
+# Which backend to use for text/vision generation: "openai" or "anthropic" (paid
+# API keys), or "claude-code" / "codex" (the signed-in Claude Code or Codex CLI,
+# counted against a Claude or ChatGPT plan instead of billed; see
+# subscription_llm.py). Defaults to OpenAI so existing deployments are
+# unaffected. Local generation is selected per-call via ``use_local`` and always
+# uses the Ollama (OpenAI-compatible) path regardless of this setting.
 LLM_PROVIDER = os.environ.get("LLM_PROVIDER", "openai").strip().lower()
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-6.1-sol")
 ANTHROPIC_MODEL = os.environ.get("ANTHROPIC_MODEL", "claude-opus-5-5")
+# Models for the subscription providers. Claude Code takes the same model names
+# as the API; a ChatGPT plan only takes the Codex catalog (subscription_llm).
+CLAUDE_CODE_MODEL = os.environ.get("CLAUDE_CODE_MODEL", "").strip() or ANTHROPIC_MODEL
+CODEX_MODEL = os.environ.get("CODEX_MODEL", "").strip() or "gpt-6-astra"
+SUBSCRIPTION_PROVIDERS = ("claude-code", "codex")
 OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 OLLAMA_VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", "llama3.2-vision")
 OLLAMA_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2")
@@ -31,6 +38,8 @@ OLLAMA_TEXT_MODEL = os.environ.get("OLLAMA_TEXT_MODEL", "llama3.2")
 MODEL_CHOICES = {
     "openai": ["gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"],
     "anthropic": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-4-5"],
+    "claude-code": ["claude-opus-5-5", "claude-sonnet-5-5", "claude-fable-5-1", "claude-haiku-4-5"],
+    "codex": ["gpt-6-astra", "gpt-5.6-sol"],
 }
 
 # The newest models of both providers reason before they answer, and those
@@ -60,27 +69,41 @@ def provider_model_options() -> dict:
 
     Shape::
 
-        {"default_provider": "openai"|"anthropic",
-         "defaults": {"openai": <model>, "anthropic": <model>, "local": <model>},
-         "models": {"openai": [...], "anthropic": [...]}}
+        {"default_provider": "openai"|"anthropic"|"subscription",
+         "default_subscription": "claude-code"|"codex",
+         "defaults": {"openai": <model>, "anthropic": <model>, "local": <model>,
+                      "claude-code": <model>, "codex": <model>},
+         "models": {"openai": [...], "anthropic": [...],
+                    "claude-code": [...], "codex": [...]}}
 
-    Each cloud provider's configured default model is kept first in its list so a
-    custom ``OPENAI_MODEL`` / ``ANTHROPIC_MODEL`` is always selectable.
+    The page shows Claude Code and Codex as one "My subscription" choice whose
+    model list is grouped by CLI, so ``default_provider`` is "subscription" when
+    ``LLM_PROVIDER`` names either one. Each provider's configured default model
+    is kept first in its list so a custom ``*_MODEL`` is always selectable.
     """
     def _with_default(provider: str, default_model: str) -> list:
         listed = MODEL_CHOICES.get(provider, [])
         return [default_model] + [m for m in listed if m != default_model]
 
+    if LLM_PROVIDER in SUBSCRIPTION_PROVIDERS:
+        default_provider = "subscription"
+    else:
+        default_provider = "anthropic" if LLM_PROVIDER == "anthropic" else "openai"
     return {
-        "default_provider": "anthropic" if LLM_PROVIDER == "anthropic" else "openai",
+        "default_provider": default_provider,
+        "default_subscription": LLM_PROVIDER if LLM_PROVIDER in SUBSCRIPTION_PROVIDERS else "claude-code",
         "defaults": {
             "openai": OPENAI_MODEL,
             "anthropic": ANTHROPIC_MODEL,
             "local": OLLAMA_TEXT_MODEL,
+            "claude-code": CLAUDE_CODE_MODEL,
+            "codex": CODEX_MODEL,
         },
         "models": {
             "openai": _with_default("openai", OPENAI_MODEL),
             "anthropic": _with_default("anthropic", ANTHROPIC_MODEL),
+            "claude-code": _with_default("claude-code", CLAUDE_CODE_MODEL),
+            "codex": _with_default("codex", CODEX_MODEL),
         },
     }
 
@@ -312,13 +335,16 @@ def _get_llm_client(use_local: bool = False, vision: bool = False,
     ``use_local`` selects a local Ollama server (OpenAI-compatible). ``provider``
     and ``model`` are optional per-request overrides (e.g. from the compose UI):
 
-    * ``provider`` may be "openai", "anthropic", or "local"/"ollama"; when omitted
-      the cloud backend falls back to ``LLM_PROVIDER``. "local"/"ollama" is
-      equivalent to ``use_local=True``.
+    * ``provider`` may be "openai", "anthropic", "claude-code", "codex",
+      "subscription" (whichever of the last two ``LLM_PROVIDER`` names, else
+      Claude Code) or "local"/"ollama"; when omitted the backend falls back to
+      ``LLM_PROVIDER``. "local"/"ollama" is equivalent to ``use_local=True``.
     * ``model`` overrides the model for the resolved provider. A model that does
-      not belong to the resolved cloud provider is ignored (falls back to that
+      not belong to the resolved provider is ignored (falls back to that
       provider's default) so a stale UI value can't send e.g. a Claude model to
-      OpenAI and trigger a 400.
+      OpenAI and trigger a 400, and a background job's API model name
+      (``CONTENT_AGENT_MODEL=gpt-6-luna``) can't reach Codex, whose ChatGPT
+      plan refuses it.
 
     The ``vision`` flag only affects the Ollama model default; the cloud models
     handle text and vision with a single model.
@@ -333,6 +359,19 @@ def _get_llm_client(use_local: bool = False, vision: bool = False,
         return OpenAI(base_url=f"{OLLAMA_BASE_URL}/v1", api_key="ollama"), m, "ollama"
 
     resolved = provider or LLM_PROVIDER
+    if resolved == "subscription":
+        resolved = LLM_PROVIDER if LLM_PROVIDER in SUBSCRIPTION_PROVIDERS else "claude-code"
+    if resolved in SUBSCRIPTION_PROVIDERS:
+        import subscription_llm
+
+        if resolved == "claude-code":
+            fits = bool(model) and (model.startswith("claude")
+                                    or model in subscription_llm.CLAUDE_ALIASES)
+            m = model if fits else CLAUDE_CODE_MODEL
+        else:
+            m = model if model in (set(MODEL_CHOICES["codex"]) | {CODEX_MODEL}) else CODEX_MODEL
+        return subscription_llm.client_for(resolved), m, resolved
+
     if resolved == "anthropic":
         m = model if (model and model.startswith("claude")) else ANTHROPIC_MODEL
         return _AnthropicChatClient(os.getenv("ANTHROPIC_API_KEY")), m, "anthropic"

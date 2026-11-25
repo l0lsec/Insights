@@ -484,12 +484,48 @@ INBOX_GATES = [
      ("dashes",)),
 ]
 
+# Running generation on a Claude or ChatGPT plan through the signed-in CLIs, and
+# the MCP server Claude and Codex write drafts through. One script, one gate per
+# claim, picked by argument. The CLIs are fake executables that record what they
+# were given, so nothing is billed or sent; one runs the Compose picker under
+# node and one talks JSON-RPC to the real server. The live checks against the
+# real CLIs are scripts/live_subscription.py, outside this suite.
+SUBSCRIPTION_GATES = [
+    ("check_subscription_llm.py", "SUB_CLAUDE_OK",
+     "Claude Code runs with no tools, MCP, settings or API keys, in an empty folder, and says plainly why it failed",
+     ("claude",)),
+    ("check_subscription_llm.py", "SUB_CODEX_OK",
+     "Codex runs read-only with its config ignored, acting tools and web search off, no API keys, and passes on the API's own error",
+     ("codex",)),
+    ("check_subscription_llm.py", "SUB_ROUTING_OK",
+     "claude-code, codex, subscription and LLM_PROVIDER reach the CLIs with models they take, the paid paths are unchanged, and it is metered free",
+     ("routing",)),
+    ("check_subscription_llm.py", "SUB_STATUS_OK",
+     "the status check tells installed, signed in and plan from API key for both CLIs, and Compose generation saves what the CLI wrote",
+     ("status",)),
+    ("check_subscription_llm.py", "SUB_UI_OK",
+     "Compose offers one My subscription choice grouped by CLI, says who is signed in, and never falls back to a paid API, under node",
+     ("ui",)),
+    ("check_subscription_llm.py", "SUB_MCP_OK",
+     "the MCP server speaks only JSON-RPC, cannot publish, saves drafts as cards, refuses a bad batch whole and leaves queued posts alone",
+     ("mcp",)),
+    ("check_subscription_llm.py", "SUB_DOCS_OK",
+     "the README documents both ways in, the settings, what stays on the API and the personal-use limit",
+     ("docs",)),
+    ("check_subscription_llm.py", "SUB_REGISTERED_OK",
+     "every section of the subscription check is registered here under its token",
+     ("registered",)),
+    ("check_subscription_llm.py", "SUB_NODASH_OK",
+     "no em dash in the files this feature added or the lines it changed",
+     ("nodash",)),
+]
+
 NOT_GATES = {}
 
 ALL_GATES = (ACCOUNT_GATES + ACCOUNT_JS_GATES + LIBRARY_GATES + COMPOSE_GATES
              + VIDEO_GATES + MANUAL_POST_GATES + QUEUE_GATES + PAGING_GATES
              + IG_PEOPLE_GATES + FIND_RESULTS_GATES + LINK_COMMENT_GATES
-             + OUTREACH_GATES + INBOX_GATES)
+             + OUTREACH_GATES + INBOX_GATES + SUBSCRIPTION_GATES)
 
 
 def _unpack(entry):

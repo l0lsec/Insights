@@ -28,7 +28,7 @@
                          data-platforms='{{ group.platform_ids | tojson }}'
                          data-targets='{{ group.targets | tojson }}'
                          data-post-index="{{ group.display_index }}"
-                         data-source="{{ 'agent' if group.source_type == 'agent' else 'manual' }}"
+                         data-source="{{ 'agent' if group.source_type == 'agent' else ('assistant' if group.source_type == 'mcp' else 'manual') }}"
                          data-brief="{{ group.brief_id if group.brief_id else '' }}">
                         <div class="d-flex justify-content-between align-items-start gap-2 mb-2 post-header">
                             <div class="d-flex align-items-center gap-2 flex-wrap">
@@ -37,6 +37,9 @@
                                 <span class="badge bg-secondary">Post {{ group.display_index }}</span>
                                 {% if group.source_type == 'agent' %}
                                 <span class="badge" style="background-color: #7c5cff;" title="Prepared by the content agent">🤖 Agent</span>
+                                {% endif %}
+                                {% if group.source_type == 'mcp' %}
+                                <span class="badge" style="background-color: var(--brand-100); color: var(--brand-700);" title="Written by Claude or Codex through the Insights connector, on your subscription">🤝 Claude or Codex</span>
                                 {% endif %}
                                 {% if group.source_type == 'agent' and group.brief_name %}
                                 <a href="/briefs#brief-{{ group.brief_id }}" class="badge text-decoration-none" style="background-color: #ede9ff; color: #5a4bd1;" title="From agent brief: {{ group.brief_name }}">📋 {{ group.brief_name }}</a>

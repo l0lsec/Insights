@@ -34,6 +34,7 @@ It also works on content you already have. The **Content Library** catalogues a 
 - **Article Refinement** - Iteratively improve generated articles with AI-assisted feedback
 - **Social Media Copy** - Auto-generate platform-optimized posts for LinkedIn, Threads, X/Twitter, Facebook, and Instagram
 - **Provider Choice** - Run text and vision generation through OpenAI (default) or Anthropic Claude by setting `LLM_PROVIDER`
+- **Your Claude or ChatGPT Plan Instead of API Credits** - Run generation through the Claude Code or Codex CLI signed in on this computer (`LLM_PROVIDER=claude-code` / `codex`, or "My subscription" in Compose), or let Claude and Codex write drafts straight into Insights through its MCP server. See [Using your Claude or ChatGPT subscription](#using-your-claude-or-chatgpt-subscription)
 - **Local Model Support** - Optionally route generation through a local Ollama instance (text and vision models) instead of OpenAI
 
 #### Content Library
@@ -285,7 +286,7 @@ All variables can be set in a `.env` file in the project root. See `.env.example
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `openai` | Cloud provider for text/vision generation: `openai` or `anthropic` |
+| `LLM_PROVIDER` | `openai` | Provider for text/vision generation: `openai` or `anthropic` (API keys), or `claude-code` or `codex` (your signed-in Claude or ChatGPT plan, no API credits; see [Using your Claude or ChatGPT subscription](#using-your-claude-or-chatgpt-subscription)) |
 | `OPENAI_MODEL` | `gpt-6.1-sol` | OpenAI model used for summarization, articles, and post generation. Also selectable in the Compose model dropdown: `gpt-6-astra` (most capable), `gpt-6-luna` (cheapest) |
 | `OPENAI_REASONING_EFFORT` | `low` | How hard GPT-5 and later think before answering: `low`, `medium`, `high`, `xhigh`, `max` |
 | `ANTHROPIC_API_KEY` | — | Anthropic (Claude) API key. Required when `LLM_PROVIDER=anthropic` |
@@ -396,6 +397,93 @@ The Library reuses `OLLAMA_BASE_URL`, `OLLAMA_TEXT_MODEL`, and `OLLAMA_VISION_MO
 | `CLOUDINARY_API_SECRET` | Cloudinary API secret |
 
 > Cloudinary provides publicly accessible image and video URLs needed by Threads, Facebook, X/Twitter, and Instagram. It is effectively required for Instagram (and for Instagram Reels/video, which upload as `resource_type=video`). Sign up free at [cloudinary.com](https://cloudinary.com).
+
+## Using your Claude or ChatGPT subscription
+
+Generation normally bills `OPENAI_API_KEY` or `ANTHROPIC_API_KEY`. If you pay for a Claude plan (Pro or Max) or a ChatGPT plan, Insights can use that instead, two ways. Both count against the plan's usage limits and cost no API credits.
+
+### 1. The app calls Claude Code or Codex for you
+
+Install the CLI and sign in once, in a terminal on the computer that runs Insights:
+
+```bash
+claude            # Claude Code: sign in with your Claude account
+codex login       # Codex: choose "Sign in with ChatGPT"
+```
+
+Then either:
+
+- set `LLM_PROVIDER=claude-code` (or `LLM_PROVIDER=codex`) in `.env` and restart the app. Every feature that writes text then uses the plan: Compose, summaries, articles, the content agent, outreach drafts and the Library's labelling. Or
+- leave `LLM_PROVIDER` alone and pick **My subscription** in Compose's AI Provider bar. Its model list is grouped by CLI (Claude Code, Codex); the line beside it says which one is signed in, and a CLI that is not ready cannot be picked.
+
+How it stays on the plan and stays safe:
+
+- The CLI runs with **none of the app's API keys or secrets** in its environment, so it cannot fall back to billing a key (`claude -p` would otherwise prefer `ANTHROPIC_API_KEY`). A failed sign-in is reported ("Claude Code is not signed in. Run `claude` ..."), never silently retried on the API.
+- It runs as a **plain text generator**: Claude Code with no tools, no MCP servers and no settings files; Codex with your config ignored, a read-only sandbox, web search off and its shell, browser, plugin and patch tools disabled. Prompts contain transcripts, web pages and inbound messages, so the model is given nothing it could be talked into running. Each call gets a fresh empty folder that is deleted afterwards.
+- Usage shows these calls on the Usage page as `claude-code` / `codex`, at $0.
+
+A ChatGPT plan takes only the Codex models (`gpt-6-astra`, `gpt-5.6-sol`); the API-only names such as `gpt-6-luna` are refused by it, so a model meant for the API (for example `CONTENT_AGENT_MODEL`) falls back to `CODEX_MODEL`. Claude Code takes the same model names as the API.
+
+Still on API keys, because the CLIs have no equivalent: audio transcription through the Whisper API, thumbnail images (`gpt-image-1`), and web search for the content agent when `WEB_SEARCH_PROVIDER` resolves to `openai` (Tavily and Brave do not need OpenAI).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLAUDE_CODE_MODEL` | `ANTHROPIC_MODEL` | Model for `claude-code` |
+| `CODEX_MODEL` | `gpt-6-astra` | Model for `codex` (`gpt-6-astra` or `gpt-5.6-sol` on a ChatGPT plan) |
+| `SUBSCRIPTION_EFFORT` | `low` | Reasoning effort passed to either CLI |
+| `SUBSCRIPTION_LLM_TIMEOUT` | `600` | Seconds before a CLI call is stopped |
+| `SUBSCRIPTION_LLM_CONCURRENCY` | `2` | CLI calls allowed at once (each is a whole agent process); the rest wait |
+| `CLAUDE_CLI_PATH` / `CODEX_CLI_PATH` | found automatically | Path to the CLI. Without it the PATH entry and the usual install places are tried, and the first that runs is used (the Codex inside ChatGPT.app counts) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | unset | For a headless server: a plan token from `claude setup-token`, passed through to Claude Code |
+
+**Personal use only.** A plan is for your personal use. Routing other people's requests through your Claude or ChatGPT plan (for example a hosted, multi-user copy of Insights) is outside what those plans allow; use API keys there.
+
+### 2. Claude or Codex writes into Insights (MCP)
+
+`insights_mcp.py` is an MCP server. Connect it to Claude Code, Claude Desktop or Codex and ask, in a chat you are already paying for, for posts: the assistant reads your sources and saves drafts straight into Compose, marked **Claude or Codex**, for you to review. It has six tools:
+
+| Tool | What it does |
+|------|--------------|
+| `get_writing_guide` | House style (no em dashes), each platform's rules and length limit, the tones, and a few posts you already published as examples of your voice |
+| `list_sources` / `get_source` | Podcast episodes (summary and transcript), saved web pages and articles, read in pages |
+| `list_posts` | Existing posts as Compose shows them (one card per copy, with its platforms and whether it is a draft, queued or published) |
+| `save_drafts` | New unused drafts. A post with an em or en dash, an unknown platform or no text is refused, and then nothing from that call is saved |
+| `update_draft` | Rewrite a draft on every platform of its card; refused once it is queued or published |
+
+It cannot publish, schedule, queue, delete or read an account token: those stay in the app, behind your click. Point it at the database the app uses with `--db` (or `INSIGHTS_DB`); it refuses to start without one rather than create an empty one.
+
+Claude Code (run in this folder, or use `--scope user` to have it everywhere):
+
+```bash
+claude mcp add insights -- /path/to/Insights/venv/bin/python /path/to/Insights/insights_mcp.py --db /path/to/Insights/insights.db
+```
+
+Or copy `.mcp.json.example` to `.mcp.json` and fix the paths.
+
+Claude Desktop: add the same command to `claude_desktop_config.json` (Settings > Developer > Edit Config):
+
+```json
+{
+  "mcpServers": {
+    "insights": {
+      "command": "/path/to/Insights/venv/bin/python",
+      "args": ["/path/to/Insights/insights_mcp.py", "--db", "/path/to/Insights/insights.db"]
+    }
+  }
+}
+```
+
+Codex: add to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.insights]
+command = "/path/to/Insights/venv/bin/python"
+args = ["/path/to/Insights/insights_mcp.py", "--db", "/path/to/Insights/insights.db"]
+```
+
+Then ask, for example: "Read my latest podcast episode in Insights and save three LinkedIn drafts and five X drafts about it."
+
+Gates: `python scripts/check_subscription_llm.py {claude,codex,routing,status,ui,mcp,docs,registered,nodash}` run offline against fake CLIs (and are in `run_all_gates.py`); `python scripts/live_subscription.py {claude,codex,mcp-claude,mcp-codex}` run the real, signed-in CLIs and use a little of each plan.
 
 ## Usage (CLI)
 
