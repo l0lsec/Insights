@@ -12656,8 +12656,8 @@ def _outreach_sources(profile: dict) -> list:
             "platform": platform, "name": outreach_social.PLATFORM_NAMES[platform],
             "account_id": account['id'],
             "handle": account['handle'] or account['display_name'] or account['label'] or '',
-            "state": state, "friendly": entry.get('friendly') or '', "at": entry.get('at'),
-            "engage_requested": requested.get(platform),
+            "state": state, "friendly": social_publisher.redact_secrets(entry.get('friendly')),
+            "at": entry.get('at'), "engage_requested": requested.get(platform),
             "reconnect_url": (f"/{platform}/auth?engage=1" if platform != 'twitter' else None),
         })
         if platform == 'threads' and account['is_default']:
@@ -12665,7 +12665,7 @@ def _outreach_sources(profile: dict) -> list:
             rows.append({
                 "platform": "search", "name": "Threads search", "account_id": account['id'],
                 "handle": account['handle'] or '', "state": search.get('state') or 'unchecked',
-                "friendly": search.get('friendly') or '', "at": search.get('at'),
+                "friendly": social_publisher.redact_secrets(search.get('friendly')), "at": search.get('at'),
                 "engage_requested": requested.get('threads'),
                 "reconnect_url": "/threads/auth?engage=1",
             })
@@ -12762,7 +12762,8 @@ def _inbox_sources() -> list:
             "channel": channel, "name": outreach_social.DM_NAMES[channel],
             "account_id": account['id'],
             "handle": account['handle'] or account['display_name'] or account['label'] or '',
-            "state": entry.get('state') or 'unchecked', "friendly": entry.get('friendly') or '',
+            "state": entry.get('state') or 'unchecked',
+            "friendly": social_publisher.redact_secrets(entry.get('friendly')),
             "at": entry.get('at'), "reconnect_url": f"/{platform}/auth?engage=dm",
         })
     return rows

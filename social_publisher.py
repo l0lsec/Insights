@@ -28,6 +28,7 @@ feed photo, so this module stays importable and testable on its own.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime
 
 import database
@@ -61,6 +62,18 @@ from instagram_client import (
 logger = logging.getLogger(__name__)
 
 PLATFORMS = ("linkedin", "threads", "twitter", "facebook", "instagram")
+
+# Query parameters that carry a credential. requests puts the whole URL, query
+# and all, into an HTTPError's message, so an error stored or shown as it comes
+# would hand out the account's token to anyone who sees the page.
+_SECRET_PARAMS = re.compile(
+    r"\b((?:access_token|refresh_token|fb_exchange_token|input_token|client_secret|code)=)"
+    r"[^&\s'\"<>)]+", re.IGNORECASE)
+
+
+def redact_secrets(text) -> str:
+    """``text`` with the value of every credential-carrying query parameter hidden."""
+    return _SECRET_PARAMS.sub(r"\1REDACTED", str(text or ""))
 
 # The platforms that can send a post's links as its first comment (LinkedIn) or
 # first reply (Threads, X) instead of in the post, because they show posts that
@@ -254,7 +267,7 @@ def publish(
             video_url, **extra,
         )
     except Exception as exc:  # noqa: BLE001 - a target's failure must not end the fan-out
-        return _result(platform, resolved_id, account, False, error=str(exc))
+        return _result(platform, resolved_id, account, False, error=redact_secrets(exc))
 
 
 def publish_targets(targets, *, content, image_url=None, db_path=None, video_url=None) -> list[dict]:
@@ -327,7 +340,7 @@ def _linkedin_session(account_id, account, db_path):
             token = database.get_linkedin_token(account_id, db_path=db_path)
         except Exception as exc:  # noqa: BLE001
             return None, None, _result("linkedin", account_id, account, False,
-                                       error=f"LinkedIn token expired: {exc}",
+                                       error=f"LinkedIn token expired: {redact_secrets(exc)}",
                                        needs_reconnect=True)
     return client, token, None
 
@@ -553,7 +566,7 @@ def _post_first_comment(client, token, comment_text, post_urn, standalone_id, db
         try:
             reply = _send_link_reply(platform, client, token, comment_text, post_urn)
         except Exception as exc:  # noqa: BLE001
-            reply = {"success": False, "friendly": f"The link {noun} failed: {exc}"}
+            reply = {"success": False, "friendly": f"The link {noun} failed: {redact_secrets(exc)}"}
         if reply.get("success"):
             note["status"] = "posted"
             note["comment_id"] = reply.get("comment_id")
@@ -638,7 +651,7 @@ def _threads_session(account_id, account, db_path):
             token = database.get_threads_token(account_id, db_path=db_path)
         except Exception as exc:  # noqa: BLE001
             return None, None, _result("threads", account_id, account, False,
-                                       error=f"Threads token expired: {exc}",
+                                       error=f"Threads token expired: {redact_secrets(exc)}",
                                        needs_reconnect=True)
     return client, token, None
 
@@ -691,7 +704,7 @@ def _twitter_session(account_id, account, db_path):
             token = database.get_twitter_token(account_id, db_path=db_path)
         except Exception as exc:  # noqa: BLE001
             return None, None, _result("twitter", account_id, account, False,
-                                       error=f"X/Twitter token expired: {exc}",
+                                       error=f"X/Twitter token expired: {redact_secrets(exc)}",
                                        needs_reconnect=True)
     return client, token, None
 
@@ -778,7 +791,7 @@ def _instagram_session(account_id, account, db_path):
             token = database.get_instagram_token(account_id, db_path=db_path)
         except Exception as exc:  # noqa: BLE001
             return None, None, _result("instagram", account_id, account, False,
-                                       error=f"Instagram token expired: {exc}",
+                                       error=f"Instagram token expired: {redact_secrets(exc)}",
                                        needs_reconnect=True)
     return client, token, None
 

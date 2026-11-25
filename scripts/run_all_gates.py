@@ -446,6 +446,9 @@ OUTREACH_GATES = [
     ("check_outreach.py", "OUTREACH_CONTEXT_UI_OK",
      "Setup's business context section saves and reads back, and the Queue points an owner with none to it",
      ("context_ui",)),
+    ("check_outreach.py", "OUTREACH_REDACTION_OK",
+     "no error shown or stored by Outreach carries an account's token, and a good redraft clears its old error",
+     ("redaction",)),
 ]
 
 # check_*.py files that are deliberately not gates, with the reason. Empty is the

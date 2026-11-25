@@ -59,6 +59,7 @@ TOKENS = {
     "engage_auth": "OUTREACH_ENGAGE_AUTH_OK", "social_ui": "OUTREACH_SOCIAL_UI_OK",
     "search": "OUTREACH_SEARCH_OK", "webhooks": "OUTREACH_WEBHOOKS_OK", "starter": "OUTREACH_STARTER_OK",
     "generic": "OUTREACH_GENERIC_OK", "context": "OUTREACH_CONTEXT_OK", "context_ui": "OUTREACH_CONTEXT_UI_OK",
+    "redaction": "OUTREACH_REDACTION_OK",
 }
 
 
@@ -1836,6 +1837,91 @@ def section_context_ui():
 
 
 # ---------------------------------------------------------------------------
+# redaction: an error never carries an account's token to the page
+# ---------------------------------------------------------------------------
+
+SECRET = "IGAAZsecretTOKEN123"
+
+
+def _unredacted_exception_sites(source: str) -> list:
+    """Lines that put an exception's text into a message without redacting it."""
+    bad = []
+    for number, line in enumerate(source.splitlines(), 1):
+        for match in re.finditer(r"\{exc\}|str\(exc\)", line):
+            before = line[:match.start()]
+            if not before.rstrip().endswith("redact_secrets(") and "redact_secrets(exc)" not in line:
+                bad.append(f"{number}: {line.strip()}")
+    return bad
+
+
+def section_redaction():
+    import requests
+    import social_publisher as publisher
+    import outreach_worker as worker
+    from _accounts_gate import install_fake_clients
+
+    url = ("400 Client Error: Bad Request for url: https://graph.instagram.com/refresh_access_token"
+           f"?grant_type=ig_refresh_token&access_token={SECRET}")
+    redacted = publisher.redact_secrets(url)
+    check(SECRET not in redacted and "access_token=REDACTED" in redacted
+          and "grant_type=ig_refresh_token" in redacted, f"a token in a URL is hidden, the rest kept: {redacted}")
+    for param in ("client_secret", "refresh_token", "fb_exchange_token", "code", "input_token"):
+        check(SECRET not in publisher.redact_secrets(f"https://x.test/a?{param}={SECRET}&b=1"), f"{param} is hidden")
+    check(publisher.redact_secrets("Could not reach Threads (ConnectionError).")
+          == "Could not reach Threads (ConnectionError).", "an error with no credential is unchanged")
+    check(publisher.redact_secrets(None) == "", "no error stays empty")
+
+    source = open(os.path.join(REPO, "social_publisher.py")).read()
+    check(_unredacted_exception_sites('    error=f"Threads token expired: {exc}",'),
+          "the scan finds an unredacted exception (positive control)")
+    unredacted = _unredacted_exception_sites(source)
+    check(not unredacted, f"every exception social_publisher turns into an error is redacted: {unredacted}")
+
+    database, web, client, _set_now = g.rig()
+    clients = install_fake_clients(publisher, web)
+    ids = g.connect_social(database)
+    with sqlite3.connect(database.DB_PATH) as conn:
+        conn.execute("UPDATE instagram_tokens SET expires_at = '2000-01-01T00:00:00'")
+
+    def refused(_token):
+        raise requests.HTTPError(url)
+
+    clients["instagram"].refresh_access_token = refused
+    _c, _t, _a, failure = publisher.session("instagram", ids["instagram"])
+    check(failure and failure["needs_reconnect"] and SECRET not in failure["error"]
+          and "REDACTED" in failure["error"], f"a refresh refused by Instagram is reported without the token: {failure}")
+
+    account = {"id": ids["instagram"], "handle": "ig-handle", "display_name": "", "label": ""}
+    worker._set_source("instagram", account, "needs_reconnect", url)
+    stored = database.get_outreach_profile()["runtime_state"]["sources"][f"instagram:{ids['instagram']}"]
+    check(SECRET not in stored["friendly"], f"the worker stores the error redacted: {stored}")
+
+    # A token stored by an older version is still hidden when the pages read it.
+    database.update_outreach_runtime(sources={
+        f"instagram:{ids['instagram']}": {"state": "needs_reconnect", "friendly": url, "at": "2026-11-25 21:36:24"},
+        f"instagram_dm:{ids['instagram']}": {"state": "needs_permission", "friendly": url, "at": "2026-11-25 21:36:24"},
+        f"search:{ids['threads']}": {"state": "error", "friendly": url, "at": "2026-11-25 21:36:24"}})
+    setup = client.get("/outreach?tab=setup").get_data(as_text=True)
+    check("Instagram token expired" in setup or "access_token=REDACTED" in setup,
+          "Setup still shows the stored error (positive control)")
+    check(SECRET not in setup, "Setup never shows a stored token")
+    rows = web._inbox_sources()
+    check(rows and all(SECRET not in r["friendly"] for r in rows), f"the Inbox never shows a stored token: {rows}")
+
+    # A redraft that succeeds takes the card's old failure note with it.
+    template = open(os.path.join(REPO, "templates", "outreach.html")).read()
+    regen = template[template.index("async function regenerate("):template.index("async function skipMessage(")]
+    success = regen[regen.index("data.status === 'draft'"):regen.index("data.status === 'opted_out'")]
+    check("document.getElementById('error-' + id)?.remove()" in success,
+          "a successful Regenerate removes the card's old error note")
+    check('id="error-{{ item.id }}"' in template, "the error note carries the id Regenerate removes")
+    print("redaction: credentials in URLs are hidden in every error social_publisher builds, the worker stores "
+          "errors redacted, Setup and the Inbox hide tokens stored by older versions, and a good redraft clears "
+          "its old error note")
+    print(TOKENS["redaction"])
+
+
+# ---------------------------------------------------------------------------
 # docs and registration
 # ---------------------------------------------------------------------------
 
@@ -1878,6 +1964,7 @@ SECTIONS = {
     "social_send": section_social_send, "engage_auth": section_engage_auth, "social_ui": section_social_ui,
     "search": section_search, "webhooks": section_webhooks, "starter": section_starter,
     "generic": section_generic, "context": section_context, "context_ui": section_context_ui,
+    "redaction": section_redaction,
 }
 
 if __name__ == "__main__":

@@ -293,7 +293,8 @@ def _source_key(platform: str, account_id) -> str:
 
 def _set_source(platform, account, state, friendly="", now=None) -> None:
     database.update_outreach_runtime(sources={_source_key(platform, account["id"]): {
-        "state": state, "friendly": friendly, "at": fmt_utc(now or utc_now()),
+        "state": state, "friendly": social_publisher.redact_secrets(friendly),
+        "at": fmt_utc(now or utc_now()),
         "handle": account["handle"] or account["display_name"] or account["label"] or ""}})
 
 

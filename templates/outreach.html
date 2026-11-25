@@ -101,7 +101,7 @@
                 <p class="small text-muted mb-2"><strong>Why:</strong> {{ item.context.reason }}</p>
                 {% endif %}
                 {% if item.error %}
-                <div class="alert {% if item.status in ('unknown', 'failed') %}alert-danger{% else %}alert-warning{% endif %} py-2 small mb-2">{{ item.error }}</div>
+                <div class="alert {% if item.status in ('unknown', 'failed') %}alert-danger{% else %}alert-warning{% endif %} py-2 small mb-2" id="error-{{ item.id }}">{{ item.error }}</div>
                 {% endif %}
                 <textarea class="form-control draft-body" rows="4" id="body-{{ item.id }}"
                           {% if item.status in ('unknown', 'failed') %}readonly{% endif %}
@@ -599,6 +599,8 @@ async function regenerate(id) {
     if (ok && data.status === 'draft') {
         document.getElementById('body-' + id).value = data.body || '';
         countDraft(id);
+        // The server cleared the failure this card was showing; so does the page.
+        document.getElementById('error-' + id)?.remove();
         setStatus(status, data.reason ? 'Why: ' + data.reason : 'Rewritten.', 'ok');
     } else if (ok && data.status === 'opted_out') {
         setStatus(status, data.error, 'error');
