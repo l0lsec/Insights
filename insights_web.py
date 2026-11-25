@@ -12812,11 +12812,18 @@ def inbox_reply(conversation_id):
     except inbox.InboxError as exc:
         return _inbox_error(exc)
     try:
-        result = outreach_sender.send(prepared['message_id'], body, session.get('user_id'))
+        # The repeat check runs again inside the claim: two presses at the same
+        # moment both pass the early one in prepare_reply.
+        result = outreach_sender.send(prepared['message_id'], body, session.get('user_id'),
+                                      also=inbox.repeat_guard(body, outreach_utc_now()))
     except outreach_sender.NotFromSendButton as exc:
         if prepared['created']:
             database.discard_unsent_draft(prepared['message_id'])
         return jsonify({"error": str(exc)}), 403
+    except inbox.InboxError as exc:
+        if prepared['created']:
+            database.discard_unsent_draft(prepared['message_id'])
+        return _inbox_error(exc)
     # Replying may have made the person a lead, which moves the conversation
     # under the lead; the page follows it by this id.
     sent = get_outreach_message(prepared['message_id'])

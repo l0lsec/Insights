@@ -285,8 +285,14 @@ def preview_text(message: dict, lead: dict | None, profile: dict, body: str | No
     return {"text": text, "first": first, **sms_segments(text)}
 
 
-def send(message_id: int, body: str, user_id: int, now=None, client=None) -> dict:
-    """Send one approved draft. Returns ``{ok, status, error?, http_status?, text?}``."""
+def send(message_id: int, body: str, user_id: int, now=None, client=None, also=None) -> dict:
+    """Send one approved draft. Returns ``{ok, status, error?, http_status?, text?}``.
+
+    ``also(conn, message, lead)`` is a caller's own check, run after the sender's
+    rules inside the same claim transaction. It returns ``None`` or
+    ``(http_status, reason)`` like the rules do, or raises, which rolls the claim
+    back and reaches the caller unchanged.
+    """
     _require_send_request(user_id)
     now = now or utc_now()
     profile = database.get_outreach_profile()
@@ -307,7 +313,10 @@ def send(message_id: int, body: str, user_id: int, now=None, client=None) -> dic
         text = final_text(body, lead, profile, first)
 
     def check(conn, current, current_lead):
-        return _guard(conn, current, current_lead, text=text, profile=profile, now=now)
+        refusal = _guard(conn, current, current_lead, text=text, profile=profile, now=now)
+        if refusal is None and also is not None:
+            refusal = also(conn, current, current_lead)
+        return refusal
 
     message, lead, refusal = database.claim_outreach_message(message_id, text, user_id, check)
     if refusal:

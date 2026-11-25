@@ -352,6 +352,33 @@ def section_reply():
     check(status == 200 and len(rows) == 1 and rows[0]["id"] == agent_draft and rows[0]["body"].startswith("My own words"),
           f"the agent's draft is the one sent, with the owner's words: {status} {rows}")
 
+    # The interleaving that used to send twice, forced rather than left to the
+    # threads above: the second press passes the early repeat check, then the
+    # first press goes all the way out before the second looks for an open
+    # draft, finds none, and writes its own. The check inside the claim stops it.
+    twilio.post_script.append(g.sent_ok("SM4"))
+    seen = detail(client, dconv["id"])["last_in_id"]
+    original_open = database.open_outreach_item
+    first = []
+    armed = [True]
+
+    def open_item(*args, **kwargs):
+        if armed[0]:
+            armed[0] = False
+            first.append(reply(g.logged_in_client(web, database), dconv["id"], "sms", "See you Friday", seen))
+        return original_open(*args, **kwargs)
+
+    database.open_outreach_item = open_item
+    try:
+        second = reply(client, dconv["id"], "sms", "See you Friday", seen)
+    finally:
+        database.open_outreach_item = original_open
+    friday = [m for m in database.list_lead_messages(dana, channel="sms") if m["body"].startswith("See you Friday")]
+    check(first and first[0][0] == 200 and first[0][1]["status"] == "sent", f"the first press is sent: {first}")
+    check(second[0] == 409 and second[1].get("reload") and "just sent" in second[1]["error"] and len(twilio.posts) == 4,
+          f"the second press, already past the early check, sends nothing: {second} {len(twilio.posts)} posts")
+    check(len(friday) == 1 and friday[0]["status"] == "sent", f"and leaves no draft behind: {friday}")
+
     # A comment reply answers that person's latest comment, and makes them a lead.
     comment(database, "instagram", "C1", "First question", "sam.sec", account_id=ids["instagram"],
             when=NOON - minutes(50))

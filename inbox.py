@@ -450,11 +450,38 @@ REPEAT_SECONDS = 120
 def _refuse_repeat(lead_id: int, channel: str, body: str, now) -> None:
     """A second press of Send (a double click, a retry after a slow answer) must
     not send the same words twice. A reply whose outcome is unknown counts: it
-    may already be with them."""
+    may already be with them.
+
+    This early check gives the quick answer; ``repeat_guard`` makes the same
+    check again inside the sender's claim, where it cannot race."""
+    _refuse_repeat_in(database.list_lead_messages(lead_id, channel=channel), body, now)
+
+
+def repeat_guard(body: str, now):
+    """The repeat check, for ``outreach_sender.send(also=...)``.
+
+    It runs in the same ``BEGIN IMMEDIATE`` transaction that moves the draft to
+    sending. Two presses at the same moment each pass ``prepare_reply``'s early
+    check, and when the first one's draft is already sent by the time the second
+    looks for an open draft, the second writes a draft of its own; only this
+    check, made under the claim's lock, sees the first one's claim and refuses.
+    Raises ``InboxError``, which rolls the claim back with nothing written.
+    """
+    def check(conn, message, lead):
+        rows = conn.execute(
+            "SELECT direction, status, sent_at, body FROM outreach_messages "
+            "WHERE lead_id = ? AND channel = ? AND id != ?",
+            (message["lead_id"], message["channel"], message["id"])).fetchall()
+        _refuse_repeat_in([dict(r) for r in rows], body, now)
+        return None
+    return check
+
+
+def _refuse_repeat_in(messages, body: str, now) -> None:
     words = plain_text(body)
     recent = fmt_utc(now - timedelta(seconds=REPEAT_SECONDS))
     today = fmt_utc(now - timedelta(hours=24))
-    for message in database.list_lead_messages(lead_id, channel=channel):
+    for message in messages:
         if message["direction"] != "out" or message["status"] not in ("sending", "sent", "delivered", "unknown"):
             continue
         since = today if message["status"] == "unknown" else recent
