@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {# A connection to a platform did not finish. Says what happened, how to fix it
-   when there is something to fix, and offers Try again. Used by the LinkedIn
-   OAuth callback; the other platforms still use article_error.html. #}
+   when there is something to fix, and offers Try again. Used by every
+   platform's OAuth callback, through _connect_error in insights_web.py. #}
 {% block title %}{{ platform }} didn't connect | Insights{% endblock %}
 {% block header %}{{ platform }} didn't connect{% endblock %}
 {% block content %}

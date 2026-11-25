@@ -490,9 +490,9 @@ INBOX_GATES = [
 # were given, so nothing is billed or sent; one runs the Compose picker under
 # node and one talks JSON-RPC to the real server. The live checks against the
 # real CLIs are scripts/live_subscription.py, outside this suite.
-LINKEDIN_CONNECT_GATES = [
-    ("check_linkedin_connect_error.py", "LINKEDIN_CONNECT_ERROR_OK",
-     "a LinkedIn connection that fails names what happened, and for a refused scope the permission, its product and a LINKEDIN_SCOPES that works"),
+CONNECT_ERROR_GATES = [
+    ("check_connect_errors.py", "CONNECT_ERRORS_OK",
+     "a failed connection on LinkedIn, Threads, Instagram, Facebook or X says what happened, retries the same button, and a refused LinkedIn scope names its product and a LINKEDIN_SCOPES that works"),
 ]
 
 SUBSCRIPTION_GATES = [
@@ -531,7 +531,7 @@ ALL_GATES = (ACCOUNT_GATES + ACCOUNT_JS_GATES + LIBRARY_GATES + COMPOSE_GATES
              + VIDEO_GATES + MANUAL_POST_GATES + QUEUE_GATES + PAGING_GATES
              + IG_PEOPLE_GATES + FIND_RESULTS_GATES + LINK_COMMENT_GATES
              + OUTREACH_GATES + INBOX_GATES + SUBSCRIPTION_GATES
-             + LINKEDIN_CONNECT_GATES)
+             + CONNECT_ERROR_GATES)
 
 
 def _unpack(entry):

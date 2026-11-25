@@ -3350,6 +3350,10 @@ def _remember_oauth_return():
     from_accounts = request.args.get('return') == 'accounts'
     session['oauth_return'] = 'accounts' if from_accounts else None
     session['oauth_new_login'] = from_accounts
+    # Try again on a failed connection repeats this start: the same button
+    # (Reconnect with engagement, DM or reply permissions) and the same return.
+    session['oauth_retry_args'] = {k: request.args[k] for k in ('return', 'engage', 'replies')
+                                   if request.args.get(k)}
 
 
 def _oauth_new_login():
@@ -3621,14 +3625,85 @@ def linkedin_auth():
 
 _OIDC_SCOPES = ("openid", "profile", "email")
 
+# Each platform's name on the page, where its app's permissions are set, and the
+# .env setting that lists the permissions Insights asks it for.
+_CONNECT_PLATFORMS = {
+    'linkedin': ('LinkedIn', 'LinkedIn Developer Portal', 'LINKEDIN_SCOPES'),
+    'threads': ('Threads', 'Meta for Developers app dashboard', 'THREADS_SCOPES'),
+    'instagram': ('Instagram', 'Meta for Developers app dashboard', 'INSTAGRAM_SCOPES'),
+    'facebook': ('Facebook', 'Meta for Developers app dashboard', 'FACEBOOK_SCOPES'),
+    'twitter': ('X', 'X Developer Portal', 'TWITTER_SCOPES'),
+}
+# What each platform sends back when the person cancels or declines.
+_CONNECT_CANCELLED = ('access_denied', 'user_cancelled_authorize', 'user_cancelled_login')
+# What it sends back when the app may not ask for a permission.
+_CONNECT_SCOPE_REFUSED = ('invalid_scope', 'unauthorized_scope_error')
 
-def _linkedin_connect_error(message, steps=(), detail=None):
-    """The page a LinkedIn connection that did not finish lands on."""
-    again = {'return': 'accounts'} if session.get('oauth_return') == 'accounts' else {}
+
+def _connect_error(platform, message, steps=(), detail=None):
+    """The page a connection that did not finish lands on.
+
+    Try again goes back into the same flow: the same Connect or Reconnect
+    button (``engage``, ``replies``), returning to Accounts when it started there.
+    """
+    again = session.get('oauth_retry_args') or {}
     return render_template(
-        'connect_error.html', platform='LinkedIn', message=message,
-        steps=list(steps), detail=detail, retry_url=url_for('linkedin_auth', **again),
+        'connect_error.html', platform=_CONNECT_PLATFORMS[platform][0], message=message,
+        steps=list(steps), detail=detail, retry_url=url_for(f'{platform}_auth', **again),
     )
+
+
+def _connect_refused(platform, error, description):
+    """The page for an OAuth callback that came back with ``error``."""
+    name, portal, setting = _CONNECT_PLATFORMS[platform]
+    said = f"{name} said: {unescape(description or error)}"
+    if platform == 'linkedin' and error == 'unauthorized_scope_error' and linkedin_client.refused_scope(description):
+        return _linkedin_scope_refusal(description)
+    if error in _CONNECT_CANCELLED:
+        return _connect_error(
+            platform,
+            f"You cancelled on {name} or did not allow it, so nothing was connected. Any "
+            f"{name} account already connected still works.")
+    if error in _CONNECT_SCOPE_REFUSED:
+        return _connect_error(
+            platform,
+            f"{name} refused one of the permissions Insights asked for, so nothing was "
+            f"connected. Any {name} account already connected still works.",
+            steps=[
+                f"In the {portal}, check that your app has every permission Insights asks "
+                f"for. Insights asks for the ones in {setting} in .env, or its built-in list "
+                f"when that is not set.",
+                f"Or leave the refused permission out of {setting} in .env and restart Insights.",
+                "Then press Try again.",
+            ],
+            detail=said,
+        )
+    return _connect_error(
+        platform,
+        f"{name} did not finish connecting, so nothing was connected. Any {name} account "
+        f"already connected still works.",
+        detail=said,
+    )
+
+
+def _connect_stale(platform):
+    """The state check failed: an old or doubled sign-in, not this one."""
+    name = _CONNECT_PLATFORMS[platform][0]
+    return _connect_error(
+        platform,
+        f"This {name} sign-in expired or was finished in another window, so Insights "
+        f"stopped to keep your account safe. Nothing was connected.")
+
+
+def _connect_no_code(platform):
+    name = _CONNECT_PLATFORMS[platform][0]
+    return _connect_error(platform, f"{name} came back without a sign-in code, so nothing was connected.")
+
+
+def _connect_failed(platform, exc):
+    """Exchanging the code, or what follows it, raised."""
+    name = _CONNECT_PLATFORMS[platform][0]
+    return _connect_error(platform, f"Insights could not finish connecting {name}.", detail=f"Details: {exc}")
 
 
 def _linkedin_scope_refusal(description):
@@ -3645,17 +3720,6 @@ def _linkedin_scope_refusal(description):
         asked_from = f'Insights asks for "{asked}", its built-in list, because LINKEDIN_SCOPES is not set in .env.'
     else:
         asked_from = f'Insights asks for "{asked}", from LINKEDIN_SCOPES in .env.'
-    if not scope:
-        return _linkedin_connect_error(
-            "LinkedIn refused one of the permissions Insights asked for, so nothing was "
-            "connected. Any LinkedIn account already connected still works.",
-            steps=[
-                "In the LinkedIn Developer Portal, check your app's Products tab: every "
-                "permission Insights asks for needs the product that grants it. " + asked_from,
-                "Then press Try again.",
-            ],
-            detail=f"LinkedIn said: {unescape(description or '')}",
-        )
     product = linkedin_client.SCOPE_PRODUCTS.get(scope)
     drop = _OIDC_SCOPES if scope in _OIDC_SCOPES else (scope,)
     keep = " ".join(s for s in requested if s not in drop) or "w_member_social"
@@ -3668,7 +3732,8 @@ def _linkedin_scope_refusal(description):
     if scope in _OIDC_SCOPES:
         without += (f' Without "{scope}", Insights cannot read your LinkedIn name and member '
                     'ID, so after connecting it asks you for your Member ID once.')
-    return _linkedin_connect_error(
+    return _connect_error(
+        'linkedin',
         f'Your LinkedIn app is not allowed the "{scope}" permission, so LinkedIn refused '
         f'the connection. Nothing changed in Insights: any LinkedIn account already '
         f'connected still works.',
@@ -3683,17 +3748,7 @@ def linkedin_callback():
     if error:
         error_desc = request.args.get('error_description', 'Unknown error')
         app.logger.error("LinkedIn OAuth error: %s - %s", error, error_desc)
-        if error == 'unauthorized_scope_error':
-            return _linkedin_scope_refusal(error_desc)
-        if error in ('user_cancelled_authorize', 'user_cancelled_login'):
-            return _linkedin_connect_error(
-                "You cancelled on LinkedIn, so nothing was connected. Any LinkedIn "
-                "account already connected still works.")
-        return _linkedin_connect_error(
-            "LinkedIn did not finish connecting, so nothing was connected. Any LinkedIn "
-            "account already connected still works.",
-            detail=f"LinkedIn said: {unescape(error_desc)}",
-        )
+        return _connect_refused('linkedin', error, error_desc)
     
     code = request.args.get('code')
     state = request.args.get('state')
@@ -3702,13 +3757,10 @@ def linkedin_callback():
     stored_state = session.pop('linkedin_oauth_state', None)
     if not stored_state or stored_state != state:
         app.logger.warning("LinkedIn OAuth state mismatch")
-        return _linkedin_connect_error(
-            "This LinkedIn sign-in expired or was finished in another window, so Insights "
-            "stopped to keep your account safe. Nothing was connected.")
+        return _connect_stale('linkedin')
     
     if not code:
-        return _linkedin_connect_error(
-            "LinkedIn came back without a sign-in code, so nothing was connected.")
+        return _connect_no_code('linkedin')
     
     client = get_linkedin_client()
     
@@ -3766,10 +3818,7 @@ def linkedin_callback():
         
     except Exception as e:
         app.logger.exception("LinkedIn OAuth exchange failed")
-        return _linkedin_connect_error(
-            "Insights could not finish connecting LinkedIn.",
-            detail=f"Details: {e}",
-        )
+        return _connect_failed('linkedin', e)
 
 
 @app.route('/linkedin/disconnect', methods=['POST'])
@@ -3939,10 +3988,7 @@ def threads_callback():
     if error:
         error_desc = request.args.get('error_description', 'Unknown error')
         app.logger.error("Threads OAuth error: %s - %s", error, error_desc)
-        return render_template(
-            'article_error.html',
-            error=f"Threads authorization failed: {error_desc}",
-        )
+        return _connect_refused('threads', error, error_desc)
     
     code = request.args.get('code')
     state = request.args.get('state')
@@ -3951,16 +3997,10 @@ def threads_callback():
     stored_state = session.pop('threads_oauth_state', None)
     if not stored_state or stored_state != state:
         app.logger.warning("Threads OAuth state mismatch")
-        return render_template(
-            'article_error.html',
-            error="Security verification failed. Please try again.",
-        )
+        return _connect_stale('threads')
     
     if not code:
-        return render_template(
-            'article_error.html',
-            error="No authorization code received from Threads.",
-        )
+        return _connect_no_code('threads')
     
     client = get_threads_client()
     
@@ -4026,10 +4066,7 @@ def threads_callback():
         
     except Exception as e:
         app.logger.exception("Threads OAuth exchange failed")
-        return render_template(
-            'article_error.html',
-            error=f"Failed to connect to Threads: {str(e)}",
-        )
+        return _connect_failed('threads', e)
 
 
 @app.route('/threads/disconnect', methods=['POST'])
@@ -4252,10 +4289,7 @@ def instagram_callback():
     if error:
         error_desc = request.args.get('error_description', 'Unknown error')
         app.logger.error("Instagram OAuth error: %s - %s", error, error_desc)
-        return render_template(
-            'article_error.html',
-            error=f"Instagram authorization failed: {error_desc}",
-        )
+        return _connect_refused('instagram', error, error_desc)
 
     code = request.args.get('code')
     state = request.args.get('state')
@@ -4264,16 +4298,10 @@ def instagram_callback():
     stored_state = session.pop('instagram_oauth_state', None)
     if not stored_state or stored_state != state:
         app.logger.warning("Instagram OAuth state mismatch")
-        return render_template(
-            'article_error.html',
-            error="Security verification failed. Please try again.",
-        )
+        return _connect_stale('instagram')
 
     if not code:
-        return render_template(
-            'article_error.html',
-            error="No authorization code received from Instagram.",
-        )
+        return _connect_no_code('instagram')
 
     client = get_instagram_client()
 
@@ -4349,10 +4377,7 @@ def instagram_callback():
 
     except Exception as e:
         app.logger.exception("Instagram OAuth exchange failed")
-        return render_template(
-            'article_error.html',
-            error=f"Failed to connect to Instagram: {str(e)}",
-        )
+        return _connect_failed('instagram', e)
 
 
 @app.route('/instagram/disconnect', methods=['POST'])
@@ -4502,10 +4527,7 @@ def facebook_callback():
     if error:
         error_desc = request.args.get('error_description', 'Unknown error')
         app.logger.error("Facebook OAuth error: %s - %s", error, error_desc)
-        return render_template(
-            'article_error.html',
-            error=f"Facebook authorization failed: {error_desc}",
-        )
+        return _connect_refused('facebook', error, error_desc)
 
     code = request.args.get('code')
     state = request.args.get('state')
@@ -4513,16 +4535,10 @@ def facebook_callback():
     stored_state = session.pop('facebook_oauth_state', None)
     if not stored_state or stored_state != state:
         app.logger.warning("Facebook OAuth state mismatch")
-        return render_template(
-            'article_error.html',
-            error="Security verification failed. Please try again.",
-        )
+        return _connect_stale('facebook')
 
     if not code:
-        return render_template(
-            'article_error.html',
-            error="No authorization code received from Facebook.",
-        )
+        return _connect_no_code('facebook')
 
     client = get_facebook_client()
 
@@ -4572,10 +4588,7 @@ def facebook_callback():
 
     except Exception as e:
         app.logger.exception("Facebook OAuth exchange failed")
-        return render_template(
-            'article_error.html',
-            error=f"Failed to connect to Facebook: {str(e)}",
-        )
+        return _connect_failed('facebook', e)
 
 
 @app.route('/facebook/disconnect', methods=['POST'])
@@ -4743,10 +4756,7 @@ def twitter_callback():
     if error:
         error_desc = request.args.get('error_description', 'Unknown error')
         app.logger.error("Twitter OAuth error: %s - %s", error, error_desc)
-        return render_template(
-            'article_error.html',
-            error=f"Twitter authorization failed: {error_desc}",
-        )
+        return _connect_refused('twitter', error, error_desc)
 
     code = request.args.get('code')
     state = request.args.get('state')
@@ -4756,16 +4766,14 @@ def twitter_callback():
 
     if not stored_state or stored_state != state:
         app.logger.warning("Twitter OAuth state mismatch")
-        return render_template(
-            'article_error.html',
-            error="Security verification failed. Please try again.",
-        )
+        return _connect_stale('twitter')
 
-    if not code or not code_verifier:
-        return render_template(
-            'article_error.html',
-            error="No authorization code or PKCE verifier. Please try again.",
-        )
+    if not code_verifier:
+        # The verifier lives in the session from /twitter/auth; without it this
+        # callback belongs to an older or other sign-in.
+        return _connect_stale('twitter')
+    if not code:
+        return _connect_no_code('twitter')
 
     client = get_twitter_client()
 
@@ -4804,10 +4812,7 @@ def twitter_callback():
 
     except Exception as e:
         app.logger.exception("Twitter OAuth exchange failed")
-        return render_template(
-            'article_error.html',
-            error=f"Failed to connect to X/Twitter: {str(e)}",
-        )
+        return _connect_failed('twitter', e)
 
 
 @app.route('/twitter/disconnect', methods=['POST'])
