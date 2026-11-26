@@ -7,36 +7,48 @@ Your goal is to minimize confusion, reduce effort, prevent mistakes, and help th
 When laws conflict, prioritize clarity, accessibility, user control and task completion. Do not apply them
 mechanically.
 
-## Status of the shared pieces (update this line when they ship)
+## The shared pieces (SHIPPED: `window.Insights`, from `static/insights-ui.js`)
 
-`window.Insights` (toast, confirm, busy, fieldError) is **PLANNED, not built** (rollout Phase 1). Until it exists:
+`base.html` loads them once, in `<head>`, so any page script can call them while it parses. Use these; never write
+another toast, modal or spinner helper, and never load the file again from a page.
 
-- do not add new `alert(` calls; show the problem inline next to the control, or with the page's existing `showToast`;
-- do not write a new toast helper or copy `showToast` into another page;
-- a native `confirm()` is allowed only for an irreversible or high-blast-radius action, and its text must say
-  what will happen and how many items (existing examples in compose.html);
-- leave the existing `showToast(message, type)` signature alone: gate scripts stub it by name;
-- when `Insights.*` ships, use it everywhere and the `scripts/check_ux.py` ratchet will fail any new `alert(`/`confirm(`.
+| Call | Use it for | Laws |
+|---|---|---|
+| `Insights.toast(message, {type, undo, action, duration})` | Saying what just happened. `type` is `success`, `info`, `warning` or `error`. Errors stay until dismissed; the rest go after 5 s (not while hovered). `undo: fn` adds Undo; `action: {label: 'Retry', run}` adds one button. The message is text, never HTML. | 6, 10, 15 |
+| `await Insights.confirm({title, body, confirmLabel, danger})` | Only for what **leaves Insights or cannot be undone** (publish, send, disconnect). Resolves `true`/`false`. Name the count and the destination: `"Publish 3 posts to LinkedIn and X?"`. With `danger: true` the focus starts on Cancel. | 14, 18 |
+| `Insights.busy(button, promiseOrFn, {label})` | Every button that starts slow work. Disabled with a spinner and `label` at once, restored when it settles, and a second click starts nothing. | 6 |
+| `Insights.explain(error, 'Could not save the post.')` | Turning a failure into words: context first, then why and what to do. Takes an Error, a fetch Response, `{status}`, the server's `{error}`, or a string; a message that reads like code is replaced. Set `error.userMessage` to pass your own wording. | 15 |
+| `Insights.fieldError(input, message, {focus})` | A problem with one field: shown under it, tied by `aria-describedby`, the value kept, cleared on the next edit. `''` clears it. | 8, 14, 15 |
+| `Insights.deferred(run, {message, hide, restore})` | **Undo** for deletes, clears and removals that stay inside Insights. `hide()` runs at once; the request is sent after 6 s unless Undo is pressed; on a failure `restore()` puts it back with Retry. Pass `o.keepalive` to `fetch` so leaving the page still sends it. | 15, 18 |
+
+`showToast(message, type)` still works and goes to `Insights.toast`; compose.html and article.html still carry their
+own copies until they are migrated (rollout Phase 3). For targets, use `.btn-icon` on an icon-only button (40px floor,
+44px by touch) and `.btn-danger-quiet` for a destructive secondary action.
+
+**The ratchet:** `python scripts/check_ux.py` (also run by `scripts/run_all_gates.py`) counts the retired patterns in
+every template: `alert(`, native `confirm(`, a page's own `showToast`, `<button>` without `type`, icon-only buttons
+without `aria-label`, `<img>` without `alt`, hex colors in `style=`. Adding one fails the run. Removing one also fails
+until you lock the progress in with `python scripts/check_ux.py --lower` in the same commit. A new page starts at zero.
 
 ## Checklist: what each law means here
 
 Check each item against what you are about to ship.
 
 1. **Hick (choices):** one purpose per screen; hide low-priority options; split big decisions into steps; recommend one option.
-2. **Fitts (size):** targets at least 40px, 44px on touch; no icon-only target without padding; `btn-sm` is never the only way to do a main task.
+2. **Fitts (size):** targets at least 40px, 44px on touch (`.btn-icon`, and base.html's coarse-pointer rules); no icon-only target without padding; `btn-sm` is never the only way to do a main task.
 3. **Jakob (familiar):** use Bootstrap/standard patterns and the nav table in `base.html`; no novel controls without a reason.
 4. **Proximity:** related label, control and hint sit together; separate groups with space, not boxes.
 5. **Miller (chunks):** headings and short groups; long forms become steps; never make the user remember something from another screen.
-6. **Doherty (400 ms):** every click shows a response at once (pressed, busy, or optimistic update); slow work shows progress.
+6. **Doherty (400 ms):** every click shows a response at once (`Insights.busy`, or an optimistic update); slow work shows progress.
 7. **Von Restorff:** exactly one `btn-primary` per card or section; the rest are outline or link.
 8. **Fitts (nearby):** the action sits beside the content it affects; Submit sits under the last field.
 9. **Serial position:** the most important item first, the closing action last, lower priority in the middle (nav, lists, forms).
-10. **Peak-end:** finishing a flow shows what was done and what happens next (for example "Queued for Tue 9:00 on LinkedIn and X"), never a blank or ambiguous screen.
+10. **Peak-end:** finishing a flow shows what was done and what happens next (for example `Insights.toast('Queued for Tue 9:00 on LinkedIn and X.', 'success')`), never a blank or ambiguous screen.
 11. **Zeigarnik:** show done and not-done steps; save progress (drafts); make resuming easy.
 12. **Prägnanz:** simple structure, clear hierarchy, no decoration that does not carry meaning.
 13. **Defaults:** preselect the safest and most common option; prefill from existing context; never default into an unexpected commitment (a publish, a spend); every default is changeable.
-14. **Prevent errors:** accept reasonable input variations; state requirements before submit; **disable impossible actions and say why** (for example "Connect LinkedIn to post there"); warn before risky or destructive actions.
-15. **Recoverable errors:** keep the user's input; say what went wrong in plain language and how to fix it, never raw `error.message`; offer undo, retry or cancel.
+14. **Prevent errors:** accept reasonable input variations; state requirements before submit; **disable impossible actions and say why** (for example "Connect LinkedIn to post there"); warn before risky actions with `Insights.confirm` only when they leave Insights.
+15. **Recoverable errors:** keep the user's input; say what went wrong in plain language and how to fix it (`Insights.explain`, `Insights.fieldError`), never raw `error.message`; offer undo (`Insights.deferred`), retry or cancel.
 16. **Similarity:** same look and behavior for same-purpose controls; reuse components; use design tokens from `base.html`, not hard-coded colors; do not give different actions the same treatment.
 17. **Uniform connectedness:** containers or shared state connect a control to what it affects; keep unrelated things apart.
 18. **Parkinson (time):** fewest steps; drop confirmations that do not protect anything (prefer Undo); prefill; offer shortcuts for repeat actions.
@@ -51,7 +63,7 @@ Check each item against what you are about to ship.
 4. Prevent the error first; if it still happens, keep the user's work and say how to fix it.
 5. Confirm clearly when the goal is done.
 6. Keep what the app already depends on: ids and badge strings used by `partials/connection_strip.html`, one Bootstrap JS load in `<head>`, function names the `scripts/check_*.py` gates stub.
-7. Run `python scripts/run_all_gates.py`. Once it exists, `python scripts/check_ux.py` must pass too.
+7. Run `python scripts/check_ux.py` (and `--lower` if you removed debt), then `python scripts/run_all_gates.py`.
 
 ---
 

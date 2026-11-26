@@ -84,5 +84,14 @@ The short version: one dominant action per section, immediate feedback on every
 click, disable impossible actions and say why, keep the user's input when
 something fails, say what happened and what comes next, and prefer Undo to a
 confirmation. Do not add new `alert(` calls, do not write another toast helper,
-and do not hard-code colors outside the tokens in `base.html`. That file says
-which shared pieces exist yet and what to do until they do.
+and do not hard-code colors outside the tokens in `base.html`.
+
+Use the shared pieces in `window.Insights` (from `static/insights-ui.js`, loaded
+once by `base.html`): `Insights.toast`, `Insights.confirm`, `Insights.busy`,
+`Insights.explain`, `Insights.fieldError` and `Insights.deferred` for Undo. The
+doc's table says when to use each.
+
+`python scripts/check_ux.py` is a ratchet, also run by `run_all_gates.py`: a new
+`alert(`, native `confirm(`, toast copy, untyped or unlabelled button, image
+without `alt` or inline hex color fails it. When you remove some, run
+`python scripts/check_ux.py --lower` in the same commit.

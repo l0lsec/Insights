@@ -528,13 +528,43 @@ SUBSCRIPTION_GATES = [
      ("nodash",)),
 ]
 
+# The UX principles (docs/UX_PRINCIPLES.md): the shared feedback pieces in
+# static/insights-ui.js, and the ratchet that stops any chat adding the patterns
+# they replace. One script, one gate per claim, picked by argument.
+UX_GATES = [
+    ("check_ux.py", "UX_RATCHET_OK",
+     "no template adds an alert, a native confirm, a toast copy, an unlabelled or untyped button, an image without alt or an inline color, and paid-off debt stays paid",
+     ("ratchet",)),
+    ("check_ux.py", "UX_CONTROL_OK",
+     "the UX scanner finds every rule in a fixture full of violations and nothing in a clean one",
+     ("control",)),
+    ("check_ux.py", "UX_PRINCIPLES_OK",
+     "the UX doc holds all 20 laws in order, a checklist item for each, and how to use every shared piece",
+     ("principles",)),
+    ("check_ux.py", "UX_CLAUDE_MD_OK",
+     "CLAUDE.md sends every UI change to the UX doc, the shared pieces and the ratchet",
+     ("claude-md",)),
+    ("check_ux.py", "UX_SHELL_OK",
+     "base.html loads window.Insights once after Bootstrap, with a live region, and real pages render it",
+     ("shell",)),
+    ("check_ux.py", "UX_BEHAVIOR_OK",
+     "toast, confirm, busy, explain, fieldError and deferred Undo behave under node, and broken copies are caught",
+     ("behavior",)),
+    ("check_ux.py", "UX_TARGETS_OK",
+     "close and icon-only buttons get a 40px target, and small buttons 44px on touch screens",
+     ("targets",)),
+    ("check_ux.py", "UX_REGISTERED_OK",
+     "every built section of the UX check is registered here under its token",
+     ("registered",)),
+]
+
 NOT_GATES = {}
 
 ALL_GATES = (ACCOUNT_GATES + ACCOUNT_JS_GATES + LIBRARY_GATES + COMPOSE_GATES
              + VIDEO_GATES + MANUAL_POST_GATES + QUEUE_GATES + PAGING_GATES
              + IG_PEOPLE_GATES + FIND_RESULTS_GATES + LINK_COMMENT_GATES
              + OUTREACH_GATES + INBOX_GATES + SUBSCRIPTION_GATES
-             + CONNECT_ERROR_GATES)
+             + CONNECT_ERROR_GATES + UX_GATES)
 
 
 def _unpack(entry):

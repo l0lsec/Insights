@@ -10,6 +10,7 @@ venv/
 *.md
 !CLAUDE.md
 !docs/UX_PRINCIPLES.md
+!docs/ux-rollout/*.md
 uploads/
 downloads/
 *.log

@@ -1,0 +1,18 @@
+{# Negative control for scripts/check_ux.py: no rule may find anything here. #}
+<div class="card text-muted">
+    <img src="/static/logo.svg" alt="">
+    <button type="button" class="btn btn-primary" data-action="delete">Delete 3 posts</button>
+    <button type="button" class="btn-close" aria-label="Dismiss"></button>
+    <button type="button" class="btn btn-icon" title="Remove image">&times;</button>
+    <button type="submit" class="btn btn-outline-primary">{{ label }}</button>
+    <div class="alert alert-warning">Connect LinkedIn to post there.</div>
+</div>
+<script>
+async function remove(ids, row) {
+    const result = await Insights.deferred(o => fetch('/posts/delete', {method: 'POST', keepalive: o.keepalive}), {
+        message: `Deleted ${ids.length} posts.`, hide: () => row.hidden = true, restore: () => row.hidden = false });
+    if (!(await Insights.confirm({title: 'Publish now?', danger: true}))) return;
+    try { await fetch('/save'); } catch (e) { Insights.toast(Insights.explain(e, 'Could not save.'), 'error'); }
+    const confirmDelete = () => {}; confirmDelete(); this.showToast && this.showToast('x');
+}
+</script>

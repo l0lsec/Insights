@@ -1,0 +1,15 @@
+{# Positive control for scripts/check_ux.py: every rule must find something here. #}
+<div class="card" style="color: #ff0000; border-color:#abc">
+    <img src="/static/logo.svg">
+    <button class="btn btn-primary" onclick="return confirm('Delete?')">Delete</button>
+    <button type="button" class="btn-close"></button>
+    <button type="button" class="btn btn-sm">&times;</button>
+</div>
+<script>
+function showToast(message, type) { document.title = message; }
+async function save() {
+    try { await fetch('/save'); } catch (e) { alert('Error: ' + e.message); }
+    if (!window.confirm('Really?')) return;
+    window.alert('done');
+}
+</script>

@@ -18,6 +18,10 @@
        <body>) because page scripts in the content area call bootstrap.Modal / bootstrap.Tab
        while the page is still parsing. #}
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    {# window.Insights (toast, confirm, busy, explain, fieldError, deferred): the
+       shared feedback pieces from docs/UX_PRINCIPLES.md. Loaded once, here, for
+       the same reason as Bootstrap: page scripts call it while parsing. #}
+    <script src="{{ url_for('static', filename='insights-ui.js') }}"></script>
     <style>
         /* ---------- Design tokens ---------- */
         :root {
@@ -41,6 +45,17 @@
             --line-strong: #D4CFE3;
             --text:        #1F1B2E;
             --muted:       #6B6680;
+
+            /* Meaning, not decoration: one color per kind of outcome. */
+            --ok:      #15803D;
+            --warn:    #B45309;
+            --danger:  #B91C1C;
+            --info:    #1D4ED8;
+            --danger-rgb: 185, 28, 28;
+
+            /* Smallest comfortable target (law 2): 40px with a mouse, 44px by touch. */
+            --target-min:   40px;
+            --target-touch: 44px;
 
             --radius:    10px;
             --radius-lg: 14px;
@@ -270,7 +285,7 @@
             box-shadow: var(--shadow-sm); flex: 1 1 45%;
         }
         .tile h2 { margin-top: 0; }
-        .processed { color: green; }
+        .processed { color: var(--ok); }
         pre { white-space: pre-wrap; }
         .description-cell { white-space: normal; max-width: 400px; }
         .results-count { font-size: .875rem; color: var(--muted); }
@@ -283,9 +298,9 @@
         .sortable.desc::after { content: ' ↓'; opacity: 1; }
 
         /* Type badges */
-        .badge-audio { background: linear-gradient(135deg, #6f42c1, #5a32a3); }
-        .badge-text { background: linear-gradient(135deg, #0d6efd, #0a58ca); }
-        .badge-unknown { background: #6c757d; }
+        .badge-audio { background: var(--brand-600); }
+        .badge-text { background: var(--info); }
+        .badge-unknown { background: var(--muted); }
 
         /* Markdown content */
         .summary-content h1, .summary-content h2, .summary-content h3 {
@@ -305,6 +320,59 @@
         }
         #loadingOverlay.d-none { display: none !important; }
         #loadingOverlay .spinner-border { color: var(--brand-500) !important; }
+
+        /* ---------- Feedback: toasts and the confirm dialog (static/insights-ui.js) ---------- */
+        .insights-toasts {
+            position: fixed; z-index: 2300; right: 1rem; bottom: 1rem; left: 1rem;
+            margin-left: auto; max-width: 420px;
+            display: flex; flex-direction: column; gap: .5rem;
+            pointer-events: none;
+        }
+        .insights-toast {
+            --tone: var(--info);
+            pointer-events: auto;
+            display: flex; align-items: center; gap: .75rem;
+            background: var(--surface); color: var(--text);
+            border: 1px solid var(--line); border-left: 4px solid var(--tone);
+            border-radius: var(--radius); box-shadow: var(--shadow-md);
+            padding: .6rem .5rem .6rem .9rem;
+        }
+        .insights-toast-success { --tone: var(--ok); }
+        .insights-toast-warning { --tone: var(--warn); }
+        .insights-toast-error   { --tone: var(--danger); }
+        .insights-toast-body { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; white-space: pre-line; }
+        .insights-toast-actions { display: flex; align-items: center; gap: .25rem; flex: none; }
+        .insights-toast-undo, .insights-toast-action { min-height: 2rem; font-weight: 600; }
+        .insights-confirm-body { white-space: pre-line; }
+
+        /* ---------- Targets (law 2) ---------- */
+        /* Icon-only buttons: use .btn-icon; it never shrinks below the target floor. */
+        .btn-icon {
+            min-width: var(--target-min); min-height: var(--target-min);
+            display: inline-flex; align-items: center; justify-content: center;
+        }
+        /* A close "x" draws 1em but takes a 40px hit area, without moving anything. */
+        .btn-close { position: relative; }
+        .btn-close::after { content: ""; position: absolute; inset: calc((var(--target-min) - 1.5em) / -2); }
+        /* Destructive but secondary: clearly red, never louder than the primary action. */
+        .btn-danger-quiet {
+            --bs-btn-color: var(--danger); --bs-btn-bg: transparent; --bs-btn-border-color: transparent;
+            --bs-btn-hover-color: var(--danger); --bs-btn-hover-bg: rgba(var(--danger-rgb), .08);
+            --bs-btn-hover-border-color: rgba(var(--danger-rgb), .25);
+            --bs-btn-active-color: var(--danger); --bs-btn-active-bg: rgba(var(--danger-rgb), .14);
+            --bs-btn-focus-shadow-rgb: var(--danger-rgb);
+        }
+        @media (pointer: coarse) {
+            .btn, .btn-sm, .btn-icon { min-height: var(--target-touch); }
+            .btn-sm { padding-top: .55rem; padding-bottom: .55rem; }
+            .btn-icon { min-width: var(--target-touch); }
+            .btn-close::after { inset: calc((var(--target-touch) - 1.5em) / -2); }
+            .dropdown-item, .app-nav .nav-link { padding-top: .7rem; padding-bottom: .7rem; }
+            .form-check-input { width: 1.35em; height: 1.35em; }
+            .form-check-label { padding-top: .3rem; padding-bottom: .3rem; }
+        }
+        .dropdown-meta { color: #9b92b0; }
+        .dropdown-meta strong { color: #E8E4F0; }
 
         @media (prefers-reduced-motion: reduce) {
             *, *::before, *::after { transition: none !important; animation-duration: .01ms !important; scroll-behavior: auto !important; }
@@ -396,7 +464,7 @@
                             <span class="d-lg-none">{{ current_user['username'] }}</span>
                         </a>
                         <ul class="dropdown-menu dropdown-menu-lg-end">
-                            <li class="px-3 py-2 small" style="color:#9b92b0;">Signed in as <strong style="color:#E8E4F0;">{{ current_user['username'] }}</strong></li>
+                            <li class="px-3 py-2 small dropdown-meta">Signed in as <strong>{{ current_user['username'] }}</strong></li>
                             <li><hr class="dropdown-divider"></li>
                             {% for sub in ACCOUNT_NAV %}
                             <li><a class="dropdown-item{% if on(sub)|trim %} is-active{% endif %}" href="{{ sub.href }}"
@@ -430,6 +498,10 @@
         <div class="spinner-border" aria-hidden="true"></div>
         <span class="ms-2">Processing...</span>
     </div>
+
+    {# Where Insights.toast puts its messages. It exists from the start so a
+       screen reader is already listening when the first one arrives. #}
+    <div id="insightsToasts" class="insights-toasts" aria-live="polite"></div>
 
     <main id="main" class="app-main">
         <div class="container">
