@@ -250,7 +250,11 @@ def section_targets():
 
 # ── video (JavaScript under node, then the real route) ───────────────────
 
-VIDEO_HARNESS = r"""
+import os as _os_stub, sys as _sys_stub  # noqa: E402
+_sys_stub.path.insert(0, _os_stub.path.dirname(_os_stub.path.abspath(__file__)))
+from _insights_stub import INSIGHTS_STUB_JS  # noqa: E402
+
+VIDEO_HARNESS = INSIGHTS_STUB_JS + r"""
 // A stub page: just the elements the manual tab's video code reads and writes.
 const els = {};
 const make = (id) => els[id] = {
@@ -279,6 +283,7 @@ const document = { getElementById: (id) => els[id] };
 const showToast = (m, t) => toasts.push([t, m]);
 const alert = (m) => alerts.push(m);
 const confirm = () => true;
+const Insights = makeInsights({ alert, confirm, showToast });
 const platformCharLimits = { linkedin: 3000, threads: 500, twitter: 280, facebook: 5000, instagram: 2200 };
 const PLATFORM_LABELS = { linkedin: 'LinkedIn', threads: 'Threads', twitter: 'X', facebook: 'Facebook', instagram: 'Instagram' };
 const counts = [];

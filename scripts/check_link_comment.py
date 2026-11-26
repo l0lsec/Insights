@@ -1128,7 +1128,11 @@ JS_FUNCTIONS = (
     "markChipPosted", "postedUrlFrom",
 )
 
-JS_HARNESS = r"""
+import os as _os_stub, sys as _sys_stub  # noqa: E402
+_sys_stub.path.insert(0, _os_stub.path.dirname(_os_stub.path.abspath(__file__)))
+from _insights_stub import INSIGHTS_STUB_JS  # noqa: E402
+
+JS_HARNESS = INSIGHTS_STUB_JS + r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
@@ -1190,6 +1194,7 @@ function world(opts = {}) {
       return { ok: reply.status >= 200 && reply.status < 300, status: reply.status, json: async () => reply.body };
     },
   };
+  ctx.Insights = makeInsights(ctx);
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   return { ctx, log, box, postItem, chip, select };

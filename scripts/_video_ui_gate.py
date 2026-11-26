@@ -62,7 +62,11 @@ def node_check(node, blocks, label):
 
 # A stub DOM just big enough for the video functions: elements with a class
 # set, a dataset, children, and the few methods the functions call.
-HARNESS = r"""
+import os as _os_stub, sys as _sys_stub  # noqa: E402
+_sys_stub.path.insert(0, _os_stub.path.dirname(_os_stub.path.abspath(__file__)))
+from _insights_stub import INSIGHTS_STUB_JS  # noqa: E402
+
+HARNESS = INSIGHTS_STUB_JS + r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
@@ -129,6 +133,7 @@ async function run(scenario) {
       return { ok: scenario.ok !== false, json: async () => scenario.reply };
     },
   };
+  ctx.Insights = makeInsights(ctx);
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   scenario.setup && scenario.setup(els, ctx);
@@ -386,7 +391,7 @@ def section_ui():
 # The "Write a New Post" card (``check_video.py newpost``)
 # ---------------------------------------------------------------------------
 
-NEWPOST_HARNESS = r"""
+NEWPOST_HARNESS = INSIGHTS_STUB_JS + r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
@@ -449,6 +454,7 @@ async function run(scenario) {
       return { json: async () => scenario.reply };
     },
   };
+  ctx.Insights = makeInsights(ctx);
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   scenario.setup && scenario.setup(els);

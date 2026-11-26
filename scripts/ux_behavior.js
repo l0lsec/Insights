@@ -71,7 +71,11 @@ class Element_ extends Node_ {
   hasAttribute(k) { return Object.prototype.hasOwnProperty.call(this.attrs, k); }
   removeAttribute(k) { delete this.attrs[k]; }
   focus() { this.ownerDocument.activeElement = this; }
-  click() { if (!this.disabled) this.dispatch('click'); }
+  click() {
+    if (this.disabled) return;
+    if (this.ownerDocument.fire) this.ownerDocument.fire('click', this, () => { if (this.onDefault) this.onDefault(); });
+    else this.dispatch('click');
+  }
   get innerHTML() { return this.childNodes.map(c => c.html).join(''); }
   set innerHTML(v) { this.childNodes = []; if (v !== '') this.appendChild(new Raw_(this.ownerDocument, v)); }
   get html() { return `<${this.tagName.toLowerCase()}>${this.innerHTML}</${this.tagName.toLowerCase()}>`; }
@@ -81,6 +85,14 @@ class Element_ extends Node_ {
     const out = []; this.walk(n => { if (n.classList.contains(m[1])) out.push(n); }); return out;
   }
   querySelector(sel) { return this.querySelectorAll(sel)[0] || null; }
+  matches(sel) {
+    return sel.split(',').some(part => {
+      const m = /^\s*([a-z]*)(?:\[([\w-]+)\])?\s*$/.exec(part);
+      if (!m) throw new Error('fake DOM: unsupported selector ' + part);
+      return (!m[1] || this.tagName === m[1].toUpperCase()) && (!m[2] || this.hasAttribute(m[2]));
+    });
+  }
+  closest(sel) { for (let n = this; n && n.nodeType === 1; n = n.parentNode) if (n.matches(sel)) return n; return null; }
 }
 function makeDocument() {
   const doc = { activeElement: null };
@@ -91,6 +103,19 @@ function makeDocument() {
   doc.documentElement.appendChild(doc.body);
   doc.getElementById = id => { let hit = null; doc.documentElement.walk(n => { if (!hit && n.id === id) hit = n; }); return hit; };
   doc.activeElement = doc.body;
+  doc.listeners = {};
+  doc.addEventListener = (type, fn, capture) => { (doc.listeners[type] = doc.listeners[type] || []).push(fn); };
+  doc.querySelector = () => null;
+  // A user event: document capture listeners first, then the target's own, then the default action.
+  doc.fire = (type, target, defaultAction) => {
+    const event = { type, target, defaultPrevented: false, stopped: false,
+                    preventDefault() { this.defaultPrevented = true; },
+                    stopImmediatePropagation() { this.stopped = true; }, stopPropagation() {} };
+    const pending = (doc.listeners[type] || []).map(fn => fn(event));
+    if (!event.stopped) (target.listeners[type] || []).slice().forEach(fn => fn.call(target, event));
+    if (!event.defaultPrevented && defaultAction) defaultAction();
+    return Promise.all(pending.map(p => Promise.resolve(p)));
+  };
   return doc;
 }
 
@@ -123,7 +148,11 @@ function world(opts = {}) {
   region.id = 'insightsToasts'; region.setAttribute('aria-live', 'polite');
   if (!opts.noRegion) document.body.appendChild(region);
   const nativeConfirms = [];
+  const sent = [];
   const win = {
+    FormData: class { constructor(form) { this.form = form; } },
+    fetch: (url, init) => { sent.push({ url, init: init || {} }); return Promise.resolve({ ok: opts.fetchOk !== false, status: opts.fetchOk === false ? 500 : 200 }); },
+    location: { reloads: 0, href: '', reload() { this.reloads++; } },
     document, console, Promise, WeakMap, setImmediate,
     navigator: { onLine: true },
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
@@ -146,7 +175,7 @@ function world(opts = {}) {
   win.window = win;
   vm.createContext(win);
   vm.runInContext(SOURCE, win, { filename: 'insights-ui.js' });
-  return { win, document, clock, region, nativeConfirms, I: win.Insights };
+  return { win, document, clock, region, nativeConfirms, sent, I: win.Insights };
 }
 
 const results = {};
@@ -379,6 +408,72 @@ const buttonByText = (root, text) => { let hit = null; root.walk(n => { if (!hit
     const w2 = world({ showToast: () => own++ });
     w2.win.showToast('x');
     ok(own === 1, "a page's own showToast was overwritten");
+  });
+
+  // ------------------------------------------------ declarative markup
+  const confirmButton = w => buttonByText(w.document.body, 'Delete feed');
+  const cancelButton = w => buttonByText(w.document.body, 'Cancel');
+  function feedRow(w, attrs) {
+    const tr = w.document.createElement('tr');
+    const form = w.document.createElement('form');
+    form.action = '/feed/3/delete'; form.setAttribute('method', 'post');
+    Object.entries(attrs).forEach(([k, v]) => form.setAttribute(k, v));
+    form.submits = 0;
+    form.requestSubmit = () => { form.submits++; };
+    tr.appendChild(form); w.document.body.appendChild(tr);
+    return { tr, form };
+  }
+
+  await test('markup_confirm_form_waits_for_the_answer', async () => {
+    let w = world();
+    let { form } = feedRow(w, { 'data-confirm': 'Its 12 episodes go too.', 'data-confirm-title': 'Delete feed?', 'data-confirm-label': 'Delete feed', 'data-confirm-danger': '' });
+    let fired = w.document.fire('submit', form, () => form.submits++);
+    await flush();
+    ok(form.submits === 0, 'the form submitted before the question was answered');
+    ok(w.document.activeElement === cancelButton(w), 'a danger confirm from markup did not start on Cancel');
+    cancelButton(w).click(); await fired; await flush();
+    ok(form.submits === 0, 'Cancel still submitted the form');
+    fired = w.document.fire('submit', form, () => form.submits++);
+    await flush();
+    confirmButton(w).click(); await fired; await flush();
+    ok(form.submits === 1, `Confirm did not submit exactly once (${form.submits})`);
+  });
+
+  await test('markup_undo_form_hides_then_sends_after_the_window', async () => {
+    const w = world();
+    const { tr, form } = feedRow(w, { 'data-undo': 'Deleted the feed.', 'data-undo-row': 'tr', 'data-undo-then': 'reload' });
+    const done = w.document.fire('submit', form, () => form.submits++);
+    await flush();
+    ok(tr.hidden === true && w.sent.length === 0 && form.submits === 0, 'the row did not hide at once, or it was sent without waiting');
+    ok(/Deleted the feed/.test(toasts(w)[0].textContent) && buttonByText(w.region, 'Undo'), 'no Undo toast naming what was deleted');
+    await w.clock.tick(6100); await done; await flush();
+    ok(w.sent.length === 1 && w.sent[0].url === '/feed/3/delete' && w.sent[0].init.method === 'POST', 'it was not sent once, as a POST, after the window');
+    ok(w.win.location.reloads === 1, 'data-undo-then="reload" did not reload after it went through');
+  });
+
+  await test('markup_undo_form_undo_sends_nothing', async () => {
+    const w = world();
+    const { tr, form } = feedRow(w, { 'data-undo': 'Deleted the feed.', 'data-undo-row': 'tr' });
+    w.document.fire('submit', form);
+    await flush();
+    buttonByText(w.region, 'Undo').click();
+    await w.clock.tick(60000);
+    ok(tr.hidden === false && w.sent.length === 0, 'Undo did not bring the row back, or it was still sent');
+  });
+
+  await test('markup_confirm_button_runs_its_handler_only_on_yes', async () => {
+    const w = world(); let ran = 0;
+    const b = w.document.createElement('button');
+    b.setAttribute('data-confirm', 'Disconnect LinkedIn?'); b.setAttribute('data-confirm-label', 'Delete feed');
+    b.addEventListener('click', () => ran++);
+    w.document.body.appendChild(b);
+    let fired = w.document.fire('click', b); await flush();
+    ok(ran === 0, 'the button handler ran before the question was answered');
+    cancelButton(w).click(); await fired; await flush();
+    ok(ran === 0, 'Cancel still ran the handler');
+    fired = w.document.fire('click', b); await flush();
+    confirmButton(w).click(); await fired; await flush();
+    ok(ran === 1, `Confirm did not run the handler exactly once (${ran})`);
   });
 
   process.stdout.write(JSON.stringify(results) + '\n');

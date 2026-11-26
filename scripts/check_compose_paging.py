@@ -210,7 +210,11 @@ def run_node(harness, functions):
 # One fake world: a DOM just big enough for the loading code, a server that pages
 # a list of cards the way /compose/posts/more does, an IntersectionObserver that
 # can be told whether its target is in view, and a localStorage that can break.
-WORLD = r"""
+import os as _os_stub, sys as _sys_stub  # noqa: E402
+_sys_stub.path.insert(0, _os_stub.path.dirname(_os_stub.path.abspath(__file__)))
+from _insights_stub import INSIGHTS_STUB_JS  # noqa: E402
+
+WORLD = INSIGHTS_STUB_JS + r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
@@ -311,6 +315,7 @@ function world(opts = {}) {
       disconnect() { this.target = null; w.disconnected++; }
     };
   }
+  ctx.Insights = makeInsights(ctx);
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   const run = (code) => vm.runInContext(code, ctx);

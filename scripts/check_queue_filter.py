@@ -156,7 +156,11 @@ def run_node(harness, functions):
     return json.loads(run.stdout.strip().splitlines()[-1])
 
 
-BULK_HARNESS = r"""
+import os as _os_stub, sys as _sys_stub  # noqa: E402
+_sys_stub.path.insert(0, _os_stub.path.dirname(_os_stub.path.abspath(__file__)))
+from _insights_stub import INSIGHTS_STUB_JS  # noqa: E402
+
+BULK_HARNESS = INSIGHTS_STUB_JS + r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
@@ -204,6 +208,7 @@ function world(opts) {
       return { ok: true, json: async () => ({ success: true, scheduled_for: '2026-10-14T09:00' }) };
     },
   };
+  ctx.Insights = makeInsights(ctx);
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   w.ctx = ctx;
@@ -252,7 +257,7 @@ def section_bulk():
     print("QUEUE_FILTER_BULK_OK")
 
 
-RECHECK_HARNESS = r"""
+RECHECK_HARNESS = INSIGHTS_STUB_JS + r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
@@ -276,6 +281,7 @@ function world(filters) {
       querySelector: (sel) => sel === '#saved-posts-container .load-more-container' ? wrap : null,
     },
   };
+  ctx.Insights = makeInsights(ctx);
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   Object.assign(w, { ctx, badge, results, more, all, wrap });

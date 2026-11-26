@@ -11,7 +11,7 @@
 async function remove(ids, row) {
     const result = await Insights.deferred(o => fetch('/posts/delete', {method: 'POST', keepalive: o.keepalive}), {
         message: `Deleted ${ids.length} posts.`, hide: () => row.hidden = true, restore: () => row.hidden = false });
-    if (!(await Insights.confirm({title: 'Publish now?', danger: true}))) return;
+    if (!(await Insights.confirm({title: 'Publish 3 posts to LinkedIn now?', confirmLabel: 'Publish 3 posts', danger: true}))) return;
     try { await fetch('/save'); } catch (e) { Insights.toast(Insights.explain(e, 'Could not save.'), 'error'); }
     const confirmDelete = () => {}; confirmDelete(); this.showToast && this.showToast('x');
 }

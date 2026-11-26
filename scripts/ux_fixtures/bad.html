@@ -12,4 +12,8 @@ async function save() {
     if (!window.confirm('Really?')) return;
     window.alert('done');
 }
+async function deleteFeed(id) { await fetch(`/feed/${id}/delete`, { method: 'POST' }); }
+async function publish(id) { await fetch(`/compose/post/${id}/publish`, { method: 'POST' }); }
+async function vague() { if (await Insights.confirm({ title: 'Sure?', confirmLabel: 'OK' })) go(); }
 </script>
+<form action="/feed/3/delete" method="post"><button type="submit">Delete feed</button></form>

@@ -556,6 +556,15 @@ UX_GATES = [
     ("check_ux.py", "UX_REGISTERED_OK",
      "every built section of the UX check is registered here under its token",
      ("registered",)),
+    ("check_ux.py", "UX_ZERO_DEBT_OK",
+     "no template calls alert( or the browser's confirm(, or defines its own showToast",
+     ("zero",)),
+    ("check_ux.py", "UX_HARNESS_PARITY_OK",
+     "every gate harness that fakes alert/confirm/showToast also fakes window.Insights into the same log, and none lost an assertion",
+     ("harness",)),
+    ("check_ux.py", "UX_UNDO_OK",
+     "every delete inside Insights waits behind Undo, and every publish, send or disconnect asks with a dialog that names the action",
+     ("undo",)),
 ]
 
 NOT_GATES = {}

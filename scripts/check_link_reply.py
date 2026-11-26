@@ -711,7 +711,11 @@ def section_ui():
 JS_FUNCTIONS = ("linkCommentBox", "linkCommentNoun", "showLinkCommentError", "renderLinkCommentState",
                 "renderLinkComment", "saveLinkComment", "retryLinkComment", "noteFirstComment")
 
-JS_HARNESS = r"""
+import os as _os_stub, sys as _sys_stub  # noqa: E402
+_sys_stub.path.insert(0, _os_stub.path.dirname(_os_stub.path.abspath(__file__)))
+from _insights_stub import INSIGHTS_STUB_JS  # noqa: E402
+
+JS_HARNESS = INSIGHTS_STUB_JS + r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
@@ -746,6 +750,7 @@ const out = {};
     fetch: async (url, init) => { log.fetch.push({ url, fields: init.body.entries });
       const r = replies.shift(); return { ok: r.status < 300, json: async () => r.body }; },
   };
+  ctx.Insights = makeInsights(ctx);
   vm.createContext(ctx); vm.runInContext(source, ctx);
   const postItem = { querySelector: (sel) => ({ '.link-comment[data-platform="threads"]': boxes.threads,
                                                '.link-comment[data-platform="linkedin"]': boxes.linkedin })[sel] || null };

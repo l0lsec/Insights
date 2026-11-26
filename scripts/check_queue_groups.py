@@ -721,7 +721,11 @@ RENDER_FUNCTIONS = ["escapeHtml", "rebuildQueueTable", "getStatusBadge", "getPla
 # parity: the Jinja rows and the JavaScript rows are the same rows
 # ---------------------------------------------------------------------------
 
-PARITY_HARNESS = r"""
+import os as _os_stub, sys as _sys_stub  # noqa: E402
+_sys_stub.path.insert(0, _os_stub.path.dirname(_os_stub.path.abspath(__file__)))
+from _insights_stub import INSIGHTS_STUB_JS  # noqa: E402
+
+PARITY_HARNESS = INSIGHTS_STUB_JS + r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
@@ -731,6 +735,7 @@ const ctx = {
   document: { getElementById: (id) => id === 'schedule-tbody' ? tbody : null },
   initSortable: () => {},
 };
+ctx.Insights = makeInsights(ctx);
 vm.createContext(ctx);
 vm.runInContext(source, ctx);
 const out = {};
@@ -825,7 +830,7 @@ JS_FUNCTIONS = ["idsOf", "platformsOf", "requestEach", "describeFailures", "fini
                 "pendingQueueOrder", "updateCharCount", "resetContentImageUI",
                 "loadContentImageLibrary", "updateContentImagePreview"]
 
-JS_HARNESS = r"""
+JS_HARNESS = INSIGHTS_STUB_JS + r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
@@ -863,6 +868,7 @@ function world(opts = {}) {
       return { ok: true, status: 200, json: async () => reply.body };
     },
   };
+  ctx.Insights = makeInsights(ctx);
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   return { ctx, log, els, el };
@@ -1232,7 +1238,7 @@ def section_syntax():
 # search: finding a post in the queue by its words
 # ---------------------------------------------------------------------------
 
-SEARCH_HARNESS = r"""
+SEARCH_HARNESS = INSIGHTS_STUB_JS + r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
@@ -1262,6 +1268,7 @@ function world(initial) {
     clearTimeout: (id) => { delete log.timers[id]; },
     URLSearchParams,
   };
+  ctx.Insights = makeInsights(ctx);
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   return { ctx, log, ids, fields };

@@ -19,8 +19,12 @@ Modes, each a gate in run_all_gates.py:
     behavior    the shared pieces behave under node, and broken copies of them are caught   UX_BEHAVIOR_OK
     targets     the CSS gives small and icon-only controls a 40px target, 44px by touch   UX_TARGETS_OK
     registered  every built mode above is registered in run_all_gates.py   UX_REGISTERED_OK
-Later rollout phases (zero, disabled-states, flows, undo, harness) are listed in
-docs/ux-rollout/GATES.md and fail here as not built yet.
+    zero        no template has alert(, confirm( or its own showToast   UX_ZERO_DEBT_OK
+    harness     harnesses that fake the dialogs also fake Insights into the same log   UX_HARNESS_PARITY_OK
+    undo        deletes wait behind Insights.deferred; exits ask with a named confirm   UX_UNDO_OK
+zero and undo take template paths after the mode to check only those files.
+Later rollout phases (disabled-states, flows) are listed in docs/ux-rollout/GATES.md
+and fail here as not built yet.
 """
 
 import glob
@@ -103,8 +107,15 @@ def scan_text(text):
     return {name: counter(text) for name, (counter, _) in RULES.items()}
 
 
+ONLY = []   # zero/undo accept template paths after the mode, to check just those
+
+
 def template_files():
-    return sorted(glob.glob(os.path.join(TEMPLATES, "**", "*.html"), recursive=True))
+    every = sorted(glob.glob(os.path.join(TEMPLATES, "**", "*.html"), recursive=True))
+    if ONLY:
+        wanted = {os.path.abspath(os.path.join(ROOT, p)) for p in ONLY}
+        return [p for p in every if os.path.abspath(p) in wanted]
+    return every
 
 
 def rel(path):
@@ -353,6 +364,10 @@ MUTANTS = [
     ("fieldError forgets aria-invalid", "input.setAttribute('aria-invalid', 'true');", ""),
     ("toast renders HTML", "var body = make('div', 'insights-toast-body', message);",
      "var body = make('div', 'insights-toast-body'); body.innerHTML = message;"),
+    ("a data-confirm form submits without asking", "if (!wantsConfirm && !wantsUndo) return;\n        event.preventDefault();",
+     "if (!wantsConfirm && !wantsUndo) return;"),
+    ("a data-undo row stays visible", "hide: function () { row.hidden = true; },", "hide: function () {},"),
+    ("a data-confirm button runs its handler on Cancel", "if (event.stopImmediatePropagation) event.stopImmediatePropagation();", ""),
 ]
 
 
@@ -406,13 +421,253 @@ def mode_targets():
     print("UX_TARGETS_OK")
 
 
+# ------------------------------------------------------------- zero debt (G7)
+
+ZERO_RULES = ("alert", "confirm", "local_toast")
+
+
+def mode_zero():
+    left = {}
+    for path in template_files():
+        found = scan_text(read(path))
+        bad = {k: found[k] for k in ZERO_RULES if found[k]}
+        if bad:
+            left[rel(path)] = bad
+    if left:
+        for name, bad in sorted(left.items()):
+            print(f"  {name}: {bad}")
+        fail(f"{sum(sum(b.values()) for b in left.values())} alert(/confirm(/local showToast left in {len(left)} templates")
+    print(f"no alert(, confirm( or local showToast in {len(template_files())} templates")
+    print("UX_ZERO_DEBT_OK")
+
+
+# --------------------------------------------------------- harness parity (G15)
+
+STUBS = re.compile(r"\b(?:confirm|alert|showToast)\s*[:=]\s*(?:\(|async\b|function\b|\w+\s*=>)")
+CHECK_LINE = re.compile(r"^\s*(?:check|ok|expect|assert)\s*\(|^\s*assert\b", re.M)
+
+
+def _main_copy(relpath):
+    run = subprocess.run(["git", "-C", ROOT, "show", f"origin/main:{relpath}"],
+                         capture_output=True, text=True)
+    return run.stdout if run.returncode == 0 else None
+
+
+def mode_harness():
+    problems, seen = [], 0
+    for path in sorted(glob.glob(os.path.join(HERE, "*.py"))):
+        name = os.path.basename(path)
+        if name in ("check_ux.py", "_insights_stub.py"):
+            continue
+        text = read(path)
+        if not STUBS.search(text):
+            continue
+        seen += 1
+        if "INSIGHTS_STUB_JS" not in text or not re.search(r"makeInsights\(", text):
+            problems.append(f"{name}: stubs alert/confirm/showToast but not Insights (use _insights_stub.INSIGHTS_STUB_JS)")
+            continue
+        if not re.search(r"Insights\s*[:=]\s*makeInsights\(", text):
+            problems.append(f"{name}: builds makeInsights but never puts it in the world as Insights")
+        before = _main_copy(f"scripts/{name}")
+        if before is not None:
+            was, now = len(CHECK_LINE.findall(before)), len(CHECK_LINE.findall(text))
+            if now < was:
+                problems.append(f"{name}: {now} assertion lines, main has {was}; an assertion was removed")
+    if seen == 0:
+        fail("no harness stubs alert/confirm/showToast; the scan pattern is broken")
+    if problems:
+        for p in problems:
+            print(f"  {p}")
+        fail(f"{len(problems)} harness parity problems")
+    print(f"{seen} harnesses stub the dialogs and Insights into one log; none lost an assertion")
+    print("UX_HARNESS_PARITY_OK")
+
+
+# --------------------------------------------------------- undo and confirm (G14)
+
+def _scripts_of(html):
+    """(offset, body) for each inline <script> (no src=)."""
+    out = []
+    for m in re.finditer(r"<script\b([^>]*)>(.*?)</script>", html, re.S | re.I):
+        if re.search(r"\bsrc\s*=", m.group(1)):
+            continue
+        out.append((m.start(2), m.group(2)))
+    return out
+
+
+NOT_FUNCTIONS = {"if", "for", "while", "switch", "catch", "with", "return", "typeof"}
+
+
+def _function_spans(js):
+    """[(start, end)] of every function body, found by a small tokenizer that skips
+    strings, template literals (with ${} nesting) and comments."""
+    spans, stack, i, n = [], [], 0, len(js)
+    tmpl = []          # brace depth at which each open template literal's ${ began
+    parens = []        # positions of open '('
+    closed_paren = {}  # index of ')' -> index of its '('
+    while i < n:
+        c = js[i]
+        if c == "/" and js.startswith("//", i):
+            j = js.find("\n", i); i = n if j == -1 else j; continue
+        if c == "/" and js.startswith("/*", i):
+            j = js.find("*/", i + 2); i = n if j == -1 else j + 2; continue
+        if c in "'\"":
+            j = i + 1
+            while j < n and js[j] != c and js[j] != "\n":
+                j += 2 if js[j] == "\\" else 1
+            i = j + 1; continue
+        if c == "`" or (c == "}" and tmpl and tmpl[-1] == len(stack)):
+            if c == "}":
+                tmpl.pop()
+            j = i + 1
+            while j < n:
+                if js[j] == "\\":
+                    j += 2; continue
+                if js[j] == "`":
+                    break
+                if js.startswith("${", j):
+                    tmpl.append(len(stack)); j += 1
+                    break
+                j += 1
+            i = j + 1; continue
+        if c == "(":
+            parens.append(i)
+        elif c == ")" and parens:
+            closed_paren[i] = parens.pop()
+        elif c == "{":
+            k = i - 1
+            while k >= 0 and js[k].isspace():
+                k -= 1
+            is_fn = False
+            if k >= 1 and js[k - 1:k + 1] == "=>":
+                is_fn = True
+            elif k >= 0 and js[k] == ")" and k in closed_paren:
+                p = closed_paren[k] - 1
+                while p >= 0 and js[p].isspace():
+                    p -= 1
+                e = p + 1
+                while p >= 0 and (js[p].isalnum() or js[p] in "_$"):
+                    p -= 1
+                word = js[p + 1:e]
+                is_fn = word not in NOT_FUNCTIONS
+            stack.append((i, is_fn))
+        elif c == "}" and stack:
+            start, is_fn = stack.pop()
+            if is_fn:
+                spans.append((start, i))
+        i += 1
+    return spans
+
+
+def _enclosing(spans, pos, depth=3):
+    inner = sorted((s for s in spans if s[0] <= pos <= s[1]), key=lambda s: s[1] - s[0])
+    return inner[:depth]
+
+
+STAYS_INSIDE = re.compile(
+    r"/(?:delete|bulk-delete|delete-selected|delete-bulk|delete-prompts?-bulk|delete-prompt|clear|clear-queue|"
+    r"clear-all|clear-prompts|remove-from-queue|unqueue|cancel|bulk-remove-platform)\b"
+    r"|method\s*:\s*['\"]DELETE['\"]")
+LEAVES = re.compile(r"/(?:post-now|publish|disconnect|send)\b|/(?:linkedin|threads|facebook|twitter|instagram)/post/")
+URL_LITERAL = re.compile(r"""`[^`]*`|'[^'\n]*'|"[^"\n]*"|method\s*:\s*['"]DELETE['"]""")
+INSIDE_NAME = re.compile(r"""url_for\(\s*["'][^"']*(?:delete|remove|clear|unqueue|cancel)[^"']*["']""")
+LEAVES_NAME = re.compile(r"""url_for\(\s*["'][^"']*(?:disconnect|publish|post_now|send)[^"']*["']""")
+GENERIC_LABELS = {"ok", "yes", "confirm", "continue", "proceed", "sure"}
+UNDO_MARK = re.compile(r"ux-undo-ok:\s*\S")
+CONFIRM_MARK = re.compile(r"ux-confirm-ok:\s*\S")
+
+
+def _call_text(js, start):
+    """The text of a call from its '(' to the matching ')', roughly."""
+    depth, i = 0, js.index("(", start)
+    for j in range(i, min(len(js), i + 3000)):
+        if js[j] == "(":
+            depth += 1
+        elif js[j] == ")":
+            depth -= 1
+            if depth == 0:
+                return js[i:j + 1]
+    return js[i:i + 3000]
+
+
+def undo_problems(path):
+    html, name, problems = read(path), rel(path), []
+    marks = []
+    for offset, js in _scripts_of(html):
+        spans = _function_spans(js)
+        line_of = lambda pos: html.count("\n", 0, offset + pos) + 1
+        for m in URL_LITERAL.finditer(js):
+            target = m.group(0)
+            if "<" in target and ">" in target:
+                continue  # markup built in a script; the tag scan below reads it
+            scopes = [js[s:e + 1] for s, e in _enclosing(spans, m.start())]
+            if STAYS_INSIDE.search(target) or INSIDE_NAME.search(target):
+                if any("Insights.deferred(" in s for s in scopes):
+                    continue
+                if scopes and UNDO_MARK.search(scopes[0]):
+                    marks.append(f"{name}:{line_of(m.start())} {UNDO_MARK.search(scopes[0]).group(0)}")
+                    continue
+                problems.append(f"{name}:{line_of(m.start())}: {target[:70]} deletes without Insights.deferred (Undo)")
+            elif LEAVES.search(target) or LEAVES_NAME.search(target):
+                if any("Insights.confirm(" in s for s in scopes):
+                    continue
+                if scopes and CONFIRM_MARK.search(scopes[0]):
+                    marks.append(f"{name}:{line_of(m.start())} {CONFIRM_MARK.search(scopes[0]).group(0)}")
+                    continue
+                problems.append(f"{name}:{line_of(m.start())}: {target[:70]} leaves Insights without Insights.confirm")
+        for m in re.finditer(r"Insights\.confirm\(", js):
+            call = _call_text(js, m.start())
+            label = re.search(r"confirmLabel\s*:\s*(`[^`]*`|'[^']*'|\"[^\"]*\"|[\w.]+)", call)
+            if not label:
+                problems.append(f"{name}:{line_of(m.start())}: Insights.confirm without a confirmLabel naming the action")
+            elif label.group(1).strip("'\"`").strip().lower() in GENERIC_LABELS:
+                problems.append(f"{name}:{line_of(m.start())}: confirmLabel {label.group(1)} does not name the action")
+    for m in re.finditer(r"<(form|a)\b([^>]*)>", html, re.I):
+        tag, attrs = m.group(1).lower(), m.group(2)
+        url = re.search(r"""\b(?:action|href)\s*=\s*("[^"]*"|'[^']*')""", attrs)
+        if not url:
+            continue
+        target = url.group(1)
+        line = html.count("\n", 0, m.start()) + 1
+        inside = STAYS_INSIDE.search(target) or re.search(r"url_for\(\s*'[^']*(?:delete|remove|clear)[^']*'", target)
+        leaves = LEAVES.search(target) or re.search(r"url_for\(\s*'[^']*(?:disconnect|publish|post_now|send)[^']*'", target)
+        if inside and "data-undo" not in attrs:
+            problems.append(f"{name}:{line}: <{tag}> to {target[:60]} deletes without data-undo")
+        if leaves and "data-confirm" not in attrs and tag == "form":
+            problems.append(f"{name}:{line}: <form> to {target[:60]} leaves Insights without data-confirm")
+        if "data-confirm" in attrs and "data-confirm-label" not in attrs:
+            problems.append(f"{name}:{line}: data-confirm without data-confirm-label naming the action")
+    return problems, marks
+
+
+def mode_undo():
+    problems, marks = [], []
+    for path in template_files():
+        p, m = undo_problems(path)
+        problems += p
+        marks += m
+    caught = undo_problems(os.path.join(FIXTURES, "bad.html"))[0]
+    if len(caught) < 4:
+        fail(f"the undo scan found {len(caught)} of the 4 planted problems in ux_fixtures/bad.html; it is blind")
+    if undo_problems(os.path.join(FIXTURES, "clean.html"))[0]:
+        fail("the undo scan flags ux_fixtures/clean.html; it cries wolf")
+    for m in marks:
+        print(f"  marked: {m}")
+    if problems:
+        for p in problems:
+            print(f"  {p}")
+        fail(f"{len(problems)} deletes without Undo or exits without a named confirm")
+    print(f"every delete inside Insights is deferred with Undo and every exit is confirmed by name; {len(marks)} marked exceptions")
+    print("UX_UNDO_OK")
+
+
 BUILT = {
     "ratchet": "UX_RATCHET_OK", "control": "UX_CONTROL_OK", "principles": "UX_PRINCIPLES_OK",
     "claude-md": "UX_CLAUDE_MD_OK", "shell": "UX_SHELL_OK", "behavior": "UX_BEHAVIOR_OK",
     "targets": "UX_TARGETS_OK", "registered": "UX_REGISTERED_OK",
+    "zero": "UX_ZERO_DEBT_OK", "harness": "UX_HARNESS_PARITY_OK", "undo": "UX_UNDO_OK",
 }
-LATER = {"zero": "Phase 3", "disabled-states": "Phase 3", "flows": "Phase 4",
-         "undo": "Phase 3", "harness": "Phase 3"}
+LATER = {"disabled-states": "Phase 3", "flows": "Phase 4"}
 
 
 def mode_registered():
@@ -434,12 +689,15 @@ MODES = {
     "ratchet": mode_ratchet, "control": mode_control, "principles": mode_principles,
     "claude-md": mode_claude_md, "shell": mode_shell, "behavior": mode_behavior,
     "targets": mode_targets, "registered": mode_registered,
+    "zero": mode_zero, "harness": mode_harness, "undo": mode_undo,
     "--lower": mode_lower, "--init": mode_init,
 }
 
 
 def main(argv):
     mode = argv[1] if len(argv) > 1 else "ratchet"
+    if mode in ("zero", "undo") and len(argv) > 2:
+        ONLY.extend(argv[2:])
     if mode in LATER:
         fail(f"mode {mode!r} is not built yet (rollout {LATER[mode]}, docs/ux-rollout/PLAN.md)")
     if mode not in MODES:

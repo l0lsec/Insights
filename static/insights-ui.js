@@ -434,6 +434,109 @@
     }
     if (global.addEventListener) global.addEventListener('pagehide', flushPending);
 
+    /* ------------------------------------------------ declarative markup */
+
+    /*
+     * For server-rendered forms and links, so a template needs no script:
+     *
+     *   <form action="/feed/3/delete" method="post"
+     *         data-undo="Deleted the feed Lex Fridman." data-undo-row="tr">
+     *     Submits only after the Undo window; the closest <tr> (or the element
+     *     matching data-undo-row, default [data-undo-row]) hides at once and comes
+     *     back on Undo or failure. data-undo-then="reload" or a URL runs after it
+     *     went through. Works on <a href data-undo> too (sent as GET).
+     *
+     *   <form ... data-confirm="Your token is deleted; queued posts stop."
+     *         data-confirm-title="Disconnect LinkedIn?" data-confirm-label="Disconnect"
+     *         data-confirm-danger>
+     *     Asks with Insights.confirm first; also on <a> and <button>.
+     */
+    function attr(el, name) { return el.getAttribute(name); }
+
+    function confirmOptsFrom(el) {
+        return {
+            title: attr(el, 'data-confirm-title') || attr(el, 'data-confirm'),
+            body: attr(el, 'data-confirm-title') ? attr(el, 'data-confirm') : '',
+            confirmLabel: attr(el, 'data-confirm-label') || 'Confirm',
+            danger: el.hasAttribute('data-confirm-danger')
+        };
+    }
+
+    function undoRow(el) {
+        var sel = attr(el, 'data-undo-row');
+        if (sel && el.closest) return el.closest(sel) || doc.querySelector(sel) || el;
+        return (el.closest && el.closest('[data-undo-row]')) || el;
+    }
+
+    function undoFrom(el, send) {
+        var row = undoRow(el);
+        var then = attr(el, 'data-undo-then');
+        return deferred(send, {
+            message: attr(el, 'data-undo') || 'Deleted.',
+            hide: function () { row.hidden = true; },
+            restore: function () { row.hidden = false; }
+        }).then(function (result) {
+            if (result.committed && then) {
+                if (then === 'reload') global.location.reload();
+                else global.location.href = then;
+            }
+            return result;
+        });
+    }
+
+    function sendForm(form, keepalive) {
+        return global.fetch(form.action, {
+            method: (form.getAttribute('method') || 'POST').toUpperCase(),
+            body: new global.FormData(form),
+            credentials: 'same-origin',
+            keepalive: !!keepalive
+        });
+    }
+
+    function onSubmit(event) {
+        var form = event.target;
+        if (!form || !form.hasAttribute) return;
+        if (form.__insightsPass) { form.__insightsPass = false; return; }
+        var wantsConfirm = form.hasAttribute('data-confirm');
+        var wantsUndo = form.hasAttribute('data-undo');
+        if (!wantsConfirm && !wantsUndo) return;
+        event.preventDefault();
+        var asked = wantsConfirm ? confirm(confirmOptsFrom(form)) : Promise.resolve(true);
+        return asked.then(function (yes) {
+            if (!yes) return false;
+            if (wantsUndo) return undoFrom(form, function (o) { return sendForm(form, o.keepalive); });
+            form.__insightsPass = true;
+            if (typeof form.requestSubmit === 'function') form.requestSubmit();
+            else form.submit();
+            return true;
+        });
+    }
+
+    function onClick(event) {
+        var el = event.target && event.target.closest && event.target.closest('a[data-confirm], button[data-confirm], a[data-undo]');
+        if (!el) return;
+        if (el.__insightsPass) { el.__insightsPass = false; return; }
+        event.preventDefault();
+        if (event.stopImmediatePropagation) event.stopImmediatePropagation();
+        var asked = el.hasAttribute('data-confirm') ? confirm(confirmOptsFrom(el)) : Promise.resolve(true);
+        return asked.then(function (yes) {
+            if (!yes) return false;
+            if (el.hasAttribute('data-undo')) {
+                return undoFrom(el, function (o) {
+                    return global.fetch(el.href, { credentials: 'same-origin', keepalive: !!o.keepalive });
+                });
+            }
+            el.__insightsPass = true;
+            el.click();   // runs the element's own handler, or follows the link / submits its form
+            return true;
+        });
+    }
+
+    if (doc && doc.addEventListener) {
+        doc.addEventListener('submit', onSubmit, true);
+        doc.addEventListener('click', onClick, true);
+    }
+
     /* ------------------------------------------------------------ export */
 
     global.Insights = {

@@ -209,7 +209,11 @@ def run_node(harness, functions):
 # wiring: the result markup, drawn by the page's own function
 # ---------------------------------------------------------------------------
 
-WIRING_HARNESS = r"""
+import os as _os_stub, sys as _sys_stub  # noqa: E402
+_sys_stub.path.insert(0, _os_stub.path.dirname(_os_stub.path.abspath(__file__)))
+from _insights_stub import INSIGHTS_STUB_JS  # noqa: E402
+
+WIRING_HARNESS = INSIGHTS_STUB_JS + r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
@@ -218,6 +222,7 @@ const ctx = {
   escapeHtml: (t) => String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
                                 .replace(/"/g, '&quot;').replace(/'/g, '&#39;'),
 };
+ctx.Insights = makeInsights(ctx);
 vm.createContext(ctx);
 vm.runInContext(source, ctx);
 const base = { id: '12', content: 'Fly <away>\nnow', platform: 'linkedin', platforms: ['linkedin', 'threads'],
@@ -361,7 +366,7 @@ def section_wiring():
 # A fake of just enough page: a list of cards (each with its rows), the Load
 # more row, a server that pages ``total`` cards the way /compose/posts/more
 # does, the Find & Replace modal, toasts, and a record of every request.
-WORLD = r"""
+WORLD = INSIGHTS_STUB_JS + r"""
 const fs = require('fs');
 const vm = require('vm');
 const source = fs.readFileSync(process.argv[2], 'utf8');
@@ -496,6 +501,7 @@ function world(opts = {}) {
       return { ok: data.__status ? data.__status < 400 : true, status: data.__status || 200, json: async () => data };
     },
   };
+  ctx.Insights = makeInsights(ctx);
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   w.ctx = ctx;

@@ -1036,7 +1036,11 @@ def fn_source(html, name):
     check(False, f"{name}() has unbalanced braces")
 
 
-JS_HARNESS = r"""
+import os as _os_stub, sys as _sys_stub  # noqa: E402
+_sys_stub.path.insert(0, _os_stub.path.dirname(_os_stub.path.abspath(__file__)))
+from _insights_stub import INSIGHTS_STUB_JS  # noqa: E402
+
+JS_HARNESS = INSIGHTS_STUB_JS + r"""
 const els = {};
 const make = (id, extra) => els[id] = Object.assign({
   id, value: '', textContent: '', innerHTML: '', dataset: {}, files: [], disabled: false,
@@ -1059,6 +1063,7 @@ const document = {
 const showToast = (message, type) => toasts.push([type, message]);
 const alert = (m) => alerts.push(m);
 const confirm = () => true;
+const Insights = makeInsights({ alert, confirm, showToast });
 const cardIdsParam = (id) => '7,8';
 let reply = { ok: true, body: { success: true } };
 const fetch = (url, opts) => {
