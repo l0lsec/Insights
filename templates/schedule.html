@@ -1082,12 +1082,21 @@ async function requestEach(ids, makeRequest, fallback) {
     for (const id of ids) {
         try {
             const data = await (await makeRequest(id)).json();
-            if (!data.success) failed.push({ id, error: data.error || fallback || 'Failed' });
+            if (!data.success) failed.push({ id, error: Insights.explain({ error: data.error || fallback || 'Failed' }) });
         } catch (error) {
-            failed.push({ id, error: 'Error: ' + error.message });
+            failed.push({ id, error: Insights.explain(error) });
         }
     }
     return failed;
+}
+
+// requestEach for an Insights.deferred run. When the page is being left
+// (o.keepalive), every request starts at once: the page cannot wait for one
+// answer before sending the next.
+function requestEachDeferred(o, ids, makeRequest, fallback) {
+    if (!o.keepalive) return requestEach(ids, makeRequest, fallback);
+    const started = new Map(ids.map(id => [id, makeRequest(id)]));
+    return requestEach(ids, id => started.get(id), fallback);
 }
 
 // The failures as one message; on a multi-platform row each says where it was.
@@ -1099,9 +1108,28 @@ function describeFailures(failed, ids, platforms) {
 }
 
 // After a row action: report what failed, and redraw if anything changed.
-function finishQueueAction(ids, platforms, failed) {
-    if (failed.length) alert(describeFailures(failed, ids, platforms));
-    if (failed.length < ids.length) location.reload();
+// done names what happened and where ('Cancelled on'), so a partial result says
+// what went through as well as what did not. The queue is redrawn in place, not
+// reloaded, so the message stays on screen to be read.
+function finishQueueAction(ids, platforms, failed, done) {
+    if (failed.length) {
+        const head = done && failed.length < ids.length
+            ? `${done} ${ids.length - failed.length} of ${ids.length} platforms. Not ${done.split(' ')[0].toLowerCase()}:\n` : '';
+        Insights.toast(head + describeFailures(failed, ids, platforms), 'error');
+    }
+    if (failed.length < ids.length) refreshQueue();
+}
+
+// The table rows an action on el takes away: its own row and, for a post's
+// row, the per-platform rows under it, so a deleted post leaves as one.
+function queueRowsOf(el) {
+    return queueRowsOfRow(el && el.closest ? el.closest('tr') : null);
+}
+
+function queueRowsOfRow(row) {
+    if (!row) return [];
+    if (!row.classList.contains('queue-group')) return [row];
+    return [row, ...document.querySelectorAll(`tr.queue-detail[data-group-id="${row.dataset.postId}"]`)];
 }
 
 // Reorder queue by sending new order to backend
@@ -1124,14 +1152,15 @@ function reorderQueue(postIds) {
             // Reload to show updated times
             location.reload();
         } else {
-            alert('Failed to reorder: ' + (data.error || 'Unknown error'));
-            location.reload(); // Reload to restore original order
+            // Redraw from the server, which puts the rows back in their saved order.
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not reorder the queue, so it is back in its saved order.'), 'error');
+            refreshQueue();
         }
     })
     .catch(error => {
         tbody.style.opacity = '1';
-        alert('Error reordering queue: ' + error.message);
-        location.reload();
+        Insights.toast(Insights.explain(error, 'Could not reorder the queue, so it is back in its saved order.'), 'error');
+        refreshQueue();
     });
 }
 
@@ -1323,7 +1352,7 @@ function refreshQueue() {
                 // Also refresh next slots
                 refreshNextSlots();
             } else {
-                alert('Failed to refresh: ' + (data.error || 'Unknown error'));
+                Insights.toast(Insights.explain({ error: data.error }, 'Could not refresh the queue.'), 'error');
             }
         })
         .catch(error => {
@@ -1331,7 +1360,7 @@ function refreshQueue() {
             btn.innerHTML = originalBtnText;
             btn.disabled = false;
             if (tbody) tbody.style.opacity = '1';
-            alert('Error refreshing queue: ' + error.message);
+            Insights.toast(Insights.explain(error, 'Could not refresh the queue.'), 'error');
         });
 }
 
@@ -1687,19 +1716,32 @@ function checkLinkedInStatus() {
         .finally(() => onStatusCheckComplete('LinkedIn', linkedInData));
 }
 
-function disconnectLinkedIn() {
-    if (!confirm('Are you sure you want to disconnect LinkedIn?')) return;
-    
-    fetch('{{ url_for("linkedin_disconnect") }}', { method: 'POST' })
+// Send a disconnect the user has confirmed, and say how it went.
+function sendDisconnect(name, url, recheck) {
+    return fetch(url, { method: 'POST' })
         .then(response => response.json())
         .then(data => {
             if (data.success) {
-                checkLinkedInStatus();
+                Insights.toast(`${name} is disconnected. Connect it again to post there.`, 'success');
+                recheck();
+            } else {
+                Insights.toast(Insights.explain({ error: data.error }, `Could not disconnect ${name}.`), 'error');
             }
         })
         .catch(error => {
-            alert('Error: ' + error.message);
+            Insights.toast(Insights.explain(error, `Could not disconnect ${name}.`), 'error');
         });
+}
+
+async function disconnectLinkedIn() {
+    const yes = await Insights.confirm({
+        title: 'Disconnect LinkedIn?',
+        body: 'Insights signs out of every LinkedIn account, so posts queued for LinkedIn cannot go out until you connect it again.',
+        confirmLabel: 'Disconnect',
+        danger: true,
+    });
+    if (!yes) return;
+    sendDisconnect('LinkedIn', '{{ url_for("linkedin_disconnect") }}', checkLinkedInStatus);
 }
 
 // Check Threads connection status
@@ -1765,19 +1807,15 @@ function checkThreadsStatus() {
         .finally(() => onStatusCheckComplete('Threads', threadsData));
 }
 
-function disconnectThreads() {
-    if (!confirm('Are you sure you want to disconnect Threads?')) return;
-
-    fetch('{{ url_for("threads_disconnect") }}', { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                checkThreadsStatus();
-            }
-        })
-        .catch(error => {
-            alert('Error: ' + error.message);
-        });
+async function disconnectThreads() {
+    const yes = await Insights.confirm({
+        title: 'Disconnect Threads?',
+        body: 'Insights signs out of every Threads account, so posts queued for Threads cannot go out until you connect it again.',
+        confirmLabel: 'Disconnect',
+        danger: true,
+    });
+    if (!yes) return;
+    sendDisconnect('Threads', '{{ url_for("threads_disconnect") }}', checkThreadsStatus);
 }
 
 // Check Instagram connection status
@@ -1846,19 +1884,15 @@ function checkInstagramStatus() {
         .finally(() => onStatusCheckComplete('Instagram', instagramData));
 }
 
-function disconnectInstagram() {
-    if (!confirm('Are you sure you want to disconnect Instagram?')) return;
-
-    fetch('{{ url_for("instagram_disconnect") }}', { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                checkInstagramStatus();
-            }
-        })
-        .catch(error => {
-            alert('Error: ' + error.message);
-        });
+async function disconnectInstagram() {
+    const yes = await Insights.confirm({
+        title: 'Disconnect Instagram?',
+        body: 'Insights signs out of every Instagram account, so posts queued for Instagram cannot go out until you connect it again.',
+        confirmLabel: 'Disconnect',
+        danger: true,
+    });
+    if (!yes) return;
+    sendDisconnect('Instagram', '{{ url_for("instagram_disconnect") }}', checkInstagramStatus);
 }
 
 // Check Facebook connection status
@@ -1922,19 +1956,15 @@ function checkFacebookStatus() {
         .finally(() => onStatusCheckComplete('Facebook', facebookData));
 }
 
-function disconnectFacebook() {
-    if (!confirm('Are you sure you want to disconnect Facebook?')) return;
-
-    fetch('{{ url_for("facebook_disconnect") }}', { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                checkFacebookStatus();
-            }
-        })
-        .catch(error => {
-            alert('Error: ' + error.message);
-        });
+async function disconnectFacebook() {
+    const yes = await Insights.confirm({
+        title: 'Disconnect Facebook?',
+        body: 'Insights signs out of every Facebook account, so posts queued for Facebook cannot go out until you connect it again.',
+        confirmLabel: 'Disconnect',
+        danger: true,
+    });
+    if (!yes) return;
+    sendDisconnect('Facebook', '{{ url_for("facebook_disconnect") }}', checkFacebookStatus);
 }
 
 // Check Twitter/X connection status
@@ -1993,24 +2023,28 @@ function checkTwitterStatus() {
         .finally(() => onStatusCheckComplete('Twitter', twitterData));
 }
 
-function disconnectTwitter() {
-    if (!confirm('Are you sure you want to disconnect X/Twitter?')) return;
-
-    fetch('{{ url_for("twitter_disconnect") }}', { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                checkTwitterStatus();
-            }
-        })
-        .catch(error => {
-            alert('Error: ' + error.message);
-        });
+async function disconnectTwitter() {
+    const yes = await Insights.confirm({
+        title: 'Disconnect X?',
+        body: 'Insights signs out of every X account, so posts queued for X cannot go out until you connect it again.',
+        confirmLabel: 'Disconnect',
+        danger: true,
+    });
+    if (!yes) return;
+    sendDisconnect('X', '{{ url_for("twitter_disconnect") }}', checkTwitterStatus);
 }
 
 async function postNow(ids, platforms, btn) {
     const where = platforms.join(', ');
-    if (!confirm(ids.length > 1 ? `Post this content to ${where} immediately?` : `Post this ${where} content immediately?`)) return;
+    // It goes out to the platforms at once: ask, and say where and how many.
+    const yes = await Insights.confirm({
+        title: `Post to ${where} now?`,
+        body: ids.length > 1
+            ? `It goes live at once on ${ids.length} platforms, instead of at its scheduled time.`
+            : 'It goes live at once, instead of at its scheduled time.',
+        confirmLabel: 'Post now',
+    });
+    if (!yes) return;
     
     const originalText = btn.innerHTML;
     btn.disabled = true;
@@ -2025,27 +2059,42 @@ async function postNow(ids, platforms, btn) {
     }
     btn.disabled = false;
     btn.innerHTML = originalText;
-    if (failed.length < ids.length) {
-        alert(`Posted to ${ids.length - failed.length} of ${ids.length} platforms. Not posted:\n` +
-              describeFailures(failed, ids, platforms));
-        location.reload();
-    } else {
-        alert(describeFailures(failed, ids, platforms));
-    }
+    finishQueueAction(ids, platforms, failed, 'Posted to');
 }
 
-async function cancelPost(ids, platforms) {
-    if (!confirm(ids.length > 1 ? `Cancel this post on all ${ids.length} platforms?` : 'Cancel this scheduled post?')) return;
-    
-    const failed = await requestEach(ids, id => fetch(`/schedule/${id}/cancel`, { method: 'POST' }), 'Failed to cancel post');
-    finishQueueAction(ids, platforms, failed);
+// Cancel and Delete stay inside Insights, so they ask nothing: the row goes at
+// once, Undo brings it back, and the requests are sent when the Undo window
+// closes. If every platform refuses, the row comes back with the reasons.
+async function cancelPost(ids, platforms, btn) {
+    const rows = queueRowsOf(btn);
+    let failed = [];
+    const result = await Insights.deferred(async o => {
+        failed = await requestEachDeferred(o, ids, id => fetch(`/schedule/${id}/cancel`, { method: 'POST', keepalive: o.keepalive }), 'Could not cancel it');
+        if (failed.length === ids.length) throw { userMessage: describeFailures(failed, ids, platforms) };
+        return failed;
+    }, {
+        message: ids.length > 1 ? `Cancelled this post on ${ids.length} platforms.` : 'Cancelled the scheduled post.',
+        hide: () => rows.forEach(row => { row.hidden = true; }),
+        restore: () => rows.forEach(row => { row.hidden = false; }),
+        failMessage: 'Could not cancel the post, so it is back in the queue.',
+    });
+    if (result.committed) finishQueueAction(ids, platforms, failed, 'Cancelled on');
 }
 
-async function deletePost(ids, platforms) {
-    if (!confirm(ids.length > 1 ? `Delete this post from all ${ids.length} platforms?` : 'Delete this scheduled post?')) return;
-    
-    const failed = await requestEach(ids, id => fetch(`/schedule/${id}/delete`, { method: 'POST' }), 'Failed to delete post');
-    finishQueueAction(ids, platforms, failed);
+async function deletePost(ids, platforms, btn) {
+    const rows = queueRowsOf(btn);
+    let failed = [];
+    const result = await Insights.deferred(async o => {
+        failed = await requestEachDeferred(o, ids, id => fetch(`/schedule/${id}/delete`, { method: 'POST', keepalive: o.keepalive }), 'Could not delete it');
+        if (failed.length === ids.length) throw { userMessage: describeFailures(failed, ids, platforms) };
+        return failed;
+    }, {
+        message: ids.length > 1 ? `Deleted this post from ${ids.length} platforms.` : 'Deleted the scheduled post.',
+        hide: () => rows.forEach(row => { row.hidden = true; }),
+        restore: () => rows.forEach(row => { row.hidden = false; }),
+        failMessage: 'Could not delete the post, so it is back in the queue.',
+    });
+    if (result.committed) finishQueueAction(ids, platforms, failed, 'Deleted from');
 }
 
 async function retryPost(ids, platforms, btn) {
@@ -2055,31 +2104,31 @@ async function retryPost(ids, platforms, btn) {
     
     const failed = await requestEach(ids, id => fetch(`/schedule/${id}/retry`, { method: 'POST' }), 'Retry failed');
     if (failed.length === 0) {
-        alert('Post successful!');
-        location.reload();
+        Insights.toast(`Posted to ${platforms.join(', ') || 'its platform'}.`, 'success');
+        refreshQueue();
         return;
     }
     btn.innerHTML = originalText;
     btn.disabled = false;
-    finishQueueAction(ids, platforms, failed);
+    finishQueueAction(ids, platforms, failed, 'Posted to');
 }
 
-function clearQueue() {
-    if (!confirm('Clear ALL pending posts from the queue? This cannot be undone.')) return;
-    
-    fetch('/schedule/clear-queue', { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                alert(data.message);
-                location.reload();
-            } else {
-                alert(data.error || 'Failed to clear queue');
-            }
-        })
-        .catch(error => {
-            alert('Error: ' + error.message);
-        });
+// Every pending row on the page goes at once; Undo brings them back. The clear
+// is sent when the Undo window closes, and it covers pending posts the current
+// filters hide too, which the message says.
+async function clearQueue() {
+    const rows = Array.from(document.querySelectorAll('tr.queue-group:not(.not-draggable)')).flatMap(queueRowsOfRow);
+    const result = await Insights.deferred(async o => {
+        const data = await (await fetch('/schedule/clear-queue', { method: 'POST', keepalive: o.keepalive })).json();
+        if (!data.success) throw { error: data.error };
+        return data;
+    }, {
+        message: 'Cleared every pending post from the queue, on every platform.',
+        hide: () => rows.forEach(row => { row.hidden = true; }),
+        restore: () => rows.forEach(row => { row.hidden = false; }),
+        failMessage: 'Could not clear the queue, so the posts are back.',
+    });
+    if (result.committed) location.reload();
 }
 
 function toggleSelectAll(checkbox) {
@@ -2128,39 +2177,39 @@ function updateSelectedCount() {
     }
 }
 
-function deleteSelected() {
-    const checkboxes = document.querySelectorAll('.post-checkbox:checked');
+// The ticked rows go at once; Undo brings them back, and the delete is sent
+// when the Undo window closes.
+async function deleteSelected() {
+    const checkboxes = Array.from(document.querySelectorAll('.post-checkbox:checked'));
     // A ticked row is a whole post: delete every platform's entry of it.
-    const postIds = Array.from(checkboxes).flatMap(idsOf);
+    const postIds = checkboxes.flatMap(idsOf);
     
     if (postIds.length === 0) {
-        alert('No posts selected');
+        Insights.toast('Tick at least one post to delete.', 'warning');
         return;
     }
     
-    const rows = checkboxes.length;
-    const what = rows === postIds.length
-        ? `${rows} selected post${rows !== 1 ? 's' : ''}`
-        : `${rows} selected post${rows !== 1 ? 's' : ''} (${postIds.length} platform entries)`;
-    if (!confirm(`Delete ${what}? This cannot be undone.`)) return;
-    
-    fetch('/schedule/delete-selected', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ post_ids: postIds })
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            alert(data.message);
-            location.reload();
-        } else {
-            alert(data.error || 'Failed to delete posts');
-        }
-    })
-    .catch(error => {
-        alert('Error: ' + error.message);
+    const count = checkboxes.length;
+    const what = count === postIds.length
+        ? `${count} post${count !== 1 ? 's' : ''}`
+        : `${count} post${count !== 1 ? 's' : ''} (${postIds.length} platform entries)`;
+    const rows = checkboxes.flatMap(cb => queueRowsOfRow(cb.closest('tr')));
+    const result = await Insights.deferred(async o => {
+        const data = await (await fetch('/schedule/delete-selected', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ post_ids: postIds }),
+            keepalive: o.keepalive,
+        })).json();
+        if (!data.success) throw { error: data.error };
+        return data;
+    }, {
+        message: `Deleted ${what}.`,
+        hide: () => rows.forEach(row => { row.hidden = true; }),
+        restore: () => rows.forEach(row => { row.hidden = false; }),
+        failMessage: `Could not delete ${what}, so ${count !== 1 ? 'they are' : 'it is'} back.`,
     });
+    if (result.committed) location.reload();
 }
 
 function moveSelectedToTop() {
@@ -2171,7 +2220,7 @@ function moveSelectedToBottom() {
     moveSelectedPosts('bottom');
 }
 
-function moveSelectedPosts(position) {
+async function moveSelectedPosts(position) {
     // Get only pending posts that are selected
     const checkboxes = document.querySelectorAll('.post-checkbox:checked');
     // A ticked row is a whole post; the server moves its other platforms with it.
@@ -2182,12 +2231,18 @@ function moveSelectedPosts(position) {
     const postIds = pending.flatMap(idsOf);
     
     if (postIds.length === 0) {
-        alert('No pending posts selected');
+        Insights.toast('Only pending posts can be moved. Tick at least one pending post.', 'warning');
         return;
     }
     
     const positionText = position === 'top' ? 'top' : 'bottom';
-    if (!confirm(`Move ${pending.length} post${pending.length !== 1 ? 's' : ''} to the ${positionText} of the queue?`)) return;
+    const posts = `${pending.length} post${pending.length !== 1 ? 's' : ''}`;
+    const yes = await Insights.confirm({
+        title: `Move ${posts} to the ${positionText} of the queue?`,
+        body: 'Their scheduled times change, and the other pending posts shift to make room.',
+        confirmLabel: `Move to ${positionText}`,
+    });
+    if (!yes) return;
     
     // Show loading state
     const btn = position === 'top' ? document.getElementById('move-top-btn') : document.getElementById('move-bottom-btn');
@@ -2205,13 +2260,13 @@ function moveSelectedPosts(position) {
         if (data.success) {
             location.reload();
         } else {
-            alert(data.error || 'Failed to move posts');
+            Insights.toast(Insights.explain({ error: data.error }, `Could not move ${posts}.`), 'error');
             btn.innerHTML = originalText;
             btn.disabled = false;
         }
     })
     .catch(error => {
-        alert('Error: ' + error.message);
+        Insights.toast(Insights.explain(error, `Could not move ${posts}.`), 'error');
         btn.innerHTML = originalText;
         btn.disabled = false;
     });
@@ -2253,7 +2308,7 @@ function submitEdit() {
     const datetime = document.getElementById('edit-datetime').value;
     
     if (!datetime) {
-        alert('Please select a date and time');
+        Insights.fieldError(document.getElementById('edit-datetime'), 'Choose a date and time for the post.', { focus: true });
         return;
     }
     
@@ -2269,14 +2324,15 @@ function submitEdit() {
     .then(data => {
         if (data.success) {
             bootstrap.Modal.getInstance(document.getElementById('editModal')).hide();
-            alert('Post rescheduled for ' + data.scheduled_for_display);
-            location.reload();
+            Insights.toast('Post rescheduled for ' + data.scheduled_for_display + '.', 'success');
+            // Redrawn in place, so the message stays on screen.
+            refreshQueue();
         } else {
-            alert('Error: ' + (data.error || 'Failed to update'));
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not reschedule the post.'), 'error');
         }
     })
     .catch(error => {
-        alert('Error: ' + error.message);
+        Insights.toast(Insights.explain(error, 'Could not reschedule the post.'), 'error');
     });
 }
 
@@ -2335,11 +2391,11 @@ document.getElementById('addSlotForm').addEventListener('submit', function(e) {
         if (data.success) {
             location.reload();
         } else {
-            alert(data.error || 'Failed to add time slot');
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not add the time slot.'), 'error');
         }
     })
     .catch(error => {
-        alert('Error: ' + error.message);
+        Insights.toast(Insights.explain(error, 'Could not add the time slot.'), 'error');
     });
 });
 
@@ -2350,30 +2406,31 @@ function toggleSlot(slotId) {
             if (data.success) {
                 location.reload();
             } else {
-                alert(data.error || 'Failed to toggle slot');
+                Insights.toast(Insights.explain({ error: data.error }, 'Could not switch the time slot on or off.'), 'error');
             }
         })
         .catch(error => {
-            alert('Error: ' + error.message);
+            Insights.toast(Insights.explain(error, 'Could not switch the time slot on or off.'), 'error');
         });
 }
 
-function deleteSlot(slotId) {
-    if (!confirm('Delete this time slot?')) return;
-    
-    fetch(`/schedule/slots/${slotId}/delete`, { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                // Reload to update next available slots
-                location.reload();
-            } else {
-                alert(data.error || 'Failed to delete slot');
-            }
-        })
-        .catch(error => {
-            alert('Error: ' + error.message);
-        });
+// The slot's row goes at once; Undo brings it back, and the delete is sent
+// when the Undo window closes.
+async function deleteSlot(slotId) {
+    const btn = document.querySelector(`.delete-slot-btn[data-slot-id="${slotId}"]`);
+    const row = btn && btn.closest ? btn.closest('tr') : null;
+    const result = await Insights.deferred(async o => {
+        const data = await (await fetch(`/schedule/slots/${slotId}/delete`, { method: 'POST', keepalive: o.keepalive })).json();
+        if (!data.success) throw { error: data.error };
+        return data;
+    }, {
+        message: 'Deleted the time slot.',
+        hide: () => { if (row) row.hidden = true; },
+        restore: () => { if (row) row.hidden = false; },
+        failMessage: 'Could not delete the time slot, so it is back.',
+    });
+    // Reload to update next available slots
+    if (result.committed) location.reload();
 }
 
 function openEditSlotModal(slotId, dayOfWeek, timeSlot, platforms) {
@@ -2399,7 +2456,7 @@ function submitSlotEdit() {
     const timeSlot = document.getElementById('edit-slot-time').value;
     
     if (!timeSlot) {
-        alert('Please enter a time');
+        Insights.fieldError(document.getElementById('edit-slot-time'), 'Enter a time for the slot.', { focus: true });
         return;
     }
     
@@ -2424,11 +2481,11 @@ function submitSlotEdit() {
         if (data.success) {
             location.reload();
         } else {
-            alert(data.error || 'Failed to update time slot');
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not update the time slot.'), 'error');
         }
     })
     .catch(error => {
-        alert('Error: ' + error.message);
+        Insights.toast(Insights.explain(error, 'Could not update the time slot.'), 'error');
     });
 }
 
@@ -2525,8 +2582,8 @@ function handleContentImageFile(input) {
     // Validate file type
     const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/gif', 'image/webp'];
     if (!allowedTypes.includes(file.type)) {
-        alert('Invalid file type. Please upload PNG, JPG, GIF, or WebP.');
         input.value = '';
+        Insights.fieldError(input, `${file.name} is not an image Insights can use. Choose a PNG, JPG, GIF or WebP file.`);
         return;
     }
     
@@ -2552,12 +2609,12 @@ function handleContentImageFile(input) {
                 console.warn(data.warning);
             }
         } else {
-            alert('Upload failed: ' + (data.error || 'Unknown error'));
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not upload the image.'), 'error');
         }
     })
     .catch(error => {
         document.getElementById('content-upload-progress').classList.add('d-none');
-        alert('Upload error: ' + error.message);
+        Insights.toast(Insights.explain(error, 'Could not upload the image.'), 'error');
     });
 }
 
@@ -2571,7 +2628,7 @@ function previewContentImageUrl() {
 function applyContentImageUrl() {
     const url = document.getElementById('edit-content-image-url-input').value.trim();
     if (!url) {
-        alert('Please enter an image URL');
+        Insights.fieldError(document.getElementById('edit-content-image-url-input'), 'Paste the image URL first.', { focus: true });
         return;
     }
     
@@ -2664,7 +2721,7 @@ async function submitContentEdit() {
     const originalImageUrl = document.getElementById('edit-content-original-image-url').value;
     
     if (!content) {
-        alert('Post content cannot be empty');
+        Insights.fieldError(document.getElementById('edit-content-textarea'), 'Post content cannot be empty. Write the post, then save.', { focus: true });
         return;
     }
     
@@ -2685,7 +2742,12 @@ async function submitContentEdit() {
         // Reload to show updated content
         location.reload();
     } else {
-        alert('Error: ' + failed.map(f => f.error).join('\n'));
+        // The modal stays open with the text as typed, so it can be fixed and saved again.
+        const tried = postType === 'social' ? ids.length : 1;
+        const head = failed.length < tried
+            ? `Saved ${tried - failed.length} of ${tried} copies. Not saved:\n`
+            : 'Could not save the changes. ';
+        Insights.toast(head + failed.map(f => f.error).join('\n'), 'error');
         saveBtn.innerHTML = originalText;
         saveBtn.disabled = false;
     }
@@ -2751,7 +2813,7 @@ document.addEventListener('click', function(e) {
     // Cancel post button
     btn = e.target.closest('.cancel-post-btn');
     if (btn) {
-        cancelPost(idsOf(btn), platformsOf(btn));
+        cancelPost(idsOf(btn), platformsOf(btn), btn);
         return;
     }
 
@@ -2765,7 +2827,7 @@ document.addEventListener('click', function(e) {
     // Delete post button
     btn = e.target.closest('.delete-post-btn');
     if (btn) {
-        deletePost(idsOf(btn), platformsOf(btn));
+        deletePost(idsOf(btn), platformsOf(btn), btn);
         return;
     }
 
@@ -2808,13 +2870,13 @@ function updateDailyLimit(platform) {
             // Reload to show updated next available slots
             location.reload();
         } else {
-            alert(data.error || 'Failed to update limit');
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not save the daily limit.'), 'error');
             btn.textContent = originalText;
             btn.disabled = false;
         }
     })
     .catch(error => {
-        alert('Error: ' + error.message);
+        Insights.toast(Insights.explain(error, 'Could not save the daily limit.'), 'error');
         btn.textContent = originalText;
         btn.disabled = false;
     });

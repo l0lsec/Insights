@@ -6638,6 +6638,23 @@ def resolve_account_id(
     return default["id"] if default else None
 
 
+def first_run_counts(db_path: str = DB_PATH) -> dict:
+    """What a new owner has done so far, for Compose's getting-started checklist.
+
+    Read from the tables that already hold the answer, so the checklist never
+    disagrees with the app: connected accounts, saved posts, anything ever
+    queued (pending or not), and anything that went out.
+    """
+    with sqlite3.connect(db_path) as conn:
+        one = lambda sql: conn.execute(sql).fetchone()[0]
+        return {
+            "accounts": one("SELECT COUNT(*) FROM social_accounts WHERE status != 'removed'"),
+            "posts": one("SELECT COUNT(*) FROM standalone_posts"),
+            "queued": one("SELECT COUNT(*) FROM scheduled_posts"),
+            "posted": one("SELECT COUNT(*) FROM scheduled_posts WHERE status = 'posted'"),
+        }
+
+
 def count_social_accounts(platform: str | None = None, db_path: str = DB_PATH) -> int:
     """How many accounts are connected, for a platform or in total."""
     with sqlite3.connect(db_path) as conn:

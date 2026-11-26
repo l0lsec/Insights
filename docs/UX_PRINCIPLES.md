@@ -20,9 +20,14 @@ another toast, modal or spinner helper, and never load the file again from a pag
 | `Insights.explain(error, 'Could not save the post.')` | Turning a failure into words: context first, then why and what to do. Takes an Error, a fetch Response, `{status}`, the server's `{error}`, or a string; a message that reads like code is replaced. Set `error.userMessage` to pass your own wording. | 15 |
 | `Insights.fieldError(input, message, {focus})` | A problem with one field: shown under it, tied by `aria-describedby`, the value kept, cleared on the next edit. `''` clears it. | 8, 14, 15 |
 | `Insights.deferred(run, {message, hide, restore})` | **Undo** for deletes, clears and removals that stay inside Insights. `hide()` runs at once; the request is sent after 6 s unless Undo is pressed; on a failure `restore()` puts it back with Retry. Pass `o.keepalive` to `fetch` so leaving the page still sends it. | 15, 18 |
+| `Insights.done(message, {label, href})` | The end of a flow: what happened and the one next step as the toast's button, e.g. `Insights.done('Queued on LinkedIn for Tue 9:00.', {label: 'Open Schedule', href: '/schedule'})`. Stays 10 s. | 10, 20 |
+| `data-confirm`, `data-undo` on a `<form>`, `<a>` or `<button>` | The same two for server-rendered markup, with no script: `data-confirm="body" data-confirm-title="Disconnect LinkedIn?" data-confirm-label="Disconnect" data-confirm-danger`, and `data-undo="Deleted the feed." data-undo-row="tr" data-undo-then="reload"` (hides the row, submits after the Undo window). | 14, 15 |
 
-`showToast(message, type)` still works and goes to `Insights.toast`; compose.html and article.html still carry their
-own copies until they are migrated (rollout Phase 3). For targets, use `.btn-icon` on an icon-only button (40px floor,
+`showToast(message, type)` still works and goes to `Insights.toast` (`'danger'` counts as `'error'`).
+`Insights.confirm` needs a `confirmLabel` that names the action ("Post now", "Disconnect", "Move 3 posts"; never OK or
+Yes): `python scripts/check_ux.py undo` checks it, and checks that every delete inside Insights goes through
+`Insights.deferred` or `data-undo`. Gate harnesses that run page scripts under node get `window.Insights` from
+`scripts/_insights_stub.py`, routed into their own `alert`/`confirm` stubs (`check_ux.py harness` checks every one does). For targets, use `.btn-icon` on an icon-only button (40px floor,
 44px by touch) and `.btn-danger-quiet` for a destructive secondary action.
 
 **The ratchet:** `python scripts/check_ux.py` (also run by `scripts/run_all_gates.py`) counts the retired patterns in

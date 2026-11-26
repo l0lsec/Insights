@@ -1,0 +1,73 @@
+{#- Getting started on Compose (docs/UX_PRINCIPLES.md laws 9, 11, 20).
+    `first_run` comes from _first_run_steps() in insights_web.py: derived from
+    live data on every render, never stored, and None once every step is done,
+    so the card disappears for good by itself. "Hide for now" only hides it in
+    this browser; /compose?getting_started=1 (also in the Ctrl/Cmd+K palette)
+    brings it back. -#}
+{% if first_run %}
+<section class="first-run card mb-3" id="first-run" aria-labelledby="first-run-title" data-next="{{ first_run.next }}">
+    <div class="card-body">
+        <div class="first-run-head">
+            <h2 class="h6 mb-0" id="first-run-title">Get your first post out</h2>
+            <span class="first-run-count" id="first-run-count">{{ first_run.done }} of {{ first_run.total }} done</span>
+        </div>
+        <div class="progress first-run-progress" role="progressbar" aria-labelledby="first-run-count"
+             aria-valuemin="0" aria-valuemax="{{ first_run.total }}" aria-valuenow="{{ first_run.done }}">
+            <div class="progress-bar" style="width: {{ (100 * first_run.done / first_run.total) | round | int }}%"></div>
+        </div>
+        <ol class="first-run-steps">
+            {% for step in first_run.steps %}
+            <li class="first-run-step {% if step.done %}is-done{% elif step.key == first_run.next %}is-next{% endif %}" data-step="{{ step.key }}">
+                <span class="first-run-mark" aria-hidden="true">{% if step.done %}✓{% else %}{{ loop.index }}{% endif %}</span>
+                <span class="first-run-label">{{ step.label }}{% if step.done %}<span class="visually-hidden"> (done)</span>{% endif %}</span>
+                {% if step.key == first_run.next and step.href %}
+                <a class="btn btn-sm btn-primary first-run-go" href="{{ step.href }}">
+                    {%- if step.key == 'accounts' %}Connect an account{% elif step.key == 'posts' %}Write a post{% else %}Open Schedule{% endif -%}
+                </a>
+                {% endif %}
+            </li>
+            {% endfor %}
+        </ol>
+        <button type="button" class="btn btn-link btn-sm first-run-hide" id="first-run-hide">Hide for now</button>
+    </div>
+</section>
+<style>
+    .first-run { border-color: var(--brand-600); }
+    .first-run-head { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; }
+    .first-run-count { color: var(--muted); font-size: 0.85rem; white-space: nowrap; }
+    .first-run-progress { height: 6px; margin: 0.5rem 0 0.75rem; }
+    .first-run-steps { list-style: none; padding: 0; margin: 0 0 0.25rem; display: grid; gap: 0.4rem; }
+    .first-run-step { display: flex; align-items: center; gap: 0.6rem; min-height: var(--target-min); }
+    .first-run-mark { width: 1.6rem; height: 1.6rem; border-radius: 50%; display: inline-flex; align-items: center;
+                      justify-content: center; font-size: 0.8rem; border: 1px solid var(--muted); color: var(--muted); flex: none; }
+    .first-run-step.is-done .first-run-mark { background: var(--ok); border-color: var(--ok); color: var(--surface); }
+    .first-run-step.is-done .first-run-label { color: var(--muted); }
+    .first-run-step.is-next .first-run-mark { border-color: var(--brand-600); color: var(--brand-600); font-weight: 600; }
+    .first-run-step.is-next .first-run-label { font-weight: 600; }
+    .first-run-go { margin-left: auto; }
+    .first-run-hide { padding-left: 0; color: var(--muted); }
+</style>
+<script>
+(function () {
+    var KEY = 'insights.firstRun.hidden';
+    var card = document.getElementById('first-run');
+    if (!card) return;
+    var params = new URLSearchParams(window.location.search);
+    try {
+        if (params.get('getting_started') === '1') window.localStorage.removeItem(KEY);
+        else if (window.localStorage.getItem(KEY) === '1') card.hidden = true;
+    } catch (e) { /* no storage: the card just stays */ }
+    document.getElementById('first-run-hide').addEventListener('click', function () {
+        card.hidden = true;
+        try { window.localStorage.setItem(KEY, '1'); } catch (e) {}
+        Insights.toast('Hidden. Bring it back from Ctrl/Cmd+K, "Getting started".', {
+            type: 'info',
+            undo: function () {
+                card.hidden = false;
+                try { window.localStorage.removeItem(KEY); } catch (e) {}
+            }
+        });
+    });
+})();
+</script>
+{% endif %}

@@ -206,19 +206,28 @@ function updateGroupIds() {
     document.getElementById('group-ids-input').value = ids;
 }
 
-function disconnectAndReconnect() {
-    if (confirm('This will disconnect your Facebook account. You will need to reconnect to refresh your token. Continue?')) {
-        fetch('{{ url_for("facebook_disconnect") }}', { method: 'POST' })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    window.location.href = '{{ url_for("facebook_auth") }}';
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('Failed to disconnect. Please try again.');
-            });
+async function disconnectAndReconnect() {
+    // Leaves Insights: the platform's tokens are deleted, so ask first, by name.
+    const yes = await Insights.confirm({
+        title: 'Disconnect Facebook and reconnect?',
+        body: 'Every Facebook account connected to Insights is signed out, and queued Facebook posts cannot go out until you reconnect. Facebook opens next so you can sign in again to get a fresh token.',
+        confirmLabel: 'Disconnect',
+        danger: true
+    });
+    if (!yes) return;
+    try {
+        const response = await fetch('{{ url_for("facebook_disconnect") }}', { method: 'POST' });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.success) {
+            Insights.toast('Disconnected Facebook. Opening Facebook so you can reconnect.', 'success');
+            window.location.href = '{{ url_for("facebook_auth") }}';
+            return;
+        }
+        Insights.toast(Insights.explain(data.error ? { error: data.error, status: response.status } : response,
+            'Could not disconnect Facebook, so it is still connected.'), 'error');
+    } catch (error) {
+        console.error('Error:', error);
+        Insights.toast(Insights.explain(error, 'Could not disconnect Facebook, so it is still connected.'), 'error');
     }
 }
 </script>

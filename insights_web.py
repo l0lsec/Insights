@@ -5980,7 +5980,46 @@ def _inject_publish_targets():
     after a tick), so the target list comes from the environment rather than
     each caller remembering to pass it.
     """
-    return {'PUBLISH_TARGETS': _publish_target_options(), 'IG_MAX_COLLABORATORS': MAX_COLLABORATORS}
+    return {'PUBLISH_TARGETS': _publish_target_options(), 'IG_MAX_COLLABORATORS': MAX_COLLABORATORS,
+            'CONNECTED_PLATFORMS': _connected_platforms()}
+
+
+def _connected_platforms():
+    """Platforms with at least one account that can post right now.
+
+    Cards use it to disable what cannot work yet (posting or queueing to a
+    platform nobody has connected) and to say why, next to the control, instead
+    of letting the click fail afterwards (docs/UX_PRINCIPLES.md, law 14). An
+    expired login cannot post either, so it does not count.
+    """
+    return sorted({row['platform'] for row in _account_lookup().values()
+                   if (row['status'] or 'active') not in ('expired', 'removed')})
+
+
+FIRST_RUN_STEPS = (
+    # key, label, done when, where to do it
+    ('accounts', 'Connect an account', 'accounts', '/accounts'),
+    ('posts', 'Write or generate your first post', 'posts', '#generate'),
+    ('queued', 'Queue it with the \u2795 next to a platform', 'queued', None),
+    ('posted', 'See it go out', 'posted', '/schedule'),
+)
+
+
+def _first_run_steps():
+    """The getting-started checklist for Compose, or None once every step is done.
+
+    Derived from live data (database.first_run_counts), never stored, so it
+    cannot drift: it shows "2 of 4 done" and disappears for good when the
+    owner has connected, written, queued and published (laws 11 and 20).
+    """
+    counts = database.first_run_counts(database.DB_PATH)
+    steps = [{'key': key, 'label': label, 'done': counts.get(field, 0) > 0, 'href': href}
+             for key, label, field, href in FIRST_RUN_STEPS]
+    done = sum(1 for s in steps if s['done'])
+    if done == len(steps):
+        return None
+    nxt = next(s for s in steps if not s['done'])
+    return {'steps': steps, 'done': done, 'total': len(steps), 'next': nxt['key']}
 
 
 def _row_account_label(row):
@@ -6186,6 +6225,7 @@ def compose_page():
         model_options=provider_model_options(),
         file_formats=[f for f in document_extractor.supported_formats() if f['available']],
         file_accept=document_extractor.accept_attribute(),
+        first_run=_first_run_steps(),
     )
 
 

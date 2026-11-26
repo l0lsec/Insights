@@ -223,7 +223,7 @@ function setSuggestion(text) {
 function refineWithAI(autoSave) {
     const feedback = document.getElementById('ai-feedback').value.trim();
     if (!feedback) {
-        alert('Please describe what changes you want to make');
+        Insights.fieldError(document.getElementById('ai-feedback'), 'Describe the change you want, for example "Make the intro shorter".', {focus: true});
         return;
     }
     
@@ -251,7 +251,7 @@ function refineWithAI(autoSave) {
         refineBtn.disabled = false;
         
         if (data.error) {
-            alert('Error: ' + data.error);
+            Insights.toast(Insights.explain({error: data.error}, 'Could not refine the article.'), 'error');
             return;
         }
         
@@ -273,7 +273,7 @@ function refineWithAI(autoSave) {
     .catch(error => {
         loading.classList.add('d-none');
         refineBtn.disabled = false;
-        alert('Error: ' + error.message);
+        Insights.toast(Insights.explain(error, 'Could not refine the article.'), 'error');
     });
 }
 
@@ -286,7 +286,7 @@ function applyRefinedContent() {
         }
         // Scroll to editor
         document.getElementById('content').scrollIntoView({ behavior: 'smooth' });
-        alert('Refined content applied to editor. Don\'t forget to save!');
+        Insights.toast('Refined text is in the editor. Save the article to keep it.', 'success');
     }
 }
 

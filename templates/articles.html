@@ -92,7 +92,7 @@
                         <a href="{{ url_for('view_article', article_id=article.id) }}" class="btn btn-outline-primary">Read</a>
                         <a href="{{ url_for('edit_article', article_id=article.id) }}" class="btn btn-outline-secondary">Edit</a>
                         <form method="post" action="{{ url_for('remove_article', article_id=article.id) }}" class="d-inline"
-                              onsubmit="return confirm('Delete this article?');">
+                              data-undo="Deleted the article &quot;{{ article.topic[:60] }}&quot;." data-undo-row=".col">
                             <button type="submit" class="btn btn-outline-danger" style="border-top-left-radius: 0; border-bottom-left-radius: 0;">×</button>
                         </form>
                     </div>

@@ -410,6 +410,17 @@ const buttonByText = (root, text) => { let hit = null; root.walk(n => { if (!hit
     ok(own === 1, "a page's own showToast was overwritten");
   });
 
+  await test('done_names_it_and_offers_the_next_step', async () => {
+    const w = world();
+    w.I.done('Queued on LinkedIn for Tue 9:00.', { label: 'Open Schedule', href: '/schedule' });
+    const [t] = toasts(w);
+    ok(t && t.classList.contains('insights-toast-success') && /Queued on LinkedIn/.test(t.textContent), 'done() did not show a success toast with the message');
+    await w.clock.tick(5500);
+    ok(toasts(w).length === 1, 'done() vanished before there was time to take the next step');
+    buttonByText(w.region, 'Open Schedule').click();
+    ok(w.win.location.href === '/schedule', 'the next-step button did not go to its page');
+  });
+
   // ------------------------------------------------ declarative markup
   const confirmButton = w => buttonByText(w.document.body, 'Delete feed');
   const cancelButton = w => buttonByText(w.document.body, 'Cancel');

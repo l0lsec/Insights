@@ -141,19 +141,28 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
 
 <script>
-function disconnectAndReconnect() {
-    if (confirm('This will disconnect your LinkedIn account. You will need to reconnect with the updated permissions. Continue?')) {
-        fetch('{{ url_for("linkedin_disconnect") }}', { method: 'POST' })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    window.location.href = '{{ url_for("linkedin_auth") }}';
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('Failed to disconnect. Please try again.');
-            });
+async function disconnectAndReconnect() {
+    // Leaves Insights: the platform's tokens are deleted, so ask first, by name.
+    const yes = await Insights.confirm({
+        title: 'Disconnect LinkedIn and reconnect?',
+        body: 'Every LinkedIn account connected to Insights is signed out, and queued LinkedIn posts cannot go out until you reconnect. LinkedIn opens next so you can sign in again with the updated permissions.',
+        confirmLabel: 'Disconnect',
+        danger: true
+    });
+    if (!yes) return;
+    try {
+        const response = await fetch('{{ url_for("linkedin_disconnect") }}', { method: 'POST' });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.success) {
+            Insights.toast('Disconnected LinkedIn. Opening LinkedIn so you can reconnect.', 'success');
+            window.location.href = '{{ url_for("linkedin_auth") }}';
+            return;
+        }
+        Insights.toast(Insights.explain(data.error ? { error: data.error, status: response.status } : response,
+            'Could not disconnect LinkedIn, so it is still connected.'), 'error');
+    } catch (error) {
+        console.error('Error:', error);
+        Insights.toast(Insights.explain(error, 'Could not disconnect LinkedIn, so it is still connected.'), 'error');
     }
 }
 </script>

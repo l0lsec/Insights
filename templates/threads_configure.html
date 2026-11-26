@@ -221,19 +221,28 @@ THREADS_REDIRECT_URI={{ request.url_root }}threads/callback</code></pre>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
 
 <script>
-function disconnectAndReconnect() {
-    if (confirm('This will disconnect your Threads account. You will need to reconnect to refresh your token. Continue?')) {
-        fetch('{{ url_for("threads_disconnect") }}', { method: 'POST' })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    window.location.href = '{{ url_for("threads_auth") }}';
-                }
-            })
-            .catch(error => {
-                console.error('Error:', error);
-                alert('Failed to disconnect. Please try again.');
-            });
+async function disconnectAndReconnect() {
+    // Leaves Insights: the platform's tokens are deleted, so ask first, by name.
+    const yes = await Insights.confirm({
+        title: 'Disconnect Threads and reconnect?',
+        body: 'Every Threads account connected to Insights is signed out, and queued Threads posts cannot go out until you reconnect. Threads opens next so you can sign in again to get a fresh token.',
+        confirmLabel: 'Disconnect',
+        danger: true
+    });
+    if (!yes) return;
+    try {
+        const response = await fetch('{{ url_for("threads_disconnect") }}', { method: 'POST' });
+        const data = await response.json().catch(() => ({}));
+        if (response.ok && data.success) {
+            Insights.toast('Disconnected Threads. Opening Threads so you can reconnect.', 'success');
+            window.location.href = '{{ url_for("threads_auth") }}';
+            return;
+        }
+        Insights.toast(Insights.explain(data.error ? { error: data.error, status: response.status } : response,
+            'Could not disconnect Threads, so it is still connected.'), 'error');
+    } catch (error) {
+        console.error('Error:', error);
+        Insights.toast(Insights.explain(error, 'Could not disconnect Threads, so it is still connected.'), 'error');
     }
 }
 </script>

@@ -378,7 +378,7 @@ const cardIds = (n) => [1000 + n, 5000 + n];
 
 function world(opts = {}) {
   const w = { total: opts.total ?? 300, fetches: [], toasts: [], gates: [], failures: [], alerts: [],
-              confirms: [], confirmAnswer: opts.confirm ?? true, revealed: [], cards: [], usedUI: [],
+              confirms: [], confirmAnswer: opts.confirm ?? true, undos: [], revealed: [], cards: [], usedUI: [],
               refreshed: [], usedRefreshed: [], rechecked: [], searches: [], scheduleOpened: [], clipboard: [],
               modalShown: opts.modalShown ?? true, modalHides: 0, modalShows: 0, scheduleListeners: [],
               replies: opts.replies || {}, wrap: null, badge: { textContent: opts.badge || '300 saved posts' } };
@@ -501,7 +501,12 @@ function world(opts = {}) {
       return { ok: data.__status ? data.__status < 400 : true, status: data.__status || 200, json: async () => data };
     },
   };
-  ctx.Insights = makeInsights(ctx);
+  // Deletes are deferred with Undo: each Undo toast's message is logged in w.undos,
+  // and opts.undo presses Undo before anything is sent.
+  ctx.Insights = makeInsights(Object.assign({}, ctx, {
+    undo: opts.undo === true,
+    deferred: (o) => w.undos.push(o.message),
+  }));
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   w.ctx = ctx;
@@ -688,7 +693,7 @@ const posts = (w) => w.fetches.filter(f => f.method === 'POST').map(f => [f.path
   w.setResults([result(5)]);
   await w.run(`deleteSearchResult('${cardIds(5)[1]}')`);
   await settle();
-  out.deleteLoaded = { posts: posts(w), confirms: [...w.confirms], removed: !w.cards.some(c => c.n === 5),
+  out.deleteLoaded = { posts: posts(w), confirms: [...w.confirms], undos: [...w.undos], removed: !w.cards.some(c => c.n === 5),
                        badge: w.badge.textContent, more: w.more().innerHTML, offset: String(w.more().dataset.offset),
                        searches: [...w.searches], toasts: [...w.toasts] };
 
@@ -707,12 +712,13 @@ const posts = (w) => w.fetches.filter(f => f.method === 'POST').map(f => [f.path
   await settle();
   out.deleteFilteredBadge = { badge: w.badge.textContent };
 
-  // delete, cancelled
-  w = world({ confirm: false });
+  // delete, then Undo: nothing is sent and the page card comes back
+  w = world({ undo: true });
   w.setResults([result(5)]);
   await w.run(`deleteSearchResult('${cardIds(5)[1]}')`);
   await settle();
-  out.deleteCancelled = { posts: posts(w), cards: w.cards.length, searches: w.searches.length };
+  out.deleteUndone = { posts: posts(w), cards: w.cards.length, searches: w.searches.length,
+                       undos: [...w.undos], hidden: !!w.cards.find(c => c.n === 5).hidden };
 
   // delete, server refuses: nothing removed, the error is shown
   w = world({ replies: { '/delete': { __status: 404, error: 'Post not found' } } });
@@ -720,7 +726,8 @@ const posts = (w) => w.fetches.filter(f => f.method === 'POST').map(f => [f.path
   await w.run(`deleteSearchResult('${cardIds(5)[1]}')`);
   await settle();
   out.deleteRefused = { cards: w.cards.length, badge: w.badge.textContent, toasts: [...w.toasts],
-                        searches: w.searches.length };
+                        alerts: [...w.alerts], searches: w.searches.length,
+                        hidden: !!w.cards.find(c => c.n === 5).hidden };
 
   // used toggle
   w = world({ replies: { '/toggle-used': { success: true, used: true } } });
@@ -803,7 +810,7 @@ const posts = (w) => w.fetches.filter(f => f.method === 'POST').map(f => [f.path
   w.ctx.__card = card;
   await w.run(`deletePost(1005, { closest: () => __card })`);
   await settle();
-  out.cardDelete = { posts: posts(w), confirms: [...w.confirms], removed: card.removed,
+  out.cardDelete = { posts: posts(w), confirms: [...w.confirms], undos: [...w.undos], removed: card.removed,
                      offset: String(w.more().dataset.offset), badge: w.badge.textContent };
   w = world({ replies: { '/toggle-used': { success: true, used: false } } });
   const card2 = w.cards.find(c => c.n === 6);
@@ -822,7 +829,7 @@ def actions_functions(source):
              "showBackToSearchResults", "hideBackToSearchResults", "reopenSearchResults",
              "copySearchResult", "toggleSearchResultUsed", "postNowFromSearchResult", "postAllFromSearchResult",
              "queueAllFromSearchResult", "scheduleFromSearchResult", "deleteSearchResult",
-             "requestToggleUsed", "toggleUsed", "deleteConfirmText", "requestDeleteCard", "noteCardDeleted",
+             "requestToggleUsed", "toggleUsed", "deleteUndoText", "deferDeleteCard", "noteCardDeleted",
              "noteCardLeftList",
              "deletePost", "postNowConfirmText", "publishAllConfirmText", "publishCardToAll", "queueCardToAll",
              "publishCardPlatform", "markChipPosted", "postedUrlFrom", "platformConnected",
@@ -840,8 +847,8 @@ def section_actions():
     d = r["deleteLoaded"]
     check(d["posts"] == [["/compose/post/1005/delete", whole, None, None]],
           f"delete sends every row of the card to the card's delete route: {d['posts']}")
-    check(d["confirms"] == ["Delete this post? It goes to LinkedIn, Threads — all of them will be deleted."],
-          f"delete asks first, naming every platform: {d['confirms']}")
+    check(d["confirms"] == [] and d["undos"] == ["Deleted this post from LinkedIn, Threads."],
+          f"delete asks nothing and offers Undo, naming every platform: {d['confirms']} {d['undos']}")
     check(d["removed"] and d["badge"] == "299 saved posts", f"the page card goes and the count drops: {d}")
     check(d["offset"] == "19" and d["more"] == "Load more (19 of 299) ▼",
           f"a deleted loaded card moves Load more back one so nothing is skipped: {d}")
@@ -857,12 +864,14 @@ def section_actions():
     check(r["deleteFilteredBadge"]["badge"] == "119 of 299 posts",
           f"a filtered count badge drops both numbers, not read as one big number: {r['deleteFilteredBadge']}")
 
-    c = r["deleteCancelled"]
-    check(c["posts"] == [] and c["cards"] == 20 and c["searches"] == 0, f"a cancelled delete does nothing: {c}")
+    c = r["deleteUndone"]
+    check(c["posts"] == [] and c["cards"] == 20 and c["searches"] == 0 and c["hidden"] is False
+          and c["undos"] == ["Deleted this post from LinkedIn, Threads."],
+          f"an undone delete sends nothing and puts the card back: {c}")
     f = r["deleteRefused"]
-    check(f["cards"] == 20 and f["badge"] == "300 saved posts" and f["searches"] == 0
-          and ["error", "Could not delete: Post not found"] in f["toasts"],
-          f"a refused delete changes nothing and says why: {f}")
+    check(f["cards"] == 20 and f["badge"] == "300 saved posts" and f["searches"] == 0 and f["hidden"] is False
+          and f["alerts"] == ["Could not delete the post, so it is back. Post not found"],
+          f"a refused delete changes nothing, puts the card back and says why: {f}")
 
     s = r["used"]
     check(s["posts"] == [["/compose/post/1005/toggle-used", whole, None, None]]
@@ -873,7 +882,7 @@ def section_actions():
     p = r["postNow"]
     check(p["posts"] == [["/compose/post/5200/threads", None, None, "5"]],
           f"post now publishes that account's row to its platform, naming the account: {p['posts']}")
-    check(p["confirms"] and p["confirms"][0] == "Post to Threads now?"
+    check(p["confirms"] and p["confirms"][0] == "Post to Threads now?\n\nIt goes live on Threads at once."
           and ["success", "Posted to Threads!"] in p["toasts"] and p["searches"] == [True],
           f"post now asks, reports and refreshes: {p}")
     check(r["postNowCancelled"]["posts"] == [], "a cancelled post now sends nothing")
@@ -881,7 +890,8 @@ def section_actions():
     a = r["postAll"]
     check(a["posts"] == [["/compose/post/1005/publish", whole, None, None]],
           f"post to all publishes every row in one request: {a['posts']}")
-    check(a["confirms"] == ["Publish this post to Work, Threads now? This cannot be undone."]
+    check(a["confirms"] == ["Publish this post to Work, Threads now?\n\n"
+                            "It goes live at once on 2 accounts, and this cannot be undone."]
           and ["success", "Published to 2 accounts"] in a["toasts"] and a["usedRefreshed"] == [5]
           and a["searches"] == [True],
           f"post to all asks, reports, and refreshes the page card and results: {a}")
@@ -907,7 +917,7 @@ def section_actions():
     cd = r["cardDelete"]
     check(cd["posts"] == [["/compose/post/1005/delete", whole, None, None]] and cd["removed"]
           and cd["offset"] == "19" and cd["badge"] == "299 saved posts"
-          and cd["confirms"] == ["Delete this post? It goes to LinkedIn, Threads — all of them will be deleted."],
+          and cd["confirms"] == [] and cd["undos"] == ["Deleted this post from LinkedIn, Threads."],
           f"the card's own delete still sends every row and now keeps Load more in step: {cd}")
     cu = r["cardUsed"]
     check(cu["posts"] == [["/compose/post/1006/toggle-used", "1006,5006", None, None]] and cu["usedUI"] == [[6, False]]

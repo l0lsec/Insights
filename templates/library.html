@@ -101,7 +101,9 @@
                             </form>
                         {% endif %}
                         <form method="post" action="{{ url_for('library_delete_root', root_id=r.id) }}"
-                              class="d-inline" onsubmit="return confirm('Remove this folder from the library? Files are not touched.')">
+                              class="d-inline"
+                              data-undo="Removed {{ r.label }} from the library. Its files on disk are not touched."
+                              data-undo-row="tr" data-undo-then="{{ url_for('library_page') }}">
                             <button class="btn btn-sm btn-outline-danger">✕</button>
                         </form>
                     </td>
@@ -569,22 +571,40 @@ async function approveAll() {
 }
 
 async function applyPlan() {
-    const dest = document.getElementById('destRoot').value.trim();
-    if (!dest) { alert('Enter a destination folder.'); return; }
+    const destInput = document.getElementById('destRoot');
+    const dest = destInput.value.trim();
+    if (!dest) { Insights.fieldError(destInput, 'Enter the folder to put the sorted files in.', {focus: true}); return; }
     const mode = document.getElementById('applyMode').value;
-    const what = mode === 'link'
-        ? 'Build a folder tree of links in'
-        : 'Copy approved files into';
-    if (!confirm(`${what} ${dest}?\n\nOriginals stay where they are.`)) return;
-    const r = await fetch(`/library/scan/${SCAN_ID}/apply`, {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({dest_root: dest, mode: document.getElementById('applyMode').value})
+    // Writes files outside Insights (and, for a copy, may download from OneDrive), so ask by name.
+    const ok = await Insights.confirm(mode === 'link' ? {
+        title: `Build a folder tree of links in ${dest}?`,
+        body: 'Nothing is copied or downloaded. Originals stay where they are.',
+        confirmLabel: 'Build links'
+    } : {
+        title: `Copy the approved files into ${dest}?`,
+        body: 'The bytes are duplicated, and a file that is only in OneDrive is downloaded first. Originals stay where they are.',
+        confirmLabel: 'Copy files'
     });
-    const d = await r.json();
-    if (d.error) { alert(d.error); return; }
-    alert(`${d.mode === 'link' ? 'Linking' : 'Copying'} ${d.items} files`
-        + `${d.mode === 'link' ? ' (no bytes copied)' : ' (' + fmtGb(d.bytes) + ')'}.`
-        + `\nUndo manifest: ${d.manifest}`);
+    if (!ok) return;
+    let r, d;
+    try {
+        r = await fetch(`/library/scan/${SCAN_ID}/apply`, {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({dest_root: dest, mode: document.getElementById('applyMode').value})
+        });
+        d = await r.json().catch(() => ({}));
+    } catch (e) {
+        Insights.toast(Insights.explain(e, 'Could not start sorting the files.'), 'error');
+        return;
+    }
+    if (!r.ok || d.error) {
+        Insights.toast(Insights.explain(d.error ? {error: d.error, status: r.status} : r, 'Could not start sorting the files.'), 'error');
+        return;
+    }
+    Insights.toast(`${d.mode === 'link' ? 'Linking' : 'Copying'} ${d.items} files into ${dest}`
+        + `${d.mode === 'link' ? ' (no bytes copied)' : ' (' + fmtGb(d.bytes) + ')'}. `
+        + `Progress shows below. To undo it later, use the manifest at ${d.manifest}`,
+        {type: 'success', duration: 0});
     poll();
 }
 
@@ -635,17 +655,22 @@ async function openFile(id) {
     let d = await r.json();
     if (r.status === 409 && d.needs_confirm) {
         const mb = (d.size / 1048576).toFixed(0);
-        if (!confirm(`${d.name} is not on this Mac.\n\nOpening it downloads ${mb} MB from OneDrive. Continue?`)) return;
+        // A cost question: say what it downloads and how much.
+        if (!(await Insights.confirm({
+            title: `Download ${d.name} from OneDrive?`,
+            body: `It is not on this Mac. Opening it downloads ${mb} MB from OneDrive.`,
+            confirmLabel: `Download ${mb} MB`
+        }))) return;
         r = await fetch(`/library/file/${id}/open?confirm=1`, {method: 'POST'});
         d = await r.json();
     }
-    if (d.error) alert(d.error);
+    if (d.error) Insights.toast(Insights.explain({error: d.error, status: r.status}, 'Could not open the file.'), 'error');
 }
 
 async function revealFile(id) {
     const r = await fetch(`/library/file/${id}/reveal`, {method: 'POST'});
     const d = await r.json();
-    if (d.error) alert(d.error);
+    if (d.error) Insights.toast(Insights.explain({error: d.error, status: r.status}, 'Could not show the file in Finder.'), 'error');
 }
 
 async function browse(filters) {
@@ -798,7 +823,11 @@ async function fixLabel(eventKey, category, el) {
         body: JSON.stringify({event_key: eventKey, category: category})
     });
     const d = await r.json();
-    if (d.error) { alert(d.error); el.disabled = false; return; }
+    if (d.error) {
+        Insights.toast(Insights.explain({error: d.error, status: r.status}, 'Could not save the new category, so the label is unchanged.'), 'error');
+        el.disabled = false;
+        return;
+    }
     const row = document.getElementById('rev-' + eventKey);
     if (row) {
         row.style.opacity = '0.5';

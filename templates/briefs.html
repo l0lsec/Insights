@@ -341,10 +341,15 @@ async function runBrief(id) {
     try {
         const resp = await fetch(`/briefs/${id}/run`, {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}});
         const data = await resp.json();
-        if (!resp.ok) { alert(data.error || 'Failed to start run'); btn.disabled = false; btn.textContent = '▶ Run'; return; }
+        if (!resp.ok) {
+            Insights.toast(Insights.explain({error: data.error, status: resp.status}, 'Could not start the run.'), 'error');
+            btn.disabled = false; btn.textContent = '▶ Run';
+            return;
+        }
         pollRun(id, data.run_id);
     } catch (e) {
-        alert('Failed to start run'); btn.disabled = false; btn.textContent = '▶ Run';
+        Insights.toast(Insights.explain(e, 'Could not start the run.'), 'error');
+        btn.disabled = false; btn.textContent = '▶ Run';
     }
 }
 
@@ -381,9 +386,16 @@ async function toggleBrief(id, enabled) {
 async function deleteBrief(id) {
     const b = BRIEFS.find(x => x.id === id);
     const name = b ? b.name : ('brief ' + id);
-    if (!confirm(`Delete brief "${name}"? This removes its run history too.`)) return;
-    const resp = await fetch(`/briefs/${id}/delete`, {method: 'POST'});
-    if (resp.ok) window.location.reload();
+    const row = document.getElementById('brief-' + id);
+    // Undo instead of a question: the row goes at once, the delete is sent after the Undo window.
+    const r = await Insights.deferred(o => fetch(`/briefs/${id}/delete`, {method: 'POST', keepalive: o.keepalive}), {
+        message: `Deleted the brief "${name}" and its run history.`,
+        hide: () => { if (row) row.hidden = true; },
+        restore: () => { if (row) row.hidden = false; },
+        failMessage: `Could not delete the brief "${name}", so it is back.`
+    });
+    // The count and the empty state are drawn by the server.
+    if (r.committed) window.location.reload();
 }
 
 async function showRuns(id) {

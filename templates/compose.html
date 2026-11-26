@@ -1903,7 +1903,9 @@ function checkLinkedInStatus() {
                     <div class="d-flex justify-content-between align-items-center">
                         <span><strong>${data.display_name || 'LinkedIn User'}</strong></span>
                         <a href="{{ url_for('linkedin_disconnect') }}" class="btn btn-sm btn-outline-danger" 
-                           onclick="return confirm('Disconnect LinkedIn?');">Disconnect</a>
+                           data-confirm-title="Disconnect LinkedIn?"
+                           data-confirm="Insights stops posting to every LinkedIn account until you connect it again."
+                           data-confirm-label="Disconnect" data-confirm-danger>Disconnect</a>
                     </div>
                 `;
             } else if (data.connected && data.needs_configuration) {
@@ -1972,13 +1974,22 @@ function checkThreadsStatus() {
         });
 }
 
-function disconnectThreads() {
-    if (!confirm('Disconnect Threads?')) return;
+async function disconnectThreads() {
+    const sure = await Insights.confirm({
+        title: 'Disconnect Threads?',
+        body: 'Insights stops posting to every Threads account until you connect it again.',
+        confirmLabel: 'Disconnect',
+        danger: true,
+    });
+    if (!sure) return;
     fetch('{{ url_for("threads_disconnect") }}', { method: 'POST' })
-        .then(() => {
+        .then(response => {
+            if (!response.ok) throw response;
             threadsConnected = false;
             checkThreadsStatus();
-        });
+            Insights.toast('Threads is disconnected.', 'success');
+        })
+        .catch(error => Insights.toast(Insights.explain(error, 'Could not disconnect Threads.'), 'error'));
 }
 
 function checkFacebookStatus() {
@@ -2022,13 +2033,22 @@ function checkFacebookStatus() {
         });
 }
 
-function disconnectFacebook() {
-    if (!confirm('Disconnect Facebook?')) return;
+async function disconnectFacebook() {
+    const sure = await Insights.confirm({
+        title: 'Disconnect Facebook?',
+        body: 'Insights stops posting to every Facebook account until you connect it again.',
+        confirmLabel: 'Disconnect',
+        danger: true,
+    });
+    if (!sure) return;
     fetch('{{ url_for("facebook_disconnect") }}', { method: 'POST' })
-        .then(() => {
+        .then(response => {
+            if (!response.ok) throw response;
             facebookConnected = false;
             checkFacebookStatus();
-        });
+            Insights.toast('Facebook is disconnected.', 'success');
+        })
+        .catch(error => Insights.toast(Insights.explain(error, 'Could not disconnect Facebook.'), 'error'));
 }
 
 function checkInstagramStatus() {
@@ -2069,13 +2089,22 @@ function checkInstagramStatus() {
         });
 }
 
-function disconnectInstagram() {
-    if (!confirm('Disconnect Instagram?')) return;
+async function disconnectInstagram() {
+    const sure = await Insights.confirm({
+        title: 'Disconnect Instagram?',
+        body: 'Insights stops posting to every Instagram account until you connect it again.',
+        confirmLabel: 'Disconnect',
+        danger: true,
+    });
+    if (!sure) return;
     fetch('{{ url_for("instagram_disconnect") }}', { method: 'POST' })
-        .then(() => {
+        .then(response => {
+            if (!response.ok) throw response;
             instagramConnected = false;
             checkInstagramStatus();
-        });
+            Insights.toast('Instagram is disconnected.', 'success');
+        })
+        .catch(error => Insights.toast(Insights.explain(error, 'Could not disconnect Instagram.'), 'error'));
 }
 
 function checkTwitterStatus() {
@@ -2115,13 +2144,22 @@ function checkTwitterStatus() {
         });
 }
 
-function disconnectTwitter() {
-    if (!confirm('Disconnect X/Twitter?')) return;
+async function disconnectTwitter() {
+    const sure = await Insights.confirm({
+        title: 'Disconnect X/Twitter?',
+        body: 'Insights stops posting to every X/Twitter account until you connect it again.',
+        confirmLabel: 'Disconnect',
+        danger: true,
+    });
+    if (!sure) return;
     fetch('{{ url_for("twitter_disconnect") }}', { method: 'POST' })
-        .then(() => {
+        .then(response => {
+            if (!response.ok) throw response;
             twitterConnected = false;
             checkTwitterStatus();
-        });
+            Insights.toast('X/Twitter is disconnected.', 'success');
+        })
+        .catch(error => Insights.toast(Insights.explain(error, 'Could not disconnect X/Twitter.'), 'error'));
 }
 
 function adjustPostCount(delta) {
@@ -2381,23 +2419,26 @@ function updateManualComposerCount() {
     }
 }
 
-function saveManualPost() {
+async function saveManualPost() {
     const input = document.getElementById('manual-input');
     const content = input.value.trim();
     if (!content) {
-        alert('Write your post first.');
-        input.focus();
+        Insights.fieldError(input, 'Write your post first.', { focus: true });
         return;
     }
     const targets = manualPostTargets();
     if (targets.length === 0) {
-        alert('Please select at least one platform');
+        Insights.toast('Tick at least one platform below to save this post.', 'warning');
         return;
     }
     const tooLong = tickedPlatforms().filter(p => content.length > (platformCharLimits[p] || 5000));
-    if (tooLong.length &&
-        !confirm(`This post is ${content.length} characters, over the limit for ` +
-                 `${tooLong.map(p => PLATFORM_LABELS[p] || p).join(', ')}. Save it anyway?`)) {
+    // Only asked when it is too long, so a normal save starts at once.
+    if (tooLong.length && !(await Insights.confirm({
+        title: `Save a post that is too long for ${tooLong.map(p => PLATFORM_LABELS[p] || p).join(', ')}?`,
+        body: `It is ${content.length} characters, over the limit there. ` +
+              'It will not publish to those platforms until you shorten it.',
+        confirmLabel: 'Save anyway',
+    }))) {
         return;
     }
 
@@ -2433,17 +2474,32 @@ function saveManualPost() {
             // The reload below wipes a toast, so what the platforms will make of
             // the video is said up front, the way the form under the list does.
             const problems = (data.video_warnings || []).map(w => (w.level === 'error' ? '⛔ ' : '⚠️ ') + w.message);
-            if (problems.length) alert('Post saved. Heads up about the video:\n\n' + problems.join('\n'));
+            if (problems.length) {
+                const note = 'Post saved. Heads up about the video:\n\n' + problems.join('\n');
+                Insights.toast(note, { type: 'warning', duration: 0 });
+                try { sessionStorage.setItem('compose-notice', note); } catch (e) { /* private mode: shown once only */ }
+            }
             showToast(n > 1 ? `Post saved for ${n} accounts! Refreshing...` : 'Post saved! Refreshing...', 'success');
             (data.warnings || []).forEach(w => showToast(w, 'info'));
             setTimeout(() => location.reload(), 900);
         })
         .catch(error => {
-            alert('Error: ' + error.message);
+            // The text, the ticks and the video stay as they were, so fixing it is one click.
+            Insights.toast(Insights.explain(error, 'Could not save the post.'), 'error');
             btn.innerHTML = original;
             btn.disabled = false;
         });
 }
+
+// A notice saved just before a reload (which wipes a toast), shown again once the page is back.
+document.addEventListener('DOMContentLoaded', () => {
+    let note = null;
+    try {
+        note = sessionStorage.getItem('compose-notice');
+        sessionStorage.removeItem('compose-notice');
+    } catch (e) { /* private mode */ }
+    if (note) Insights.toast(note, { type: 'warning', duration: 0 });
+});
 
 document.addEventListener('DOMContentLoaded', () => {
     document.querySelectorAll('#sourceTypeTabs .nav-link').forEach(tab => {
@@ -2834,19 +2890,19 @@ function generatePosts() {
     
     if (sourceType === 'image') {
         if (_imageFiles.length === 0 && _recalledImageUrls.length === 0) {
-            alert('Please add at least one image');
+            Insights.toast('Add at least one image to generate posts from.', 'warning');
             return;
         }
     } else if (sourceType === 'file') {
         if (!_docFile) {
-            alert('Please choose a document to upload');
+            Insights.toast('Choose a document to generate posts from.', 'warning');
             return;
         }
     } else if (!content) {
         if (sourceType === 'saved_source') {
-            alert('Please select a saved source');
+            Insights.fieldError(document.getElementById('saved-source-select'), 'Pick a saved source to generate posts from.', { focus: true });
         } else {
-            alert('Please enter content to generate posts from');
+            Insights.toast('Type or paste the content to generate posts from.', 'warning');
         }
         return;
     }
@@ -2854,7 +2910,7 @@ function generatePosts() {
     const checkboxes = document.querySelectorAll('#platform-checkboxes input:checked');
     const platforms = Array.from(checkboxes).map(cb => cb.value);
     if (platforms.length === 0) {
-        alert('Please select at least one platform');
+        Insights.toast('Tick at least one platform to generate posts for.', 'warning');
         return;
     }
     
@@ -2935,13 +2991,13 @@ function generatePosts() {
                 setTimeout(() => location.reload(), 1000);
             }
         } else {
-            alert('Error: ' + (data.error || 'Failed to generate posts'));
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not generate posts.'), 'error');
         }
     })
     .catch(error => {
         document.getElementById('generating-overlay').classList.add('d-none');
         document.getElementById('generate-btn').disabled = false;
-        alert('Error: ' + error.message);
+        Insights.toast(Insights.explain(error, 'Could not generate posts.'), 'error');
     });
 }
 
@@ -3114,8 +3170,13 @@ function populatePostLinkUrls(postId) {
     btn.dataset.firstUrl = urls[0];
 }
 
-function refreshPostImage(postId, btn) {
-    if (!confirm("Refresh this post's image from its original source?")) return;
+async function refreshPostImage(postId, btn) {
+    const sure = await Insights.confirm({
+        title: "Replace this post's image?",
+        body: 'Insights fetches the image from the original source (the YouTube video or article) and uses it instead of the current one.',
+        confirmLabel: 'Replace image',
+    });
+    if (!sure) return;
 
     const originalHtml = btn.innerHTML;
     btn.disabled = true;
@@ -3294,12 +3355,37 @@ function savePostImage(postId) {
     });
 }
 
-function removePostImage(postId) {
-    if (!confirm('Remove the image from this post?')) return;
-    
+// The image goes at once and comes back on Undo; the request is sent when the
+// Undo window closes, card-wide like savePostImage.
+async function removePostImage(postId) {
+    const preview = document.getElementById(`image-preview-${postId}`);
+    const addBtn = document.getElementById(`add-image-btn-${postId}`);
+    const editForm = document.getElementById(`image-edit-form-${postId}`);
+    const wasShown = !!preview && !preview.classList.contains('d-none');
+    const show = (on) => {
+        if (preview) preview.classList.toggle('d-none', !on);
+        if (addBtn) addBtn.classList.toggle('d-none', on);
+    };
+    const result = await Insights.deferred(o => fetch(`/compose/post/${postId}/image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: `image_url=&post_ids=${encodeURIComponent(cardIdsParam(postId))}`,
+        keepalive: o.keepalive,
+    }).then(response => response.json().then(data => {
+        if (!response.ok || !data.success) throw { status: response.status, error: data.error };
+        return data;
+    })), {
+        message: 'Image removed from this post.',
+        hide: () => { show(false); if (editForm) editForm.classList.add('d-none'); },
+        restore: () => show(wasShown),
+        failMessage: 'Could not remove the image, so it is back.',
+    });
+    if (!result.committed) return;
     document.getElementById(`image-url-input-${postId}`).value = '';
     document.getElementById(`post-final-image-url-${postId}`).value = '';
-    savePostImage(postId);
+    if (document.getElementById(`ig-type-${postId}`) && igCurrentType(postId) === 'feed') {
+        igCheckFeedImage(postId);
+    }
 }
 
 // Image library functions
@@ -3729,11 +3815,32 @@ function uploadPostVideo(postId, input) {
     });
 }
 
-function removePostVideo(postId) {
-    if (!confirm('Remove the video from this post?')) return;
-    const body = new FormData();
-    body.append('video_url', '');
-    sendPostVideo(postId, body, '');
+// The video goes at once and comes back on Undo; the request is sent when the
+// Undo window closes, for every row of the card.
+async function removePostVideo(postId) {
+    const els = postVideoEls(postId);
+    if (!els.section) return;
+    const previous = els.section.dataset.videoUrl || '';
+    const shownWarnings = Array.from(els.warnings.children || []);
+    await Insights.deferred(o => {
+        const body = new FormData();
+        body.append('video_url', '');
+        body.append('post_ids', cardIdsParam(postId));
+        return fetch(`/compose/post/${postId}/video`, { method: 'POST', body, keepalive: o.keepalive })
+            .then((response) => response.json().then((data) => {
+                if (!response.ok || !data.success) throw { status: response.status, error: data.error };
+                renderPostVideo(postId, data.video_url, data.warnings);
+                return data;
+            }));
+    }, {
+        message: 'Video removed from this post.',
+        hide: () => renderPostVideo(postId, '', []),
+        restore: () => {
+            renderPostVideo(postId, previous, []);
+            shownWarnings.forEach((li) => els.warnings.appendChild(li));
+        },
+        failMessage: 'Could not remove the video, so it is back.',
+    });
 }
 
 function loadPostVideoLibrary(postId) {
@@ -3771,7 +3878,7 @@ function savePostEdit(postId) {
     const content = textarea.value.trim();
     
     if (!content) {
-        alert('Content cannot be empty');
+        Insights.fieldError(textarea, 'A post needs some text. Write it here, or Cancel to keep the old text.', { focus: true });
         return;
     }
     
@@ -3794,11 +3901,12 @@ function savePostEdit(postId) {
             formEl.classList.add('d-none');
             showToast('Post updated!', 'success');
         } else {
-            alert('Error: ' + data.error);
+            // The edit box stays open with the new text in it.
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not save your edit.'), 'error');
         }
     })
     .catch(error => {
-        alert('Error: ' + error.message);
+        Insights.toast(Insights.explain(error, 'Could not save your edit.'), 'error');
     });
 }
 
@@ -3822,23 +3930,31 @@ function toggleUsed(postId, btn) {
         .catch(e => showToast('Could not update: ' + e.message, 'error'));
 }
 
-// What "delete" asks before it takes a post off every platform it goes to.
-function deleteConfirmText(platforms) {
+// What the Undo toast says when a post goes off every platform it goes to.
+function deleteUndoText(platforms) {
     const unique = [...new Set(platforms)];
-    const where = unique.length > 1
-        ? ` It goes to ${unique.map(p => PLATFORM_LABELS[p] || p).join(', ')} — all of them will be deleted.`
-        : '';
-    return `Delete this post?${where}`;
+    return unique.length > 1
+        ? `Deleted this post from ${unique.map(p => PLATFORM_LABELS[p] || p).join(', ')}.`
+        : 'Deleted this post.';
 }
 
-// Delete every row of a card.
-async function requestDeleteCard(postId, postIds) {
-    const body = new FormData();
-    body.append('post_ids', postIds.join(','));
-    const res = await fetch(`/compose/post/${postId}/delete`, { method: 'POST', body: body });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || 'Could not delete');
-    return data;
+// Delete every row of a card, with Undo: hide() runs at once, the request goes
+// when the Undo window closes, and restore() runs on Undo or a failure.
+// Resolves to Insights.deferred's result ({committed} | {undone} | {failed}).
+function deferDeleteCard(postId, postIds, platforms, hide, restore) {
+    return Insights.deferred(async (o) => {
+        const body = new FormData();
+        body.append('post_ids', postIds.join(','));
+        const res = await fetch(`/compose/post/${postId}/delete`, { method: 'POST', body: body, keepalive: o.keepalive });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Could not delete');
+        return data;
+    }, {
+        message: deleteUndoText(platforms),
+        hide,
+        restore,
+        failMessage: 'Could not delete the post, so it is back.',
+    });
 }
 
 // A deleted card leaves the list one shorter.
@@ -3866,18 +3982,18 @@ function noteCardLeftList(wasLoaded) {
     setLoadMoreLabels(Math.max(0, shown - (wasLoaded ? 1 : 0)), Math.max(0, total - 1));
 }
 
-// Deletes the post everywhere it goes — untick a platform to drop just one.
-function deletePost(postId, btn) {
+// Deletes the post everywhere it goes (untick a platform to drop just one).
+// The card goes at once; Undo brings it back before anything is sent.
+async function deletePost(postId, btn) {
     const postItem = btn.closest('.post-item');
-    if (!confirm(deleteConfirmText(Object.keys(cardPlatforms(postItem))))) return;
-
-    requestDeleteCard(postId, cardPostIds(postItem, false))
-        .then(() => {
-            postItem.remove();
-            noteCardDeleted(true);
-            showToast('Post deleted', 'success');
-        })
-        .catch(e => showToast('Could not delete: ' + e.message, 'error'));
+    const result = await deferDeleteCard(postId, cardPostIds(postItem, false),
+        Object.keys(cardPlatforms(postItem)),
+        () => { postItem.hidden = true; },
+        () => { postItem.hidden = false; });
+    if (!result.committed) return;
+    postItem.remove();
+    noteCardDeleted(true);
+    showToast('Post deleted', 'success');
 }
 
 function toggleShowMore(btn, platform) {
@@ -3958,7 +4074,7 @@ function markChipPosted(postItem, platform, url, accountId) {
 async function publishCardPlatform(postItem, postId, platform, accountId) {
     const label = PLATFORM_LABELS[platform] || platform;
     if (!platformConnected(platform)) {
-        alert(`Please connect ${label} first`);
+        Insights.toast(`Please connect ${label} first`, 'warning');
         return false;
     }
     try {
@@ -3967,15 +4083,15 @@ async function publishCardPlatform(postItem, postId, platform, accountId) {
         const res = await fetch(`/compose/post/${postId}/${platform}`, { method: 'POST', body: body });
         const data = await res.json();
         if (!data.success) {
-            alert(`${data.account_label || label}: ${data.error || 'Failed to post'}`);
+            Insights.toast(`${data.account_label || label}: ${Insights.explain({ error: data.error, status: res.status })}`, 'error');
             return false;
         }
         markChipPosted(postItem, platform, postedUrlFrom(platform, data), accountId);
         const warning = noteFirstComment(postItem, data.account_label || label, data.first_comment, platform);
-        if (warning) alert(warning);
+        if (warning) Insights.toast(warning, 'warning');
         return true;
     } catch (e) {
-        alert(`${label}: ${e.message}`);
+        Insights.toast(`${label}: ${Insights.explain(e)}`, 'error');
         return false;
     }
 }
@@ -3994,17 +4110,18 @@ async function refreshCardUsedState(postItem) {
     setCardUsedUI(postItem, states.every(Boolean));
 }
 
-// What "post now" asks before one platform goes out.
+// What "post now" asks before one account's post goes out: the title and body
+// of the dialog (the caller adds the button's label).
 function postNowConfirmText(platform, label) {
     const extra = platform === 'instagram'
-        ? ' An image is required and will be auto-attached if the post has none.'
+        ? ' Instagram needs an image; one is attached for you if the post has none.'
         : '';
-    return `Post to ${label} now?${extra}`;
+    return { title: `Post to ${label} now?`, body: `It goes live on ${label} at once.${extra}` };
 }
 
 async function postNowFromCard(btn, postId, platform, accountId) {
     const label = PLATFORM_LABELS[platform] || platform;
-    if (!confirm(postNowConfirmText(platform, label))) return;
+    if (!(await Insights.confirm({ ...postNowConfirmText(platform, label), confirmLabel: 'Post now' }))) return;
 
     const postItem = btn.closest('.post-item');
     const original = btn.innerHTML;
@@ -4024,13 +4141,18 @@ async function postNowFromCard(btn, postId, platform, accountId) {
 // after it and the reply says exactly which landed.
 function publishAllConfirmText(targets) {
     const labels = targets.map(t => t.account_label || PLATFORM_LABELS[t.platform] || t.platform).join(', ');
-    return `Publish this post to ${labels} now? This cannot be undone.`;
+    const n = targets.length;
+    return {
+        title: `Publish this post to ${labels} now?`,
+        body: `It goes live at once on ${n} account${n === 1 ? '' : 's'}, and this cannot be undone.`,
+    };
 }
 
 // Publish a card to every account it goes to, in one request, and say which
 // landed. Marks the posted chips on `postItem` when the card is on the page.
 // Resolves to the server's reply, or null when the request itself failed.
 async function publishCardToAll(postId, postIds, postItem) {
+    // ux-confirm-ok: both callers (postNowAllFromCard, postAllFromSearchResult) ask first with Insights.confirm, naming every account.
     try {
         const body = new FormData();
         body.append('post_ids', postIds.join(','));
@@ -4048,7 +4170,7 @@ async function publishCardToAll(postId, postIds, postItem) {
         const failed = (data.results || []).filter(r => !r.success);
         const problems = failed.map(r => `${r.account_label}: ${r.error}`).concat(warnings);
         if (problems.length) {
-            alert(problems.join('\n'));
+            Insights.toast(problems.join('\n'), failed.length ? 'error' : 'warning');
         }
         showToast(data.message, data.success ? 'success' : (data.published ? 'warning' : 'error'));
         return data;
@@ -4062,7 +4184,7 @@ async function postNowAllFromCard(btn) {
     const postItem = btn.closest('.post-item');
     const targets = cardTargets(postItem);
     if (!targets.length) return;
-    if (!confirm(publishAllConfirmText(targets))) return;
+    if (!(await Insights.confirm({ ...publishAllConfirmText(targets), confirmLabel: 'Publish now' }))) return;
 
     const original = btn.innerHTML;
     btn.innerHTML = '⏳ Posting...';
@@ -4103,7 +4225,7 @@ async function queueCardToAll(postId, postIds) {
         // list is empty. Anything else is the request itself failing.
         if (!res.ok && !Array.isArray(data.queued)) throw new Error(data.error || 'Could not queue');
         if ((data.skipped || []).length) {
-            alert(data.skipped.map(s => `${s.target}: ${s.error}`).join('\n'));
+            Insights.toast(data.skipped.map(s => `${s.target}: ${s.error}`).join('\n'), 'warning');
         }
         if (!(data.queued || []).length) {
             // Nothing went in. Saying "Queued" here, as this once did, is the one
@@ -5437,7 +5559,12 @@ async function togglePostPlatform(btn, platform) {
             const reason = data.queued
                 ? `This post is queued for ${label}${data.scheduled_for ? ' at ' + data.scheduled_for : ''}, and removing it will take it out of the queue.`
                 : `This post has already been published to ${label} (removing it here won't unpublish it).`;
-            if (!confirm(`${reason}\n\nRemove ${label} from this post?`)) {
+            const sure = await Insights.confirm({
+                title: `Remove ${label} from this post?`,
+                body: reason,
+                confirmLabel: `Remove ${label}`,
+            });
+            if (!sure) {
                 btn.disabled = false;
                 return;
             }
@@ -5741,49 +5868,68 @@ function setChipQueuedUI(btn, queued, scheduledFor) {
 
 // Add or remove one platform's queue entry. `btn` is that platform's chip
 // control, so the card can be queued for X while Threads waits.
-function toggleQueue(postId, postType, platform, btn, isQueued) {
+async function toggleQueue(postId, postType, platform, btn, isQueued) {
+    const label = PLATFORM_LABELS[platform] || platform;
     if (!platformConnected(platform)) {
-        alert(`Please connect ${PLATFORM_LABELS[platform] || platform} first`);
+        Insights.toast(`Please connect ${label} first`, 'warning');
         return;
     }
+    if (isQueued) return unqueueChip(postId, postType, platform, btn);
 
     const originalText = btn.innerHTML;
     btn.innerHTML = '\u23f3';
     btn.disabled = true;
 
-    const request = isQueued
-        ? (() => {
-            const formData = new FormData();
-            formData.append('post_type', postType);
-            formData.append('post_id', postId);
-            formData.append('platform', platform);
-            return fetch('/schedule/remove-from-queue', { method: 'POST', body: formData });
-        })()
-        : (() => {
-            const formData = new FormData();
-            formData.append('platform', platform);
-            formData.append('post_type', postType);
-            return fetch(`/compose/post/${postId}/queue`, { method: 'POST', body: formData });
-        })();
-
-    request
+    const formData = new FormData();
+    formData.append('platform', platform);
+    formData.append('post_type', postType);
+    fetch(`/compose/post/${postId}/queue`, { method: 'POST', body: formData })
         .then(response => response.json())
         .then(data => {
             btn.disabled = false;
             if (data.success) {
-                setChipQueuedUI(btn, !isQueued, data.scheduled_for);
+                setChipQueuedUI(btn, true, data.scheduled_for);
                 showToast(data.message, 'success');
                 recheckCardFilters(btn.closest('.post-item'));
             } else {
                 btn.innerHTML = originalText;
-                alert('Error: ' + (data.error || (isQueued ? 'Failed to remove from queue' : 'Failed to add to queue')));
+                Insights.toast(Insights.explain({ error: data.error }, `Could not add this post to the ${label} queue.`), 'error');
             }
         })
         .catch(error => {
             btn.innerHTML = originalText;
             btn.disabled = false;
-            alert('Error: ' + error.message);
+            Insights.toast(Insights.explain(error, `Could not add this post to the ${label} queue.`), 'error');
         });
+}
+
+// Take one platform's entry out of the queue, with Undo: the chip shows it
+// unqueued at once and the request goes when the Undo window closes.
+async function unqueueChip(postId, postType, platform, btn) {
+    const label = PLATFORM_LABELS[platform] || platform;
+    const before = { html: btn.innerHTML, title: btn.title, queued: btn.dataset.queued };
+    const result = await Insights.deferred(o => {
+        const formData = new FormData();
+        formData.append('post_type', postType);
+        formData.append('post_id', postId);
+        formData.append('platform', platform);
+        return fetch('/schedule/remove-from-queue', { method: 'POST', body: formData, keepalive: o.keepalive })
+            .then(response => response.json().then(data => {
+                if (!response.ok || !data.success) throw { status: response.status, error: data.error };
+                return data;
+            }));
+    }, {
+        message: `Removed from the ${label} queue.`,
+        hide: () => setChipQueuedUI(btn, false),
+        restore: () => {
+            btn.innerHTML = before.html;
+            btn.title = before.title;
+            btn.dataset.queued = before.queued;
+            btn.classList.add('is-queued');
+        },
+        failMessage: `Could not take this post out of the ${label} queue, so it is still queued.`,
+    });
+    if (result.committed) recheckCardFilters(btn.closest('.post-item'));
 }
 
 // Legacy function for backwards compatibility
@@ -5793,19 +5939,19 @@ function addToQueue(postId, postType, platform, btn) {
 
 function openScheduleModal(postId, postType, platform) {
     if (platform === 'linkedin' && !linkedinConnected) {
-        alert('Please connect LinkedIn first');
+        Insights.toast('Please connect LinkedIn first', 'warning');
         return;
     }
     if (platform === 'threads' && !threadsConnected) {
-        alert('Please connect Threads first');
+        Insights.toast('Please connect Threads first', 'warning');
         return;
     }
     if (platform === 'facebook' && !facebookConnected) {
-        alert('Please connect Facebook first');
+        Insights.toast('Please connect Facebook first', 'warning');
         return;
     }
     if (platform === 'twitter' && !twitterConnected) {
-        alert('Please connect X/Twitter first');
+        Insights.toast('Please connect X/Twitter first', 'warning');
         return;
     }
     
@@ -5831,7 +5977,7 @@ function schedulePost() {
     const datetime = document.getElementById('schedule-datetime').value;
     
     if (!datetime) {
-        alert('Please select a date and time');
+        Insights.fieldError(document.getElementById('schedule-datetime'), 'Pick a date and time to schedule it for.', { focus: true });
         return;
     }
     
@@ -5857,11 +6003,11 @@ function schedulePost() {
             if (queueBtn) setChipQueuedUI(queueBtn, true, data.scheduled_for_display);
             recheckCardFilters(card);
         } else {
-            alert('Error: ' + (data.error || 'Failed to schedule'));
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not schedule the post.'), 'error');
         }
     })
     .catch(error => {
-        alert('Error: ' + error.message);
+        Insights.toast(Insights.explain(error, 'Could not schedule the post.'), 'error');
     });
 }
 
@@ -6251,14 +6397,19 @@ async function deleteSelectedPosts() {
     // Across-pages selection: hand the server the filters and let it delete
     // every matching post in one request, then reload.
     if (selectAllScope) {
+        // ux-undo-ok: most of these posts are not loaded on the page, so there is nothing to hide for Undo; a named confirm instead.
         const total = selectAllScope.total;
         if (total === 0) {
-            alert('No posts to delete');
+            Insights.toast('No posts match these filters, so there is nothing to delete.', 'info');
             return;
         }
-        if (!confirm(`Delete all ${total} post${total !== 1 ? 's' : ''} across every page? This cannot be undone.`)) {
-            return;
-        }
+        const sure = await Insights.confirm({
+            title: `Delete all ${total} post${total !== 1 ? 's' : ''} across every page?`,
+            body: 'Every post that matches these filters is deleted, including the ones not loaded yet. This cannot be undone.',
+            confirmLabel: `Delete ${total} post${total !== 1 ? 's' : ''}`,
+            danger: true,
+        });
+        if (!sure) return;
         const btn = document.getElementById('delete-selected-btn');
         const originalText = btn.innerHTML;
         btn.innerHTML = '⏳ Deleting...';
@@ -6276,12 +6427,12 @@ async function deleteSelectedPosts() {
             } else {
                 btn.innerHTML = originalText;
                 btn.disabled = false;
-                alert('Error: ' + (data.error || 'Failed to delete posts'));
+                Insights.toast(Insights.explain({ error: data.error, status: res.status }, 'Could not delete the posts.'), 'error');
             }
         } catch (e) {
             btn.innerHTML = originalText;
             btn.disabled = false;
-            alert('Error: ' + e.message);
+            Insights.toast(Insights.explain(e, 'Could not delete the posts.'), 'error');
         }
         return;
     }
@@ -6290,39 +6441,43 @@ async function deleteSelectedPosts() {
     const postIds = cards.flatMap(card => card.ids);
 
     if (postIds.length === 0) {
-        alert('No posts selected');
+        Insights.toast('Tick the posts to delete first.', 'info');
         return;
     }
 
-    if (!confirm(`Delete ${cards.length} selected post${cards.length !== 1 ? 's' : ''}? This cannot be undone.`)) {
-        return;
-    }
-
-    fetch('/compose/posts/delete-bulk', {
+    // The cards go at once and come back on Undo; nothing is sent until the
+    // Undo window closes. Select mode ends now, so the same posts cannot be
+    // sent twice.
+    const n = cards.length;
+    const result = await Insights.deferred(o => fetch('/compose/posts/delete-bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ post_ids: postIds })
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            // A platform filter narrows a card to that platform's post, so what
-            // is left of the card has to be re-read rather than assumed gone.
-            cards.forEach(card => {
-                if (!card.postItem) return;
-                const remaining = cardPostIds(card.postItem, false).filter(id => !card.ids.includes(id));
-                if (remaining.length === 0) {
-                    card.postItem.remove();
-                    noteCardDeleted(true);
-                } else {
-                    refreshCard(card.postItem, remaining);
-                }
-            });
-
-            toggleSelectMode();
-            showToast(`Deleted ${data.deleted_count} post${data.deleted_count !== 1 ? 's' : ''}`, 'success');
+        body: JSON.stringify({ post_ids: postIds }),
+        keepalive: o.keepalive,
+    }).then(response => response.json().then(data => {
+        if (!response.ok || !data.success) throw { status: response.status, error: data.error };
+        return data;
+    })), {
+        message: `Deleted ${n} post${n !== 1 ? 's' : ''}.`,
+        hide: () => {
+            cards.forEach(card => { if (card.postItem) card.postItem.hidden = true; });
+            if (selectModeActive) toggleSelectMode();
+        },
+        restore: () => cards.forEach(card => { if (card.postItem) card.postItem.hidden = false; }),
+        failMessage: `Could not delete the ${n === 1 ? 'post' : n + ' posts'}, so ${n === 1 ? 'it is' : 'they are'} back.`,
+    });
+    if (!result.committed) return;
+    // A platform filter narrows a card to that platform's post, so what
+    // is left of the card has to be re-read rather than assumed gone.
+    cards.forEach(card => {
+        if (!card.postItem) return;
+        const remaining = cardPostIds(card.postItem, false).filter(id => !card.ids.includes(id));
+        if (remaining.length === 0) {
+            card.postItem.remove();
+            noteCardDeleted(true);
         } else {
-            alert('Error: ' + (data.error || 'Failed to delete posts'));
+            card.postItem.hidden = false;
+            refreshCard(card.postItem, remaining);
         }
     });
 }
@@ -6336,13 +6491,16 @@ async function markUsedSelectedPosts() {
     if (selectAllScope) {
         const total = selectAllScope.total;
         if (total === 0) {
-            alert('No posts to update');
+            Insights.toast('No posts match these filters, so there is nothing to mark.', 'info');
             return;
         }
         const action = markAsUsed ? 'used' : 'unused';
-        if (!confirm(`Mark all ${total} post${total !== 1 ? 's' : ''} across every page as ${action}?`)) {
-            return;
-        }
+        const sure = await Insights.confirm({
+            title: `Mark all ${total} post${total !== 1 ? 's' : ''} across every page as ${action}?`,
+            body: 'Every post that matches these filters changes, including the ones not loaded yet.',
+            confirmLabel: `Mark ${total} as ${action}`,
+        });
+        if (!sure) return;
         const originalText = btn.innerHTML;
         btn.innerHTML = '⏳ Marking...';
         btn.disabled = true;
@@ -6359,12 +6517,12 @@ async function markUsedSelectedPosts() {
             } else {
                 btn.innerHTML = originalText;
                 btn.disabled = false;
-                alert('Error: ' + (data.error || 'Failed to mark posts'));
+                Insights.toast(Insights.explain({ error: data.error, status: res.status }, 'Could not mark the posts.'), 'error');
             }
         } catch (e) {
             btn.innerHTML = originalText;
             btn.disabled = false;
-            alert('Error: ' + e.message);
+            Insights.toast(Insights.explain(e, 'Could not mark the posts.'), 'error');
         }
         return;
     }
@@ -6373,7 +6531,7 @@ async function markUsedSelectedPosts() {
     const postIds = cards.flatMap(card => card.ids);
 
     if (postIds.length === 0) {
-        alert('No posts selected');
+        Insights.toast('Tick the posts to mark first.', 'info');
         return;
     }
 
@@ -6400,13 +6558,13 @@ async function markUsedSelectedPosts() {
             const action = markAsUsed ? 'used' : 'unused';
             showToast(`Marked ${data.updated_count} post${data.updated_count !== 1 ? 's' : ''} as ${action}`, 'success');
         } else {
-            alert('Error: ' + (data.error || 'Failed to mark posts'));
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not mark the posts.'), 'error');
         }
     })
     .catch(err => {
         btn.innerHTML = originalText;
         btn.disabled = false;
-        alert('Error marking posts');
+        Insights.toast(Insights.explain(err, 'Could not mark the posts.'), 'error');
     });
 }
 
@@ -6420,7 +6578,7 @@ async function postNowSelectedPosts() {
         try {
             posts = await fetchScopedPosts();
         } catch (e) {
-            alert('Error: ' + e.message);
+            Insights.toast(Insights.explain(e, 'Could not load the matching posts, so nothing was published.'), 'error');
             return;
         }
         posts.forEach(p => {
@@ -6448,25 +6606,32 @@ async function postNowSelectedPosts() {
     }
 
     if (postsToPublish.length === 0) {
-        alert('No publishable platforms selected');
+        Insights.toast('None of the ticked posts go to a platform Insights can publish to.', 'info');
         return;
     }
 
     const missing = [...new Set(postsToPublish.map(p => p.platform))].filter(p => !platformConnected(p));
     if (missing.length) {
-        alert('Please connect these platforms first: ' + missing.map(p => PLATFORM_LABELS[p] || p).join(', '));
+        Insights.toast('Please connect these platforms first: ' + missing.map(p => PLATFORM_LABELS[p] || p).join(', '), 'warning');
         return;
     }
 
-    if (scoped) {
-        // Publishing thousands of posts to real accounts — require a strong,
-        // count-based confirmation that cannot be undone.
-        if (!confirm(`⚠️ Immediately publish ${postsToPublish.length} post${postsToPublish.length !== 1 ? 's' : ''} to your connected accounts?\n\nThis publishes across every page and cannot be undone.`)) {
-            return;
-        }
-    } else if (!confirm(`Post ${postsToPublish.length} selected post${postsToPublish.length !== 1 ? 's' : ''} now? This will publish them immediately to their platforms.`)) {
-        return;
-    }
+    // Publishing to real accounts: name the count and the platforms. Across
+    // every page it can be thousands, so that one starts on Cancel.
+    const count = postsToPublish.length;
+    const plural = count !== 1 ? 's' : '';
+    const where = platformList([...new Set(postsToPublish.map(p => p.platform))]);
+    const sure = await Insights.confirm(scoped ? {
+        title: `Publish ${count} post${plural} now?`,
+        body: `Every matching post across every page goes live at once on ${where}. This cannot be undone.`,
+        confirmLabel: `Publish ${count} post${plural}`,
+        danger: true,
+    } : {
+        title: `Post ${count} selected post${plural} now?`,
+        body: `They go live at once on ${where}. This cannot be undone.`,
+        confirmLabel: `Post ${count} now`,
+    });
+    if (!sure) return;
 
     const btn = document.getElementById('post-now-selected-btn');
     const originalText = btn.innerHTML;
@@ -6534,14 +6699,14 @@ async function queueSelectedPosts() {
             SCOPE_QUEUEABLE_PLATFORMS.includes(p) && (selectAllScope.byPlatform || {})[p] > 0);
 
         if (queueablePlatforms.length === 0) {
-            alert('Nothing in the selection can be queued');
+            Insights.toast('Nothing in the selection can be queued', 'info');
             return;
         }
         // A platform that isn't connected is left out rather than holding up the rest.
         const notConnected = queueablePlatforms.filter(p => !platformConnected(p));
         const platformsToQueue = queueablePlatforms.filter(p => platformConnected(p));
         if (!platformsToQueue.length) {
-            alert('Please connect these platforms first: ' + platformList(notConnected));
+            Insights.toast('Please connect these platforms first: ' + platformList(notConnected), 'warning');
             return;
         }
 
@@ -6567,7 +6732,7 @@ async function queueSelectedPosts() {
         } catch (e) {
             queueBtn.innerHTML = originalText;
             queueBtn.disabled = false;
-            alert('Error: ' + e.message);
+            Insights.toast(Insights.explain(e, 'Could not queue the posts.'), 'error');
             return;
         }
 
@@ -6601,7 +6766,7 @@ async function queueSelectedPosts() {
     });
 
     if (candidates.length === 0) {
-        alert('The selected posts are already queued on every platform they go to');
+        Insights.toast('The selected posts are already queued on every platform they go to', 'info');
         return;
     }
 
@@ -6609,7 +6774,7 @@ async function queueSelectedPosts() {
     const notConnected = [...new Set(candidates.map(p => p.platform))].filter(p => !platformConnected(p));
     const postsToQueue = candidates.filter(p => platformConnected(p.platform));
     if (!postsToQueue.length) {
-        alert('Please connect these platforms first: ' + platformList(notConnected));
+        Insights.toast('Please connect these platforms first: ' + platformList(notConnected), 'warning');
         return;
     }
 
@@ -6663,7 +6828,7 @@ async function queueSelectedPosts() {
     // an image" is the likely answer, and a bare count hides it.
     const problems = [...new Set(errors)];
     if (notConnected.length) problems.push('Not connected, so not queued: ' + platformList(notConnected));
-    if (problems.length) alert(problems.join('\n'));
+    if (problems.length) Insights.toast(problems.join('\n'), errorCount ? 'error' : 'warning');
 
     toggleSelectMode();
 }
@@ -6684,53 +6849,58 @@ async function unqueueSelectedPosts() {
     });
 
     if (postsToUnqueue.length === 0) {
-        alert('No queued posts selected');
+        Insights.toast('None of the ticked posts are queued, so there is nothing to remove.', 'info');
         return;
     }
 
-    if (!confirm(`Remove ${postsToUnqueue.length} post${postsToUnqueue.length !== 1 ? 's' : ''} from the queue?`)) {
-        return;
-    }
-
-    const unqueueBtn = document.getElementById('unqueue-selected-btn');
-    const originalText = unqueueBtn.innerHTML;
-    unqueueBtn.innerHTML = '⏳ Removing...';
-    unqueueBtn.disabled = true;
-
-    let successCount = 0;
-    let errorCount = 0;
-
-    for (const post of postsToUnqueue) {
-        try {
-            const response = await fetch(`/compose/post/${post.postId}/unqueue`, {
-                method: 'POST'
-            });
-            const data = await response.json();
-
-            if (data.success) {
-                successCount++;
-                setChipQueuedUI(post.queueBtn, false);
-            } else {
-                errorCount++;
+    // The chips show "not queued" at once and go back on Undo; the requests are
+    // sent when the Undo window closes. Select mode ends now, so the same posts
+    // cannot be sent twice.
+    const n = postsToUnqueue.length;
+    postsToUnqueue.forEach(post => {
+        post.before = { html: post.queueBtn.innerHTML, title: post.queueBtn.title, queued: post.queueBtn.dataset.queued };
+    });
+    const putBack = (post) => {
+        post.queueBtn.innerHTML = post.before.html;
+        post.queueBtn.title = post.before.title;
+        post.queueBtn.dataset.queued = post.before.queued;
+        post.queueBtn.classList.add('is-queued');
+    };
+    const result = await Insights.deferred(async (o) => {
+        for (const post of postsToUnqueue) {
+            try {
+                const response = await fetch(`/compose/post/${post.postId}/unqueue`, {
+                    method: 'POST',
+                    keepalive: o.keepalive,
+                });
+                const data = await response.json();
+                post.ok = !!data.success;
+            } catch (e) {
+                post.ok = false;
             }
-        } catch (e) {
-            errorCount++;
         }
-    }
+        // Every one failing is a failure (all come back); some failing is
+        // reported below, with just those put back.
+        if (!postsToUnqueue.some(post => post.ok)) throw new Error('Insights could not remove them. Try again in a moment.');
+        return postsToUnqueue;
+    }, {
+        message: `Removed ${n} post${n !== 1 ? 's' : ''} from the queue.`,
+        hide: () => {
+            postsToUnqueue.forEach(post => setChipQueuedUI(post.queueBtn, false));
+            if (selectModeActive) toggleSelectMode();
+        },
+        restore: () => postsToUnqueue.forEach(putBack),
+        failMessage: `Could not remove the ${n === 1 ? 'post' : n + ' posts'} from the queue, so ${n === 1 ? 'it is' : 'they are'} still queued.`,
+    });
+    if (!result.committed) return;
 
+    const failed = postsToUnqueue.filter(post => !post.ok);
+    failed.forEach(putBack);
+    if (failed.length) {
+        showToast(`Removed ${n - failed.length}, failed ${failed.length}: those are still queued.`, 'warning');
+    }
     // An unqueued card may no longer belong in the list ("Queued").
     await Promise.all(cards.map(card => recheckCardFilters(card.postItem)));
-
-    unqueueBtn.innerHTML = originalText;
-    unqueueBtn.disabled = false;
-
-    if (errorCount === 0) {
-        showToast(`Removed ${successCount} post${successCount !== 1 ? 's' : ''} from queue`, 'success');
-    } else {
-        showToast(`Removed ${successCount}, failed ${errorCount}`, errorCount > successCount ? 'error' : 'warning');
-    }
-
-    toggleSelectMode();
 }
 
 // ============ Bulk: add or remove a platform on the selected posts ============
@@ -6743,10 +6913,6 @@ let bulkPlatformMode = 'add';   // 'add' | 'remove'
 let bulkPlatformBusy = false;
 let bulkPlatformReloadOnClose = false;
 
-const BULK_PLATFORM_ENDPOINTS = {
-    add: '/compose/posts/bulk-add-platform',
-    remove: '/compose/posts/bulk-remove-platform',
-};
 
 // Cards per request when the selected cards are on this page. Each request hands
 // back the redrawn cards, so batching keeps replies small and gives progress.
@@ -6785,7 +6951,7 @@ function bulkPlatformPresence() {
 function showBulkPlatformModal(mode) {
     const count = bulkPlatformCount();
     if (count === 0) {
-        alert('No posts selected');
+        Insights.toast('Tick the posts to change first.', 'info');
         return;
     }
 
@@ -6904,7 +7070,11 @@ function setBulkPlatformBusy(busy, progress) {
 }
 
 async function postBulkPlatform(body) {
-    const res = await fetch(BULK_PLATFORM_ENDPOINTS[bulkPlatformMode], {
+    // ux-undo-ok: what a bulk removal takes is the server's call (queued and published rows stay unless opted in) and the modal reports it card by card, so nothing can be hidden ahead of the answer; Add Platform puts a platform back.
+    const endpoint = bulkPlatformMode === 'remove'
+        ? '/compose/posts/bulk-remove-platform'
+        : '/compose/posts/bulk-add-platform';
+    const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -6987,10 +7157,18 @@ async function applyBulkPlatform() {
     if (scoped) {
         const names = bulkPlatformChips().map(chip => chip.dataset.label).join(', ');
         const what = `all ${total} ${scopeLabel(selectAllScope.filters, total)} across every page`;
-        const question = removing
-            ? `Remove ${names} from ${what}${force ? ', including queued and published ones' : ''}? This cannot be undone.`
-            : `Add ${names} to ${what}${queue ? ' and queue them' : ''}?`;
-        if (!confirm(question)) return;
+        const sure = await Insights.confirm(removing ? {
+            title: `Remove ${names} from ${what}?`,
+            body: (force ? 'Queued and published ones go too. ' : 'Queued and published ones are kept. ') +
+                  'This cannot be undone.',
+            confirmLabel: `Remove ${names}`,
+            danger: true,
+        } : {
+            title: `Add ${names} to ${what}${queue ? ' and queue them' : ''}?`,
+            body: 'Every matching post gets a copy for each platform you ticked, including the ones not loaded yet.',
+            confirmLabel: `Add ${names}`,
+        });
+        if (!sure) return;
     }
 
     // Adding says whether to queue; removing says whether queued and published
@@ -7170,65 +7348,63 @@ function selectedCardImageTargets() {
     };
 }
 
-function removeImageFromSelected() {
+// The images go from the cards at once and come back on Undo; the request is
+// sent when the Undo window closes. Select mode ends now, so the same posts
+// cannot be sent twice.
+async function removeImageFromSelected() {
     const { postIds, domIds } = selectedCardImageTargets();
 
     if (postIds.length === 0) {
-        alert('No posts selected');
+        Insights.toast('Tick the posts to remove images from first.', 'info');
         return;
     }
-    
-    if (!confirm(`Remove images from ${domIds.length} selected post${domIds.length !== 1 ? 's' : ''}?`)) {
-        return;
-    }
-    
-    const btn = document.getElementById('remove-image-selected-btn');
-    const originalText = btn.innerHTML;
-    btn.innerHTML = '⏳ Removing...';
-    btn.disabled = true;
-    
-    fetch('/compose/posts/bulk-image', {
+
+    const n = domIds.length;
+    const cards = domIds.map(postId => {
+        const preview = document.getElementById(`image-preview-${postId}`);
+        return {
+            postId,
+            preview,
+            addBtn: document.getElementById(`add-image-btn-${postId}`),
+            editForm: document.getElementById(`image-edit-form-${postId}`),
+            shown: !!preview && !preview.classList.contains('d-none'),
+        };
+    });
+    const result = await Insights.deferred(o => fetch('/compose/posts/bulk-image', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ post_ids: postIds, image_url: null })
-    })
-    .then(response => response.json())
-    .then(data => {
-        btn.innerHTML = originalText;
-        btn.disabled = false;
-        
-        if (data.success) {
-            // Update UI - hide image previews for selected posts
-            domIds.forEach(postId => {
-                const preview = document.getElementById(`image-preview-${postId}`);
-                const addBtn = document.getElementById(`add-image-btn-${postId}`);
-                const editForm = document.getElementById(`image-edit-form-${postId}`);
-                
-                if (preview) {
-                    preview.classList.add('d-none');
-                    const img = preview.querySelector('img');
-                    if (img) img.src = '';
-                }
-                if (addBtn) addBtn.classList.remove('d-none');
-                if (editForm) editForm.classList.add('d-none');
-                
-                // Clear hidden fields
-                const urlInput = document.getElementById(`image-url-input-${postId}`);
-                const finalInput = document.getElementById(`post-final-image-url-${postId}`);
-                if (urlInput) urlInput.value = '';
-                if (finalInput) finalInput.value = '';
+        body: JSON.stringify({ post_ids: postIds, image_url: null }),
+        keepalive: o.keepalive,
+    }).then(response => response.json().then(data => {
+        if (!response.ok || !data.success) throw { status: response.status, error: data.error };
+        return data;
+    })), {
+        message: `Removed the images from ${n} post${n !== 1 ? 's' : ''}.`,
+        hide: () => {
+            cards.forEach(c => {
+                if (c.preview) c.preview.classList.add('d-none');
+                if (c.addBtn) c.addBtn.classList.remove('d-none');
+                if (c.editForm) c.editForm.classList.add('d-none');
             });
-            
-            showToast(`Removed images from ${data.updated_count} posts`, 'success');
-            toggleSelectMode();
-        } else {
-            alert('Error: ' + (data.error || 'Failed to remove images'));
+            if (selectModeActive) toggleSelectMode();
+        },
+        restore: () => cards.forEach(c => {
+            if (c.preview) c.preview.classList.toggle('d-none', !c.shown);
+            if (c.addBtn) c.addBtn.classList.toggle('d-none', c.shown);
+        }),
+        failMessage: `Could not remove the images, so they are back.`,
+    });
+    if (!result.committed) return;
+    cards.forEach(c => {
+        if (c.preview) {
+            const img = c.preview.querySelector('img');
+            if (img) img.src = '';
         }
-    })
-    .catch(err => {
-        btn.innerHTML = originalText;
-        btn.disabled = false;
-        alert('Error removing images');
+        // Clear hidden fields
+        const urlInput = document.getElementById(`image-url-input-${c.postId}`);
+        const finalInput = document.getElementById(`post-final-image-url-${c.postId}`);
+        if (urlInput) urlInput.value = '';
+        if (finalInput) finalInput.value = '';
     });
 }
 
@@ -7237,7 +7413,7 @@ function showBulkAddImageModal() {
     const count = selected.length;
     
     if (count === 0) {
-        alert('No posts selected');
+        Insights.toast('Tick the posts to add an image to first.', 'info');
         return;
     }
     
@@ -7305,12 +7481,12 @@ function handleBulkAddImageFileSelect(input) {
             showToast('Image uploaded!', 'success');
         } else {
             preview.classList.add('d-none');
-            alert('Upload failed: ' + (data.error || 'Unknown error'));
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not upload the image.'), 'error');
         }
     })
     .catch(err => {
         preview.classList.add('d-none');
-        alert('Upload error');
+        Insights.toast(Insights.explain(err, 'Could not upload the image.'), 'error');
     });
 }
 
@@ -7327,7 +7503,8 @@ function previewBulkAddImageUrl() {
     };
     img.onerror = function() {
         preview.classList.add('d-none');
-        alert('Could not load image from URL');
+        Insights.fieldError(document.getElementById('bulk-add-image-url'),
+            'Could not load an image from this URL. Check that it is a public link to an image file.');
     };
     img.src = url;
 }
@@ -7377,7 +7554,7 @@ function applyBulkImage() {
             applyBulkImageWithUrl(urlInput);
             return;
         }
-        alert('Please select or upload an image first');
+        Insights.toast('Upload, paste or pick an image first.', 'warning');
         return;
     }
     
@@ -7388,7 +7565,7 @@ function applyBulkImageWithUrl(imageUrl) {
     const { postIds, domIds } = selectedCardImageTargets();
 
     if (postIds.length === 0) {
-        alert('No posts selected');
+        Insights.toast('Tick the posts to add an image to first.', 'info');
         return;
     }
     
@@ -7435,13 +7612,13 @@ function applyBulkImageWithUrl(imageUrl) {
             showToast(`Added image to ${data.updated_count} posts`, 'success');
             toggleSelectMode();
         } else {
-            alert('Error: ' + (data.error || 'Failed to add images'));
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not add the image.'), 'error');
         }
     })
     .catch(err => {
         btn.innerHTML = originalText;
         btn.disabled = false;
-        alert('Error adding images');
+        Insights.toast(Insights.explain(err, 'Could not add the image.'), 'error');
     });
 }
 
@@ -7451,22 +7628,33 @@ async function findStockImagesForSelected() {
     const postIds = cards.map(card => card.postItem.dataset.postId);
 
     if (postIds.length === 0) {
-        alert('No posts selected');
+        Insights.toast('Tick the posts to find images for first.', 'info');
         return;
     }
     
     // Check if stock images API is configured
-    const statusResponse = await fetch('/compose/stock-images/status');
-    const statusData = await statusResponse.json();
+    let statusData = {};
+    try {
+        const statusResponse = await fetch('/compose/stock-images/status');
+        statusData = await statusResponse.json();
+    } catch (e) {
+        Insights.toast(Insights.explain(e, 'Could not check the stock image service.'), 'error');
+        return;
+    }
     
     if (!statusData.configured) {
-        alert('Stock image API not configured.\n\nAdd UNSPLASH_ACCESS_KEY to your .env file to enable this feature (free!).\n\nSign up at: https://unsplash.com/developers');
+        Insights.toast('Stock images are not set up yet. Add UNSPLASH_ACCESS_KEY to your .env file ' +
+            '(a free key from https://unsplash.com/developers), then restart Insights.', 'warning');
         return;
     }
     
-    if (!confirm(`Find and add stock images to ${postIds.length} selected post${postIds.length !== 1 ? 's' : ''}?\n\nThis will automatically search for relevant images based on each post's content.`)) {
-        return;
-    }
+    const n = postIds.length;
+    const sure = await Insights.confirm({
+        title: `Find stock images for ${n} post${n !== 1 ? 's' : ''}?`,
+        body: 'Insights searches Unsplash using each post\'s text and adds the best match. Posts that already have an image are skipped.',
+        confirmLabel: `Find ${n} image${n !== 1 ? 's' : ''}`,
+    });
+    if (!sure) return;
     
     const btn = document.getElementById('find-stock-images-btn');
     const originalText = btn.innerHTML;
@@ -7570,23 +7758,23 @@ function showQueueAllModal() {
 
 async function queueAllUnscheduled(platform) {
     if (platform === 'linkedin' && !linkedinConnected) {
-        alert('Please connect LinkedIn first');
+        Insights.toast('Please connect LinkedIn first', 'warning');
         return;
     }
     if (platform === 'threads' && !threadsConnected) {
-        alert('Please connect Threads first');
+        Insights.toast('Please connect Threads first', 'warning');
         return;
     }
     if (platform === 'facebook' && !facebookConnected) {
-        alert('Please connect Facebook first');
+        Insights.toast('Please connect Facebook first', 'warning');
         return;
     }
     if (platform === 'twitter' && !twitterConnected) {
-        alert('Please connect X/Twitter first');
+        Insights.toast('Please connect X/Twitter first', 'warning');
         return;
     }
     if (platform === 'instagram' && !instagramConnected) {
-        alert('Please connect Instagram first');
+        Insights.toast('Please connect Instagram first', 'warning');
         return;
     }
 
@@ -7633,23 +7821,23 @@ async function queueAllBothPlatforms() {
     }
 
     if (linkedinCount > 0 && !linkedinConnected) {
-        alert('Please connect LinkedIn first to queue LinkedIn posts');
+        Insights.toast('Please connect LinkedIn first to queue LinkedIn posts', 'warning');
         return;
     }
     if (threadsCount > 0 && !threadsConnected) {
-        alert('Please connect Threads first to queue Threads posts');
+        Insights.toast('Please connect Threads first to queue Threads posts', 'warning');
         return;
     }
     if (facebookCount > 0 && !facebookConnected) {
-        alert('Please connect Facebook first to queue Facebook posts');
+        Insights.toast('Please connect Facebook first to queue Facebook posts', 'warning');
         return;
     }
     if (twitterCount > 0 && !twitterConnected) {
-        alert('Please connect X/Twitter first to queue Twitter posts');
+        Insights.toast('Please connect X/Twitter first to queue Twitter posts', 'warning');
         return;
     }
     if (instagramCount > 0 && !instagramConnected) {
-        alert('Please connect Instagram first to queue Instagram posts');
+        Insights.toast('Please connect Instagram first to queue Instagram posts', 'warning');
         return;
     }
     
@@ -7720,44 +7908,26 @@ async function queuePlatformPosts(platform) {
     return { success: 0, fail: 0 };
 }
 
-function clearAllPosts() {
-    if (!confirm('Clear ALL generated posts? This cannot be undone.')) return;
-    
-    fetch('/compose/clear-all', { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                const section = document.getElementById('saved-posts-section');
-                if (section) section.remove();
-                showToast(data.message, 'success');
-            }
-        });
+// Clears every saved post, loaded or not. The whole list goes at once and comes
+// back on Undo; nothing is sent until the Undo window closes.
+async function clearAllPosts() {
+    const section = document.getElementById('saved-posts-section');
+    const result = await Insights.deferred(o => fetch('/compose/clear-all', { method: 'POST', keepalive: o.keepalive })
+        .then(response => response.json().then(data => {
+            if (!response.ok || !data.success) throw { status: response.status, error: data.error };
+            return data;
+        })), {
+        message: 'Cleared every saved post.',
+        hide: () => { if (section) section.hidden = true; },
+        restore: () => { if (section) section.hidden = false; },
+        failMessage: 'Could not clear the saved posts, so they are back.',
+    });
+    if (!result.committed) return;
+    if (section) section.remove();
+    showToast(result.value.message, 'success');
 }
 
-function showToast(message, type = 'info') {
-    const existingToast = document.getElementById('compose-toast');
-    if (existingToast) existingToast.remove();
-    
-    const toast = document.createElement('div');
-    toast.id = 'compose-toast';
-    toast.className = 'position-fixed bottom-0 end-0 p-3';
-    toast.style.zIndex = '9999';
-    
-    const bgClass = type === 'success' ? 'bg-success' : type === 'error' ? 'bg-danger' : type === 'warning' ? 'bg-warning text-dark' : 'bg-info';
-    const icon = type === 'success' ? '✅' : type === 'error' ? '❌' : type === 'warning' ? '⚠️' : 'ℹ️';
-    
-    toast.innerHTML = `
-        <div class="toast show align-items-center text-white ${bgClass} border-0" role="alert">
-            <div class="d-flex">
-                <div class="toast-body">${icon} ${message}</div>
-                <button type="button" class="btn-close btn-close-white me-2 m-auto" onclick="this.closest('#compose-toast').remove()"></button>
-            </div>
-        </div>
-    `;
-    
-    document.body.appendChild(toast);
-    setTimeout(() => { if (toast.parentNode) toast.remove(); }, 3000);
-}
+// showToast(message, type) is the shared one from static/insights-ui.js.
 
 // Post filtering functions
 // Discards a superseded filter render — changing two selects quickly fires two
@@ -8655,7 +8825,7 @@ async function postNowFromSearchResult(resultId, index) {
     const target = post && (post.targets || [])[index];
     if (!target) return;
     const label = target.account_label || PLATFORM_LABELS[target.platform] || target.platform;
-    if (!confirm(postNowConfirmText(target.platform, label))) return;
+    if (!(await Insights.confirm({ ...postNowConfirmText(target.platform, label), confirmLabel: 'Post now' }))) return;
 
     const pageCard = loadedCardFor(post.cardPostIds);
     showToast(`Posting to ${label}…`, 'info');
@@ -8669,7 +8839,7 @@ async function postNowFromSearchResult(resultId, index) {
 async function postAllFromSearchResult(resultId) {
     const post = searchResultPost(resultId);
     if (!post || !(post.targets || []).length) return;
-    if (!confirm(publishAllConfirmText(post.targets))) return;
+    if (!(await Insights.confirm({ ...publishAllConfirmText(post.targets), confirmLabel: 'Publish now' }))) return;
 
     const pageCard = loadedCardFor(post.cardPostIds);
     showToast('Posting…', 'info');
@@ -8693,7 +8863,7 @@ async function scheduleFromSearchResult(resultId, index) {
     const target = post && (post.targets || [])[index];
     if (!target) return;
     if (!platformConnected(target.platform)) {
-        alert(`Please connect ${PLATFORM_LABELS[target.platform] || target.platform} first`);
+        Insights.toast(`Please connect ${PLATFORM_LABELS[target.platform] || target.platform} first`, 'warning');
         return;
     }
     await hideSearchModal();
@@ -8705,14 +8875,15 @@ async function deleteSearchResult(resultId) {
     const post = searchResultPost(resultId);
     if (!post) return;
     const platforms = (post.targets || []).length ? post.targets.map(t => t.platform) : post.platforms;
-    if (!confirm(deleteConfirmText(platforms))) return;
-
-    try {
-        await requestDeleteCard(post.cardId, post.cardPostIds);
-    } catch (e) {
-        showToast('Could not delete: ' + e.message, 'error');
-        return;
-    }
+    // The result and the card on the page (when it is loaded) go at once and
+    // come back on Undo; nothing is sent until the Undo window closes.
+    const shown = () => [document.querySelector(`.search-result-card[data-post-id="${post.id}"]`),
+                         loadedCardFor(post.cardPostIds)].filter(Boolean);
+    let hidden = [];
+    const result = await deferDeleteCard(post.cardId, post.cardPostIds, platforms,
+        () => { hidden = shown(); hidden.forEach(el => { el.hidden = true; }); },
+        () => { hidden.forEach(el => { el.hidden = false; }); });
+    if (!result.committed) return;
     const pageCard = loadedCardFor(post.cardPostIds);
     if (pageCard) pageCard.remove();
     noteCardDeleted(!!pageCard);
@@ -8760,7 +8931,7 @@ function updateReplacementPreviewForPost(postId) {
     }
 }
 
-function executeReplaceAll() {
+async function executeReplaceAll() {
     const findText = document.getElementById('search-find-input').value;
     const replaceText = document.getElementById('search-replace-input').value;
     const caseSensitive = document.getElementById('search-case-sensitive').checked;
@@ -8768,13 +8939,13 @@ function executeReplaceAll() {
     const excludeWordsInput = document.getElementById('search-exclude-words').value;
 
     if (!findText.trim()) {
-        alert('Please enter text to find');
+        Insights.fieldError(document.getElementById('search-find-input'), 'Type the text to find first.', { focus: true });
         return;
     }
 
     const rendered = Array.from(document.querySelectorAll('.search-post-checkbox'));
     if (rendered.length === 0 || rendered.every(cb => !cb.checked)) {
-        alert('No posts selected');
+        Insights.toast('Tick at least one post to replace in.', 'info');
         return;
     }
     // The server re-runs the search and replaces in every match, so it only
@@ -8782,8 +8953,13 @@ function executeReplaceAll() {
     const deselectedIds = rendered.filter(cb => !cb.checked).map(cb => cb.dataset.postId);
 
     const targetCount = searchResultInfo.matchedPosts - deselectedIds.length;
-    if (searchResultInfo.truncated &&
-        !confirm(`Replace in ${targetCount} post${targetCount !== 1 ? 's' : ''}? Only ${rendered.length} of them are shown here.`)) {
+    // Only asked when some of the posts are not shown, so the user knows the
+    // reach of it; a replace over what is on screen goes at once.
+    if (searchResultInfo.truncated && !(await Insights.confirm({
+        title: `Replace in ${targetCount} post${targetCount !== 1 ? 's' : ''}?`,
+        body: `Only ${rendered.length} of them are shown here; the rest change the same way.`,
+        confirmLabel: `Replace in ${targetCount}`,
+    }))) {
         return;
     }
 
@@ -8818,13 +8994,13 @@ function executeReplaceAll() {
             // Reload to show updated content
             setTimeout(() => location.reload(), 500);
         } else {
-            alert('Error: ' + (data.error || 'Failed to replace'));
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not replace the text.'), 'error');
             btn.innerHTML = originalText;
             btn.disabled = false;
         }
     })
     .catch(error => {
-        alert('Error: ' + error.message);
+        Insights.toast(Insights.explain(error, 'Could not replace the text.'), 'error');
         btn.innerHTML = originalText;
         btn.disabled = false;
     });
@@ -8953,14 +9129,13 @@ function createManualPost() {
     const textarea = document.getElementById('add-post-textarea');
     const content = textarea.value.trim();
     if (!content) {
-        alert('Please write some content for your post.');
-        textarea.focus();
+        Insights.fieldError(textarea, 'Write some content for your post first.', { focus: true });
         return;
     }
 
     const targets = newPostTargets();
     if (targets.length === 0) {
-        alert('Tick at least one account for this post.');
+        Insights.toast('Tick at least one account for this post.', 'warning');
         return;
     }
 
@@ -8991,16 +9166,21 @@ function createManualPost() {
             // The page reloads to show the new card, which would wipe a toast,
             // so what the platforms will make of the video is said up front.
             const problems = (data.video_warnings || []).map(w => (w.level === 'error' ? '⛔ ' : '⚠️ ') + w.message);
-            if (problems.length) alert('Post saved. Heads up about the video:\n\n' + problems.join('\n'));
+            if (problems.length) {
+                const note = 'Post saved. Heads up about the video:\n\n' + problems.join('\n');
+                Insights.toast(note, { type: 'warning', duration: 0 });
+                try { sessionStorage.setItem('compose-notice', note); } catch (e) { /* private mode: shown once only */ }
+            }
             location.reload();
         } else {
-            alert('Error: ' + (data.error || 'Failed to create post'));
+            // The text, the ticks and the video stay, so the fix is one edit away.
+            Insights.toast(Insights.explain({ error: data.error }, 'Could not save the post.'), 'error');
             saveBtn.innerHTML = originalText;
             saveBtn.disabled = false;
         }
     })
     .catch(error => {
-        alert('Error: ' + error.message);
+        Insights.toast(Insights.explain(error, 'Could not save the post.'), 'error');
         saveBtn.innerHTML = originalText;
         saveBtn.disabled = false;
     });
@@ -9285,8 +9465,8 @@ function importFile() {
         const id = document.getElementById('lib-edit-id').value;
         const title = document.getElementById('lib-title-input').value.trim();
         const content = document.getElementById('lib-content-input').value.trim();
-        if (!title) { alert('Please give the prompt a name.'); return; }
-        if (!content) { alert('Prompt text cannot be empty.'); return; }
+        if (!title) { Insights.fieldError(document.getElementById('lib-title-input'), 'Give the prompt a name.', { focus: true }); return; }
+        if (!content) { Insights.fieldError(document.getElementById('lib-content-input'), 'Write the prompt text.', { focus: true }); return; }
         const url = id ? '{{ url_for("compose_library_update") }}' : '{{ url_for("compose_library_save") }}';
         const payload = id ? { id: parseInt(id, 10), title: title, content: content } : { title: title, content: content };
         const btn = document.getElementById('lib-save-btn');
@@ -9304,10 +9484,10 @@ function importFile() {
                     resetLibraryForm();
                     renderLibraryLists();
                 } else {
-                    alert('Error: ' + (data.error || 'Failed to save prompt'));
+                    Insights.toast(Insights.explain({ error: data.error }, 'Could not save the prompt.'), 'error');
                 }
             })
-            .catch(function (e) { btn.disabled = false; alert('Error: ' + e.message); });
+            .catch(function (e) { btn.disabled = false; Insights.toast(Insights.explain(e, 'Could not save the prompt.'), 'error'); });
     };
 
     window.editLibraryPrompt = function (id) {
@@ -9322,49 +9502,82 @@ function importFile() {
         document.getElementById('lib-title-input').focus();
     };
 
+    // A reply that is not a success is a failure, so Insights.deferred puts the item back.
+    function okJson(r) {
+        return r.json().then(function (data) {
+            if (!r.ok || !data.success) throw { status: r.status, error: data.error };
+            return data;
+        });
+    }
+
+    // Deletes below go from the list at once and come back on Undo; the request
+    // is sent when the Undo window closes.
     window.deleteLibraryPrompt = function (id) {
-        if (!confirm('Delete this saved prompt? This cannot be undone.')) return;
-        fetch('{{ url_for("compose_library_delete") }}', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: id }),
-        })
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
-                if (data.success) {
-                    syncLibrary(data.prompts);
-                    renderLibraryLists();
-                } else {
-                    alert('Error: ' + (data.error || 'Failed to delete'));
-                }
-            })
-            .catch(function (e) { alert('Error: ' + e.message); });
+        const at = libraryPrompts.findIndex(function (x) { return x.id === id; });
+        if (at === -1) return;
+        const prompt = libraryPrompts[at];
+        return Insights.deferred(function (o) {
+            return fetch('{{ url_for("compose_library_delete") }}', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: id }),
+                keepalive: o.keepalive,
+            }).then(okJson);
+        }, {
+            message: 'Deleted the prompt "' + prompt.title + '".',
+            hide: function () { libraryPrompts.splice(at, 1); renderLibraryLists(); },
+            restore: function () {
+                if (libraryPrompts.indexOf(prompt) === -1) libraryPrompts.splice(at, 0, prompt);
+                renderLibraryLists();
+            },
+            failMessage: 'Could not delete the prompt, so it is back.',
+        }).then(function (result) {
+            if (result.committed && result.value.prompts) { syncLibrary(result.value.prompts); renderLibraryLists(); }
+            return result;
+        });
     };
 
     window.deleteRecentByIndex = function (i) {
         const arr = getRecent();
         if (!arr[i]) return;
-        const content = arr[i].content;
-        const fd = new FormData();
-        fd.append('prompt', content);
-        fetch('{{ url_for("compose_delete_prompt") }}', { method: 'POST', body: fd })
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
-                if (data.success) {
-                    const idx = arr.findIndex(function (x) { return x.content === content; });
-                    if (idx > -1) arr.splice(idx, 1);
-                    renderLibraryLists();
-                }
-            });
+        const entry = arr[i];
+        return Insights.deferred(function (o) {
+            const fd = new FormData();
+            fd.append('prompt', entry.content);
+            return fetch('{{ url_for("compose_delete_prompt") }}', { method: 'POST', body: fd, keepalive: o.keepalive })
+                .then(okJson);
+        }, {
+            message: 'Removed the prompt from your recent history.',
+            hide: function () {
+                const idx = arr.indexOf(entry);
+                if (idx > -1) arr.splice(idx, 1);
+                renderLibraryLists();
+            },
+            restore: function () {
+                if (arr.indexOf(entry) === -1) arr.splice(Math.min(i, arr.length), 0, entry);
+                renderLibraryLists();
+            },
+            failMessage: 'Could not remove the prompt from your history, so it is back.',
+        });
     };
 
     window.clearRecentFromLibrary = function () {
-        if (!confirm('Clear all recent prompt history? This cannot be undone.')) return;
-        fetch('{{ url_for("compose_clear_prompts") }}', { method: 'POST' })
-            .then(function (r) { return r.json(); })
-            .then(function (data) {
-                if (data.success) { getRecent().length = 0; renderLibraryLists(); }
-            });
+        const arr = getRecent();
+        if (!arr.length) return;
+        const saved = arr.slice();
+        return Insights.deferred(function (o) {
+            return fetch('{{ url_for("compose_clear_prompts") }}', { method: 'POST', keepalive: o.keepalive })
+                .then(okJson);
+        }, {
+            message: 'Cleared ' + saved.length + ' recent prompt' + (saved.length === 1 ? '' : 's') + '.',
+            hide: function () { arr.length = 0; renderLibraryLists(); },
+            restore: function () {
+                arr.length = 0;
+                saved.forEach(function (x) { arr.push(x); });
+                renderLibraryLists();
+            },
+            failMessage: 'Could not clear your recent prompts, so they are back.',
+        });
     };
 
     window.renderLibraryLists = function () {

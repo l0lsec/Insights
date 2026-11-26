@@ -22,9 +22,9 @@ Modes, each a gate in run_all_gates.py:
     zero        no template has alert(, confirm( or its own showToast   UX_ZERO_DEBT_OK
     harness     harnesses that fake the dialogs also fake Insights into the same log   UX_HARNESS_PARITY_OK
     undo        deletes wait behind Insights.deferred; exits ask with a named confirm   UX_UNDO_OK
+    disabled-states  compose, schedule, accounts disable what cannot work and say why   UX_DISABLED_STATES_OK
+    flows       getting-started card from live data; queue/publish end on the next step   UX_FLOWS_OK
 zero and undo take template paths after the mode to check only those files.
-Later rollout phases (disabled-states, flows) are listed in docs/ux-rollout/GATES.md
-and fail here as not built yet.
 """
 
 import glob
@@ -114,6 +114,10 @@ def template_files():
     every = sorted(glob.glob(os.path.join(TEMPLATES, "**", "*.html"), recursive=True))
     if ONLY:
         wanted = {os.path.abspath(os.path.join(ROOT, p)) for p in ONLY}
+        unknown = sorted(wanted - {os.path.abspath(p) for p in every})
+        if unknown:
+            # A path that names no template would otherwise scan nothing and pass.
+            fail(f"not a template under templates/: {', '.join(os.path.relpath(u, ROOT) for u in unknown)}")
         return [p for p in every if os.path.abspath(p) in wanted]
     return every
 
@@ -230,7 +234,7 @@ LAWS = ["Hick", "Fitts", "Jakob", "Proximity", "Miller", "Doherty", "Von Restorf
         "Prevent Errors", "Errors Recoverable", "Similarity", "Uniform Connectedness",
         "Parkinson", "Tesler", "Goal-Gradient"]
 PIECES = ["Insights.toast", "Insights.confirm", "Insights.busy", "Insights.explain",
-          "Insights.fieldError", "Insights.deferred"]
+          "Insights.fieldError", "Insights.deferred", "Insights.done", "data-confirm", "data-undo"]
 
 
 def mode_principles():
@@ -297,7 +301,7 @@ def mode_shell():
         if boot_tag.search(text) and "{% extends" in text:
             fail(f"{rel(path)} extends base.html and loads Bootstrap's JS a second time")
     js = read(UI_JS)
-    for name in ("toast", "confirm", "busy", "explain", "fieldError", "deferred"):
+    for name in ("toast", "confirm", "busy", "explain", "fieldError", "deferred", "done"):
         if not re.search(rf"\b{name}: {name}\b", js):
             fail(f"insights-ui.js does not export Insights.{name}")
     if "global.showToast = function" not in js:
@@ -367,6 +371,7 @@ MUTANTS = [
     ("a data-confirm form submits without asking", "if (!wantsConfirm && !wantsUndo) return;\n        event.preventDefault();",
      "if (!wantsConfirm && !wantsUndo) return;"),
     ("a data-undo row stays visible", "hide: function () { row.hidden = true; },", "hide: function () {},"),
+    ("done hides the next step", "opts.action = { label: next.label, run: next.run || function () { global.location.href = next.href; } };", ""),
     ("a data-confirm button runs its handler on Cancel", "if (event.stopImmediatePropagation) event.stopImmediatePropagation();", ""),
 ]
 
@@ -573,8 +578,8 @@ URL_LITERAL = re.compile(r"""`[^`]*`|'[^'\n]*'|"[^"\n]*"|method\s*:\s*['"]DELETE
 INSIDE_NAME = re.compile(r"""url_for\(\s*["'][^"']*(?:delete|remove|clear|unqueue|cancel)[^"']*["']""")
 LEAVES_NAME = re.compile(r"""url_for\(\s*["'][^"']*(?:disconnect|publish|post_now|send)[^"']*["']""")
 GENERIC_LABELS = {"ok", "yes", "confirm", "continue", "proceed", "sure"}
-UNDO_MARK = re.compile(r"ux-undo-ok:\s*\S")
-CONFIRM_MARK = re.compile(r"ux-confirm-ok:\s*\S")
+UNDO_MARK = re.compile(r"ux-undo-ok:\s*\S[^\n]{0,100}")
+CONFIRM_MARK = re.compile(r"ux-confirm-ok:\s*\S[^\n]{0,100}")
 
 
 def _call_text(js, start):
@@ -661,13 +666,246 @@ def mode_undo():
     print("UX_UNDO_OK")
 
 
+# ------------------------------------------------------------- rendered pages
+
+from html.parser import HTMLParser
+
+VOID = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"}
+
+
+class _El:
+    def __init__(self, tag, attrs, parent):
+        self.tag, self.attrs, self.parent, self.kids, self.text = tag, dict(attrs), parent, [], []
+
+    def all(self):
+        for k in self.kids:
+            yield k
+            yield from k.all()
+
+    def find(self, pred):
+        return [e for e in self.all() if pred(e)]
+
+    def content(self):
+        return " ".join(" ".join(self.text).split() + [k.content() for k in self.kids]).strip()
+
+    def has(self, name):
+        return name in self.attrs
+
+    def cls(self, name):
+        return name in (self.attrs.get("class") or "").split()
+
+
+class _Tree(HTMLParser):
+    def __init__(self, html):
+        super().__init__(convert_charrefs=True)
+        self.root = _El("#root", {}, None)
+        self.cur = self.root
+        self.feed(html)
+
+    def handle_starttag(self, tag, attrs):
+        el = _El(tag, attrs, self.cur)
+        self.cur.kids.append(el)
+        if tag not in VOID:
+            self.cur = el
+
+    def handle_endtag(self, tag):
+        node = self.cur
+        while node is not self.root and node.tag != tag:
+            node = node.parent
+        if node is not self.root:
+            self.cur = node.parent
+
+    def handle_data(self, data):
+        if self.cur.tag not in ("script", "style"):
+            self.cur.text.append(data)
+
+
+def _dom(html):
+    return _Tree(html).root
+
+
+def _by_id(root, ident):
+    hit = root.find(lambda e: e.attrs.get("id") == ident)
+    return hit[0] if hit else None
+
+
+def _reason_for(root, el):
+    """The element that says why `el` is disabled, via aria-describedby, or None."""
+    for ident in (el.attrs.get("aria-describedby") or "").split():
+        target = _by_id(root, ident)
+        if target is not None and target.content():
+            return target
+    return None
+
+
+def _app():
+    sys.path.insert(0, HERE)
+    import _gate_common
+    return _gate_common.isolated_app()
+
+
+# ------------------------------------------------- disabled with a reason (G9)
+
+def mode_disabled_states():
+    problems = []
+    _dir, database, web, client = _app()
+    db = database.DB_PATH
+    post = database.add_standalone_post("freeform", "x", "linkedin", "A post for LinkedIn", db_path=db)
+
+    def card(html):
+        root = _dom(html)
+        hit = root.find(lambda e: e.cls("post-item") and e.attrs.get("data-post-id") == str(post))
+        return root, (hit[0] if hit else None)
+
+    # 1. Nothing connected: posting or queueing to LinkedIn cannot work yet.
+    root, c = card(client.get("/compose").get_data(as_text=True))
+    if c is None:
+        problems.append("compose: the seeded post's card did not render")
+    else:
+        post_now = c.find(lambda e: e.tag == "button" and "Post to" in e.content() and "now" in e.content()
+                          and "LinkedIn" in e.content())
+        queue = c.find(lambda e: e.tag == "button" and e.cls("chip-queue"))
+        for label, found in (("the Post to LinkedIn now item", post_now), ("the chip's queue button", queue)):
+            if not found:
+                problems.append(f"compose: {label} is missing")
+                continue
+            b = found[0]
+            if not b.has("disabled"):
+                problems.append(f"compose: {label} is clickable with no LinkedIn account connected")
+            why = _reason_for(root, b)
+            if why is None or "connect" not in why.content().lower():
+                problems.append(f"compose: {label} does not say why (aria-describedby to text naming Connect)")
+            elif not why.find(lambda e: e.tag == "a" and (e.attrs.get("href") or "").startswith("/accounts")):
+                problems.append("compose: the reason does not link to Accounts, where it gets fixed")
+
+    # 2. Connected: the same controls work and no reason is shown.
+    database.upsert_social_account("linkedin", "urn:li:person:gate", display_name="Gate", db_path=db)
+    root, c = card(client.get("/compose").get_data(as_text=True))
+    if c is not None:
+        post_now = c.find(lambda e: e.tag == "button" and "Post to" in e.content() and "LinkedIn" in e.content())
+        if post_now and post_now[0].has("disabled"):
+            problems.append("compose: Post to LinkedIn stays disabled once LinkedIn is connected")
+        if c.find(lambda e: e.cls("card-why")):
+            problems.append("compose: the 'connect first' reason still shows once LinkedIn is connected")
+
+    # 3. Schedule with nothing pending: Clear Pending has nothing to clear.
+    root = _dom(client.get("/schedule").get_data(as_text=True))
+    clear = root.find(lambda e: e.tag == "button" and "Clear Pending" in e.content())
+    if not clear:
+        problems.append("schedule: the Clear Pending button is missing")
+    elif not clear[0].has("disabled") or _reason_for(root, clear[0]) is None:
+        problems.append("schedule: Clear Pending is clickable (or unexplained) with an empty queue")
+    database.add_scheduled_post(scheduled_for="2099-01-01T09:00:00", post_type="standalone", standalone_post_id=post, platform="linkedin",
+                                status="pending", db_path=db)
+    root = _dom(client.get("/schedule").get_data(as_text=True))
+    clear = root.find(lambda e: e.tag == "button" and "Clear Pending" in e.content())
+    if clear and clear[0].has("disabled"):
+        problems.append("schedule: Clear Pending stays disabled with a post pending")
+
+    # 4. Accounts: a platform without API credentials cannot be connected.
+    real = web._platform_is_configured
+    web._platform_is_configured = lambda platform: platform != "facebook"
+    try:
+        root = _dom(client.get("/accounts").get_data(as_text=True))
+    finally:
+        web._platform_is_configured = real
+    block = root.find(lambda e: e.cls("account-platform") and e.attrs.get("data-platform") == "facebook")
+    if not block:
+        problems.append("accounts: the Facebook block is missing")
+    else:
+        btn = block[0].find(lambda e: e.tag == "button" and "Connect" in e.content())
+        if not btn or not btn[0].has("disabled"):
+            problems.append("accounts: an unconfigured platform has no disabled Connect button")
+        else:
+            why = _reason_for(root, btn[0])
+            if why is None or ".env" not in why.content():
+                problems.append("accounts: the disabled Connect does not say the API keys go in .env")
+        live = root.find(lambda e: e.cls("account-platform") and e.attrs.get("data-platform") == "linkedin")
+        if live and live[0].find(lambda e: e.tag == "button" and "Connect" in e.content() and e.has("disabled")):
+            problems.append("accounts: a configured platform's Connect is disabled")
+
+    if problems:
+        for p in problems:
+            print(f"  {p}")
+        fail(f"{len(problems)} impossible actions are clickable or unexplained")
+    print("compose, schedule and accounts disable what cannot work yet and say why, next to it, with the fix")
+    print("UX_DISABLED_STATES_OK")
+
+
+# ----------------------------------------------------------------- flows (G11)
+
+def _first_run(html):
+    root = _dom(html)
+    card = _by_id(root, "first-run")
+    return root, card
+
+
+def mode_flows():
+    problems = []
+    _dir, database, web, client = _app()
+    db = database.DB_PATH
+
+    root, card = _first_run(client.get("/compose").get_data(as_text=True))
+    if card is None:
+        problems.append("a fresh install's Compose has no getting-started card")
+    else:
+        if "0 of 4 done" not in card.content():
+            problems.append(f"the fresh checklist does not read 0 of 4 done: {card.content()[:120]}")
+        go = card.find(lambda e: e.tag == "a" and e.cls("btn-primary"))
+        if len(go) != 1 or go[0].attrs.get("href") != "/accounts":
+            problems.append("the fresh checklist's one primary action is not Connect an account (/accounts)")
+
+    account = database.upsert_social_account("linkedin", "urn:li:person:flow", display_name="Flow", db_path=db)
+    post = database.add_standalone_post("freeform", "x", "linkedin", "First post", db_path=db, account_id=account)
+    sched = database.add_scheduled_post(scheduled_for="2099-01-01T09:00:00", post_type="standalone", standalone_post_id=post,
+                                        platform="linkedin", status="pending", db_path=db)
+    root, card = _first_run(client.get("/compose").get_data(as_text=True))
+    if card is None:
+        problems.append("the checklist vanished before the last step was done")
+    else:
+        if "3 of 4 done" not in card.content():
+            problems.append(f"after connecting, writing and queueing it does not read 3 of 4 done: {card.content()[:120]}")
+        done_steps = [e.attrs.get("data-step") for e in card.find(lambda e: e.cls("is-done"))]
+        if done_steps != ["accounts", "posts", "queued"]:
+            problems.append(f"the done steps are {done_steps}, not accounts, posts, queued")
+        go = card.find(lambda e: e.tag == "a" and e.cls("btn-primary"))
+        if len(go) != 1 or go[0].attrs.get("href") != "/schedule":
+            problems.append("with only 'see it go out' left, the primary action is not Open Schedule")
+
+    database.update_scheduled_post_status(sched, "posted", db_path=db)
+    root, card = _first_run(client.get("/compose").get_data(as_text=True))
+    if card is not None:
+        problems.append("the checklist still shows once every step is done")
+
+    # The end of the queue and publish flows: what happened, and the next step.
+    js = "\n".join(body for _, body in _scripts_of(read(os.path.join(TEMPLATES, "compose.html"))))
+    spans = _function_spans(js)
+    for name in ("toggleQueue", "queueCardToAll", "postNowFromCard"):
+        m = re.search(r"(?:async\s+)?function\s+" + name + r"\s*\(", js)
+        if not m:
+            problems.append(f"compose.html has no function {name}")
+            continue
+        body = [js[s:e + 1] for s, e in spans if s > m.start() and s - m.end() < 400]
+        body = min(body, key=len) if body else ""
+        if not re.search(r"Insights\.done\([^;]*\{[^}]*label\s*:[^}]*(href|run)\s*:", body, re.S):
+            problems.append(f"{name} does not end with Insights.done(message, {{label, href}}) naming the next step")
+
+    if problems:
+        for p in problems:
+            print(f"  {p}")
+        fail(f"{len(problems)} flow problems")
+    print("the getting-started card counts real progress and leaves when done; queue and publish end on the next step")
+    print("UX_FLOWS_OK")
+
+
 BUILT = {
     "ratchet": "UX_RATCHET_OK", "control": "UX_CONTROL_OK", "principles": "UX_PRINCIPLES_OK",
     "claude-md": "UX_CLAUDE_MD_OK", "shell": "UX_SHELL_OK", "behavior": "UX_BEHAVIOR_OK",
     "targets": "UX_TARGETS_OK", "registered": "UX_REGISTERED_OK",
     "zero": "UX_ZERO_DEBT_OK", "harness": "UX_HARNESS_PARITY_OK", "undo": "UX_UNDO_OK",
+    "disabled-states": "UX_DISABLED_STATES_OK", "flows": "UX_FLOWS_OK",
 }
-LATER = {"disabled-states": "Phase 3", "flows": "Phase 4"}
+LATER = {}
 
 
 def mode_registered():
@@ -690,6 +928,7 @@ MODES = {
     "claude-md": mode_claude_md, "shell": mode_shell, "behavior": mode_behavior,
     "targets": mode_targets, "registered": mode_registered,
     "zero": mode_zero, "harness": mode_harness, "undo": mode_undo,
+    "disabled-states": mode_disabled_states, "flows": mode_flows,
     "--lower": mode_lower, "--init": mode_init,
 }
 

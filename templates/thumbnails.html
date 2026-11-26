@@ -575,7 +575,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     });
                     card.querySelector('.delete-thumb-btn').addEventListener('click', function(e) {
                         e.stopPropagation();
-                        deleteSavedItem(item.id);
+                        deleteSavedItem(item.id, card);
                     });
 
                     savedGrid.appendChild(card);
@@ -629,14 +629,16 @@ document.addEventListener('DOMContentLoaded', function() {
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
-    function deleteSavedItem(id) {
-        if (!confirm('Delete this saved thumbnail?')) return;
-        fetch('/thumbnails/saved/' + id, { method: 'DELETE' })
-            .then(r => r.json())
-            .then(data => {
-                if (data.error) { showError(data.error); return; }
-                loadSavedThumbnails();
-            });
+    // Stays inside Insights, so no question first: the card hides at once and the
+    // delete is sent after the Undo window. A failure puts the card back.
+    async function deleteSavedItem(id, card) {
+        const r = await Insights.deferred(o => fetch('/thumbnails/saved/' + id, { method: 'DELETE', keepalive: o.keepalive }), {
+            message: 'Deleted the saved thumbnail.',
+            hide: () => { if (card) card.hidden = true; },
+            restore: () => { if (card) card.hidden = false; },
+            failMessage: 'Could not delete the saved thumbnail, so it is back.'
+        });
+        if (r.committed) loadSavedThumbnails();
     }
 
     // Load saved thumbnails on page init

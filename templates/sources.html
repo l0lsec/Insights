@@ -293,26 +293,6 @@
     </div>
 </div>
 
-<!-- Delete Confirmation Modal -->
-<div class="modal fade" id="deleteModal" tabindex="-1" aria-hidden="true">
-    <div class="modal-dialog">
-        <div class="modal-content">
-            <div class="modal-header">
-                <h5 class="modal-title">Delete Source</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-            </div>
-            <div class="modal-body">
-                <p>Are you sure you want to delete "<strong id="deleteSourceTitle"></strong>"?</p>
-                <p class="text-muted small">This will remove the saved content but won't affect any posts already generated from it.</p>
-            </div>
-            <div class="modal-footer">
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
-                <button type="button" class="btn btn-danger" id="confirmDeleteBtn" onclick="deleteSource()">Delete</button>
-            </div>
-        </div>
-    </div>
-</div>
-
 <!-- Source Posts Modal -->
 <div class="modal fade" id="sourcePostsModal" tabindex="-1" aria-labelledby="sourcePostsModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-lg modal-dialog-scrollable">
@@ -339,7 +319,6 @@
 </div>
 
 <script>
-let deleteSourceId = null;
 let currentSourceId = null;
 let addUrlModal = null;
 
@@ -432,9 +411,20 @@ function renderSourcePosts(posts) {
     }).join('');
 }
 
-function repostSourcePost(postId, platform, btn, alreadyPosted) {
+async function repostSourcePost(postId, platform, btn, alreadyPosted) {
     const meta = PLATFORM_META[platform] || { label: platform };
-    if (alreadyPosted && !confirm(`Re-publish this post to ${meta.label}?`)) {
+    // Publishing leaves Insights, so it is asked every time, by name (law 14).
+    if (!(await Insights.confirm(alreadyPosted ? {
+        title: `Post this to ${meta.label} again?`,
+        body: `It is already on ${meta.label}. This publishes a second copy there, live at once.`,
+        confirmLabel: `Post again to ${meta.label}`,
+        danger: false
+    } : {
+        title: `Post this to ${meta.label} now?`,
+        body: `It goes live on ${meta.label} at once.`,
+        confirmLabel: `Post to ${meta.label}`,
+        danger: false
+    }))) {
         return;
     }
 
@@ -458,18 +448,18 @@ function repostSourcePost(postId, platform, btn, alreadyPosted) {
             } else {
                 btn.disabled = false;
                 btn.innerHTML = originalHtml;
-                const msg = data.error || 'Failed to post.';
+                const why = Insights.explain({ error: data.error, status }, `Could not post to ${meta.label}.`);
                 if (status === 401 || data.needs_configuration) {
-                    alert(`${meta.label}: ${msg}\n\nConnect or configure the account from the Status page.`);
+                    Insights.toast(`${why} Connect or configure the account from the Status page, then try again.`, 'error');
                 } else {
-                    alert(`${meta.label}: ${msg}`);
+                    Insights.toast(why, 'error');
                 }
             }
         })
-        .catch(() => {
+        .catch((err) => {
             btn.disabled = false;
             btn.innerHTML = originalHtml;
-            alert('Failed to post. Please try again.');
+            Insights.toast(Insights.explain(err, `Could not post to ${meta.label}.`), 'error');
         });
 }
 
@@ -770,7 +760,7 @@ function reextractSource() {
             reextractBtn.innerHTML = '🔄 Re-extract';
             
             if (data.error) {
-                alert('Re-extraction failed: ' + data.error);
+                Insights.toast(Insights.explain({ error: data.error }, 'Could not re-extract the content. The saved copy is unchanged.'), 'error');
                 return;
             }
             
@@ -789,7 +779,7 @@ function reextractSource() {
         .catch(err => {
             reextractBtn.disabled = false;
             reextractBtn.innerHTML = '🔄 Re-extract';
-            alert('Re-extraction failed. Please try again.');
+            Insights.toast(Insights.explain(err, 'Could not re-extract the content. The saved copy is unchanged.'), 'error');
         });
 }
 
@@ -809,7 +799,7 @@ function refreshSource(sourceId) {
                 btn.innerHTML = '🔄 Refresh';
             }
             if (data.error) {
-                alert('Refresh failed: ' + data.error);
+                Insights.toast(Insights.explain({ error: data.error }, 'Could not refresh the source. The saved copy is unchanged.'), 'error');
                 return;
             }
             if (card && data.source) {
@@ -828,49 +818,35 @@ function refreshSource(sourceId) {
                 }
             }
         })
-        .catch(() => {
+        .catch((err) => {
             if (btn) {
                 btn.disabled = false;
                 btn.innerHTML = '🔄 Refresh';
             }
-            alert('Refresh failed. Please try again.');
+            Insights.toast(Insights.explain(err, 'Could not refresh the source. The saved copy is unchanged.'), 'error');
         });
 }
 
-function confirmDeleteSource(sourceId, title) {
-    deleteSourceId = sourceId;
-    document.getElementById('deleteSourceTitle').textContent = title || 'this source';
-    const modal = new bootstrap.Modal(document.getElementById('deleteModal'));
-    modal.show();
-}
-
-function deleteSource() {
-    if (!deleteSourceId) return;
-    
-    fetch(`/sources/${deleteSourceId}`, { method: 'DELETE' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                // Remove the card from the page
-                const card = document.querySelector(`[data-source-id="${deleteSourceId}"]`);
-                if (card) {
-                    card.remove();
-                }
-                // Close modal
-                bootstrap.Modal.getInstance(document.getElementById('deleteModal')).hide();
-                
-                // Check if no sources left
-                const remainingCards = document.querySelectorAll('.source-card');
-                if (remainingCards.length === 0) {
-                    location.reload();
-                }
-            } else {
-                alert(data.error || 'Failed to delete source');
-            }
-        })
-        .catch(err => {
-            alert('Failed to delete source');
-        });
+// Deleting a source stays inside Insights, so no question first: the card hides at
+// once and the delete is sent after the Undo window. A failure puts the card back.
+async function confirmDeleteSource(sourceId, title) {
+    const card = document.querySelector(`[data-source-id="${sourceId}"]`);
+    const name = title ? `"${title}"` : 'the source';
+    const r = await Insights.deferred(o => fetch(`/sources/${sourceId}`, { method: 'DELETE', keepalive: o.keepalive })
+        .then(async response => {
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok || !data.success) throw { error: data.error, status: response.status };
+            return data;
+        }), {
+        message: `Deleted ${name}. Posts already made from it stay.`,
+        hide: () => { if (card) card.hidden = true; },
+        restore: () => { if (card) card.hidden = false; },
+        failMessage: `Could not delete ${name}, so it is back.`
+    });
+    if (!r.committed) return;
+    if (card) card.remove();
+    // The last one gone: the page shows its empty state.
+    if (document.querySelectorAll('.source-card').length === 0) location.reload();
 }
 </script>
 {% endblock %}

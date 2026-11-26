@@ -140,15 +140,19 @@
 </div>
 
 <script>
+// Rows whose delete is waiting behind Undo are hidden; selection ignores them.
+function visibleTicketBoxes() {
+    return Array.from(document.querySelectorAll('.ticket-checkbox')).filter(cb => !cb.closest('tr').hidden);
+}
+
 function toggleSelectAll(checkbox) {
-    const checkboxes = document.querySelectorAll('.ticket-checkbox');
-    checkboxes.forEach(cb => cb.checked = checkbox.checked);
+    visibleTicketBoxes().forEach(cb => cb.checked = checkbox.checked);
     updateSelectedCount();
 }
 
 function updateSelectedCount() {
-    const checkboxes = document.querySelectorAll('.ticket-checkbox:checked');
-    const count = checkboxes.length;
+    const boxes = visibleTicketBoxes();
+    const count = boxes.filter(cb => cb.checked).length;
     const countSpan = document.getElementById('selected-count');
     const deleteBtn = document.getElementById('delete-selected-btn');
     const selectAll = document.getElementById('select-all');
@@ -162,58 +166,89 @@ function updateSelectedCount() {
     }
     
     // Update select-all checkbox state
-    const allCheckboxes = document.querySelectorAll('.ticket-checkbox');
-    if (allCheckboxes.length > 0) {
-        selectAll.checked = count === allCheckboxes.length;
-        selectAll.indeterminate = count > 0 && count < allCheckboxes.length;
+    if (boxes.length > 0) {
+        selectAll.checked = count === boxes.length;
+        selectAll.indeterminate = count > 0 && count < boxes.length;
+    } else {
+        selectAll.checked = false;
+        selectAll.indeterminate = false;
+    }
+    const shown = document.querySelector('.results-count strong');
+    if (shown) shown.textContent = boxes.length;
+}
+
+// A failed JSON reply becomes something deferred() treats as a failure, with the
+// server's own words when it sent some.
+async function ticketReply(response) {
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.success) throw { error: data.error, status: response.status };
+    return data;
+}
+
+// Hide the rows at once; Undo brings them back and sends nothing.
+function ticketUndo(boxes) {
+    const rows = boxes.map(cb => cb.closest('tr'));
+    const wasChecked = boxes.map(cb => cb.checked);
+    return {
+        rows,
+        hide: () => {
+            rows.forEach(row => row.hidden = true);
+            boxes.forEach(cb => cb.checked = false);
+            updateSelectedCount();
+        },
+        restore: () => {
+            rows.forEach(row => row.hidden = false);
+            boxes.forEach((cb, i) => cb.checked = wasChecked[i]);
+            updateSelectedCount();
+        }
+    };
+}
+
+// Deleting removes the row from Insights only, never the ticket in JIRA, so it
+// waits behind Undo instead of asking first.
+async function deleteTicket(ticketId) {
+    const box = document.querySelector(`.ticket-checkbox[data-ticket-id="${ticketId}"]`);
+    const undo = ticketUndo(box ? [box] : []);
+    const r = await Insights.deferred(o => fetch(`/tickets/${ticketId}/delete`, {
+        method: 'POST', keepalive: o.keepalive
+    }).then(ticketReply), {
+        message: 'Deleted the ticket from Insights. It is still in JIRA.',
+        hide: undo.hide,
+        restore: undo.restore,
+        failMessage: 'Could not delete the ticket, so it is back.'
+    });
+    if (r.committed) {
+        undo.rows.forEach(row => row.remove());
+        updateSelectedCount();
     }
 }
 
-function deleteTicket(ticketId) {
-    if (!confirm('Delete this ticket from the database? (This does not delete the ticket in JIRA)')) return;
-    
-    fetch(`/tickets/${ticketId}/delete`, { method: 'POST' })
-        .then(response => response.json())
-        .then(data => {
-            if (data.success) {
-                location.reload();
-            } else {
-                alert(data.error || 'Failed to delete ticket');
-            }
-        })
-        .catch(error => {
-            alert('Error: ' + error.message);
-        });
-}
-
-function deleteSelectedTickets() {
-    const checkboxes = document.querySelectorAll('.ticket-checkbox:checked');
-    const ticketIds = Array.from(checkboxes).map(cb => cb.dataset.ticketId);
+async function deleteSelectedTickets() {
+    const boxes = visibleTicketBoxes().filter(cb => cb.checked);
+    const ticketIds = boxes.map(cb => cb.dataset.ticketId);
     
     if (ticketIds.length === 0) {
-        alert('No tickets selected');
+        Insights.toast('Tick the tickets to delete first.', 'info');
         return;
     }
     
-    if (!confirm(`Delete ${ticketIds.length} selected ticket${ticketIds.length !== 1 ? 's' : ''} from the database? (This does not delete them in JIRA)`)) return;
-    
-    fetch('/tickets/delete-selected', {
+    const noun = `${ticketIds.length} ticket${ticketIds.length !== 1 ? 's' : ''}`;
+    const undo = ticketUndo(boxes);
+    const r = await Insights.deferred(o => fetch('/tickets/delete-selected', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ ticket_ids: ticketIds })
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success) {
-            alert(data.message);
-            location.reload();
-        } else {
-            alert(data.error || 'Failed to delete tickets');
-        }
-    })
-    .catch(error => {
-        alert('Error: ' + error.message);
+        body: JSON.stringify({ ticket_ids: ticketIds }),
+        keepalive: o.keepalive
+    }).then(ticketReply), {
+        message: `Deleted ${noun} from Insights. ${ticketIds.length !== 1 ? 'They are' : 'It is'} still in JIRA.`,
+        hide: undo.hide,
+        restore: undo.restore,
+        failMessage: `Could not delete ${noun}, so ${ticketIds.length !== 1 ? 'they are' : 'it is'} back.`
     });
+    if (r.committed) {
+        undo.rows.forEach(row => row.remove());
+        updateSelectedCount();
+    }
 }
 </script>
 {% else %}

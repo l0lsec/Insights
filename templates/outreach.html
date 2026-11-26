@@ -46,7 +46,10 @@
 {% for item in queue %}
     {% set lead = item.lead %}
     <div class="card mb-3 outreach-item" id="msg-{{ item.id }}" data-id="{{ item.id }}" data-status="{{ item.status }}"
-         data-footer="{{ item.footer }}" data-channel="{{ item.channel }}" data-limit="{{ item.limit or '' }}">
+         data-footer="{{ item.footer }}" data-channel="{{ item.channel }}" data-limit="{{ item.limit or '' }}"
+         data-recipient="{{ (lead.name or lead.phone_display or '') if lead else '' }}"
+         data-phone="{{ lead.phone_display if lead and lead.phone_display else '' }}"
+         data-platform="{{ item.platform_name if item.social else '' }}">
         <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
             <div>
                 {% if lead %}
@@ -498,8 +501,9 @@ const OUTREACH_FIELDS = {{ import_fields|tojson }};
 const STAGE_NAMES = {{ stage_names|tojson }};
 const MAGNET_NAMES = {{ magnet_names|tojson }};
 
-async function outreachPost(url, payload, isForm) {
+async function outreachPost(url, payload, isForm, extra) {
     const opts = {method: 'POST', headers: {'X-Requested-With': 'XMLHttpRequest'}};
+    if (extra && extra.keepalive) opts.keepalive = true;   // a deferred change still goes out if the page is left
     if (isForm) {
         opts.body = payload;
     } else {
@@ -576,6 +580,24 @@ async function sendDraft(id) {
     const btn = document.getElementById('send-' + id);
     const status = document.getElementById('status-' + id);
     const body = document.getElementById('body-' + id).value;
+    // Sending leaves Insights and cannot be taken back, so ask, naming who gets it and where.
+    // Only this click sends: the worker never does.
+    const card = document.getElementById('msg-' + id);
+    const who = (card && card.dataset.recipient) || 'this person';
+    const platform = card && card.dataset.platform;
+    const phone = card && card.dataset.phone;
+    const yes = await Insights.confirm(platform ? {
+        title: `Reply to ${who} on ${platform} now?`,
+        body: `The reply goes out on ${platform} at once and cannot be unsent from Insights.`,
+        confirmLabel: `Reply on ${platform}`,
+        danger: false
+    } : {
+        title: `Text ${who} now?`,
+        body: `${phone ? 'It goes to ' + phone : 'It goes out'} at once and cannot be unsent.`,
+        confirmLabel: 'Send text',
+        danger: false
+    });
+    if (!yes) return;
     btn.disabled = true;
     setStatus(status, 'Sending…');
     const {ok, data} = await outreachPost(`/outreach/messages/${id}/send`, {body});
@@ -612,7 +634,7 @@ async function regenerate(id) {
 async function skipMessage(id) {
     const {ok, data} = await outreachPost(`/outreach/messages/${id}/skip`);
     if (ok) document.getElementById('msg-' + id).remove();
-    else alert(data.error || 'Could not skip it.');
+    else Insights.toast(Insights.explain({error: data.error}, 'Could not skip it, so it stays in the Queue.'), 'error');
 }
 
 async function checkMessage(id) {
@@ -626,19 +648,21 @@ async function checkMessage(id) {
 async function markSent(id) {
     const {ok, data} = await outreachPost(`/outreach/messages/${id}/mark-sent`);
     if (ok) document.getElementById('msg-' + id).remove();
-    else alert(data.error || 'Could not record it.');
+    else Insights.toast(Insights.explain({error: data.error}, 'Could not record that you posted it.'), 'error');
 }
 
 async function retryMessage(id) {
     const {ok, data} = await outreachPost(`/outreach/messages/${id}/retry`);
-    if (ok) location.reload(); else alert(data.error || 'Could not retry it.');
+    if (ok) location.reload();
+    else Insights.toast(Insights.explain({error: data.error}, 'Could not reopen it for another try.'), 'error');
 }
 
 async function linkMessage(id, leadId) {
     const name = (document.getElementById('link-name-' + id) || {}).value || '';
     const payload = leadId ? {lead_id: leadId} : {name};
     const {ok, data} = await outreachPost(`/outreach/messages/${id}/link`, payload);
-    if (ok) location.reload(); else alert(data.error || 'Could not link it.');
+    if (ok) location.reload();
+    else Insights.toast(Insights.explain({error: data.error}, 'Could not link the text to a lead.'), 'error');
 }
 
 let findTimer = null;
@@ -736,7 +760,7 @@ function renderLead(data) {
     const save = el('button', {class: 'btn btn-sm btn-primary', onclick: () => updateLead(lead.id, {
         stage: stageSel.value, timezone: tz.value, notes: notes.value, do_not_contact: dnc.checked})}, 'Save');
     const draft = el('button', {class: 'btn btn-sm btn-outline-primary', onclick: () => draftFor(lead.id)}, 'Draft a text');
-    const optOut = el('button', {class: 'btn btn-sm btn-outline-danger', onclick: () => { if (confirm('Opt this person out of texts?')) updateLead(lead.id, {opt_out: true}); }}, 'Opt out');
+    const optOut = el('button', {class: 'btn btn-sm btn-outline-danger', onclick: () => optOutLead(lead.id, optOut)}, 'Opt out');
     const actions = el('div', {class: 'col-12 d-flex gap-2'}); actions.append(save);
     if (lead.phone) actions.append(draft);  // a text needs a number; social leads are answered in their thread
     if (!lead.opted_out_at) actions.append(optOut);
@@ -768,14 +792,36 @@ function renderLead(data) {
             (found.leads || []).filter(l => l.id !== lead.id).forEach(l => {
                 const label = [l.name, l.email, l.phone].filter(Boolean).join(' · ');
                 mergeResults.appendChild(el('button', {type: 'button', class: 'list-group-item list-group-item-action', onclick: async () => {
-                    if (!confirm(`Merge "${label}" into this lead? Its history and contact details move here.`)) return;
+                    // Cannot be undone: the other lead is folded in and removed.
+                    if (!(await Insights.confirm({
+                        title: `Merge "${label}" into this lead?`,
+                        body: 'Its history and contact details move here, and the other lead is removed. This cannot be undone.',
+                        confirmLabel: 'Merge leads',
+                        danger: true
+                    }))) return;
                     const {ok, data: r} = await outreachPost(`/outreach/leads/${lead.id}/merge`, {other_id: l.id});
-                    if (ok) openLead(lead.id); else alert(r.error || 'Could not merge.');
+                    if (ok) { openLead(lead.id); Insights.toast(`Merged ${label} into this lead.`, 'success'); }
+                    else Insights.toast(Insights.explain({error: r.error}, 'Could not merge the leads, so both are unchanged.'), 'error');
                 }}, 'Merge in ' + label));
             });
         }, 250);
     };
     body.append(mergeQ, mergeResults);
+}
+
+// Opting out stays inside Insights and closes their open drafts, so it waits
+// behind Undo: nothing is sent (and no draft closes) until the Undo window ends.
+async function optOutLead(id, button) {
+    const result = await Insights.deferred(o => outreachPost(`/outreach/leads/${id}/update`, {opt_out: true}, false, {keepalive: o.keepalive}).then(res => {
+        if (!res.ok) throw {error: res.data.error};
+        return res;
+    }), {
+        message: 'Opted out of texts. Their open drafts close and no nudges go out.',
+        hide: () => { if (button) button.hidden = true; },
+        restore: () => { if (button) button.hidden = false; },
+        failMessage: 'Could not opt them out, so nothing changed.'
+    });
+    if (result.committed) openLead(id);
 }
 
 async function updateLead(id, changes) {

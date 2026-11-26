@@ -283,7 +283,13 @@ async function renameAccount(accountId, btn) {
 async function disconnectAccount(accountId, btn) {
     const row = btn.closest('.account-row');
     const name = row.querySelector('.account-label-text').textContent.trim();
-    if (!confirm(`Disconnect ${name}? Queued posts for this account are removed. Other accounts on this platform keep working.`)) return;
+    const sure = await Insights.confirm({
+        title: `Disconnect ${name}?`,
+        body: 'Insights stops posting to this account and removes its queued posts. Other accounts on this platform keep working.',
+        confirmLabel: 'Disconnect',
+        danger: true,
+    });
+    if (!sure) return;
     btn.disabled = true;
     try {
         const data = await accountsPost(`/accounts/${accountId}/disconnect`);

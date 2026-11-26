@@ -823,7 +823,8 @@ def section_parity():
 # js: the controls
 # ---------------------------------------------------------------------------
 
-JS_FUNCTIONS = ["idsOf", "platformsOf", "requestEach", "describeFailures", "finishQueueAction",
+JS_FUNCTIONS = ["idsOf", "platformsOf", "requestEach", "requestEachDeferred", "describeFailures",
+                "finishQueueAction", "queueRowsOf", "queueRowsOfRow",
                 "postNow", "cancelPost", "deletePost", "retryPost", "deleteSelected",
                 "moveSelectedPosts", "openEditModal", "submitEdit", "openEditContentModal",
                 "submitContentEdit", "saveToAllPosts", "toggleQueueGroup", "collapseAllQueueGroups",
@@ -841,13 +842,16 @@ class FakeFormData {
 }
 
 function world(opts = {}) {
-  const log = { fetch: [], alerts: [], confirms: [], reloads: 0, selectors: [], timers: [] };
+  const log = { fetch: [], alerts: [], confirms: [], labels: [], deferred: [], reloads: 0, refreshes: 0,
+                selectors: [], timers: [] };
   const els = {};
   const el = (id) => (els[id] = els[id] || { value: '', textContent: '', classList: { add() {}, remove() {} } });
   const replies = (opts.replies || []).slice();
   const ctx = {
     FormData: FakeFormData,
     location: { reload: () => { log.reloads++; } },
+    // the in-place redraw: a message shown before it stays on screen
+    refreshQueue: () => { log.refreshes++; },
     setTimeout: (fn) => { log.timers.push(fn); },
     confirm: (m) => { log.confirms.push(m); return opts.confirm !== false; },
     alert: (m) => log.alerts.push(m),
@@ -863,20 +867,36 @@ function world(opts = {}) {
                      fields: init.body && init.body.entries ? init.body.entries : null,
                      json: init.body && typeof init.body === 'string' ? JSON.parse(init.body) : null };
       log.fetch.push(call);
-      if (opts.throwOn && opts.throwOn(url)) throw new Error('offline');
+      if (opts.throwOn && opts.throwOn(url)) throw new TypeError('Failed to fetch');
       const reply = replies.shift() || { body: { success: true } };
       return { ok: true, status: 200, json: async () => reply.body };
     },
   };
-  ctx.Insights = makeInsights(ctx);
+  // Undo: opts.undo presses it; every deferred message and confirm label is logged
+  ctx.Insights = makeInsights(Object.assign({}, ctx, {
+    undo: opts.undo === true,
+    deferred: (o) => log.deferred.push(o.message),
+    confirmOpts: (o) => log.labels.push(o.confirmLabel),
+  }));
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   return { ctx, log, els, el };
 }
 
 const button = (dataset) => ({ dataset, innerHTML: 'ORIGINAL', disabled: false, className: 'x' });
-const row = (pending) => ({ classList: { contains: (c) => c === 'not-draggable' && !pending } });
-const checkbox = (ids, pending = true) => ({ dataset: { postId: String(ids[0]), postIds: ids.join(',') }, closest: () => row(pending) });
+const row = (pending, id) => ({ hidden: false, dataset: { postId: String(id) },
+                                classList: { contains: (c) => c === 'queue-group' || (c === 'not-draggable' && !pending) } });
+const checkbox = (ids, pending = true) => {
+  const r = row(pending, ids[0]);
+  return { dataset: { postId: String(ids[0]), postIds: ids.join(',') }, closest: () => r, row: r };
+};
+// a post's row and the per-platform rows under it, and a Delete/Cancel button in it
+const groupRows = (id, n) => {
+  const main = row(true, id);
+  const details = Array.from({ length: n }, () => ({ hidden: false, classList: { contains: () => false } }));
+  return { main, details, btn: { closest: () => main }, all: { [`tr.queue-detail[data-group-id="${id}"]`]: details },
+           hidden: () => [main, ...details].map(x => x.hidden) };
+};
 const ok = { body: { success: true } };
 const no = (error) => ({ body: { error } });
 const out = {};
@@ -898,24 +918,26 @@ const out = {};
   let btn = button({});
   await w.ctx.postNow([11, 12, 13], ['linkedin', 'threads', 'twitter'], btn);
   out.postAll = { urls: w.log.fetch.map(f => f.url), methods: w.log.fetch.map(f => f.method),
-                  confirm: w.log.confirms, btn: btn.innerHTML, alerts: w.log.alerts,
+                  confirm: w.log.confirms, labels: w.log.labels, btn: btn.innerHTML, alerts: w.log.alerts,
                   reloadsScheduled: w.log.timers.length, reloads: w.log.reloads };
 
   w = world({ replies: [ok, no('rate limited'), ok] });
   btn = button({});
   await w.ctx.postNow([11, 12, 13], ['linkedin', 'threads', 'twitter'], btn);
   out.postPartial = { urls: w.log.fetch.map(f => f.url), alerts: w.log.alerts, reloads: w.log.reloads,
-                      disabled: btn.disabled, html: btn.innerHTML };
+                      refreshes: w.log.refreshes, disabled: btn.disabled, html: btn.innerHTML };
 
   w = world({ replies: [no('a'), no('b')] });
   btn = button({});
   await w.ctx.postNow([11, 12], ['threads', 'twitter'], btn);
-  out.postNone = { alerts: w.log.alerts, reloads: w.log.reloads, disabled: btn.disabled, html: btn.innerHTML };
+  out.postNone = { alerts: w.log.alerts, reloads: w.log.reloads, refreshes: w.log.refreshes,
+                   disabled: btn.disabled, html: btn.innerHTML };
 
   w = world({ throwOn: (u) => u.includes('/12/') , replies: [ok, ok] });
   btn = button({});
   await w.ctx.postNow([11, 12, 13], ['linkedin', 'threads', 'twitter'], btn);
-  out.postThrows = { urls: w.log.fetch.map(f => f.url), alerts: w.log.alerts, reloads: w.log.reloads };
+  out.postThrows = { urls: w.log.fetch.map(f => f.url), alerts: w.log.alerts, reloads: w.log.reloads,
+                     refreshes: w.log.refreshes };
 
   w = world({ replies: [ok] });
   btn = button({});
@@ -928,53 +950,90 @@ const out = {};
   out.postDeclined = { fetches: w.log.fetch.length, html: btn.innerHTML, disabled: btn.disabled };
 
   // --- Cancel / Delete / Retry -----------------------------------------
-  w = world({ replies: [ok, ok] });
-  await w.ctx.cancelPost([31, 32], ['threads', 'twitter']);
-  out.cancelAll = { urls: w.log.fetch.map(f => f.url), confirm: w.log.confirms, reloads: w.log.reloads, alerts: w.log.alerts };
+  let g = groupRows(31, 2);
+  w = world({ replies: [ok, ok], all: g.all });
+  await w.ctx.cancelPost([31, 32], ['threads', 'twitter'], g.btn);
+  out.cancelAll = { urls: w.log.fetch.map(f => f.url), confirm: w.log.confirms, deferred: w.log.deferred,
+                    reloads: w.log.reloads, refreshes: w.log.refreshes, alerts: w.log.alerts, hidden: g.hidden() };
 
   w = world({ replies: [no('already posted'), ok] });
   await w.ctx.cancelPost([31, 32], ['threads', 'twitter']);
-  out.cancelPartial = { alerts: w.log.alerts, reloads: w.log.reloads };
+  out.cancelPartial = { alerts: w.log.alerts, reloads: w.log.reloads, refreshes: w.log.refreshes };
 
-  w = world({ replies: [no('gone'), no('gone too')] });
-  await w.ctx.cancelPost([31, 32], ['threads', 'twitter']);
-  out.cancelNone = { alerts: w.log.alerts, reloads: w.log.reloads };
+  g = groupRows(31, 2);
+  w = world({ replies: [no('gone'), no('gone too')], all: g.all });
+  await w.ctx.cancelPost([31, 32], ['threads', 'twitter'], g.btn);
+  out.cancelNone = { alerts: w.log.alerts, reloads: w.log.reloads, refreshes: w.log.refreshes, hidden: g.hidden() };
 
   w = world({ replies: [ok] });
   await w.ctx.cancelPost([33], ['threads']);
-  out.cancelSingle = { confirm: w.log.confirms, urls: w.log.fetch.map(f => f.url), reloads: w.log.reloads };
+  out.cancelSingle = { confirm: w.log.confirms, deferred: w.log.deferred, urls: w.log.fetch.map(f => f.url),
+                       reloads: w.log.reloads, refreshes: w.log.refreshes };
 
-  w = world({ replies: [ok, ok, ok] });
+  g = groupRows(31, 2);
+  w = world({ undo: true, all: g.all });
+  await w.ctx.cancelPost([31, 32], ['threads', 'twitter'], g.btn);
+  out.cancelUndo = { fetches: w.log.fetch.length, deferred: w.log.deferred, alerts: w.log.alerts,
+                     reloads: w.log.reloads, refreshes: w.log.refreshes, hidden: g.hidden() };
+
+  g = groupRows(41, 3);
+  w = world({ replies: [ok, ok, ok], all: g.all });
+  await w.ctx.deletePost([41, 42, 43], ['linkedin', 'threads', 'twitter'], g.btn);
+  out.deleteAll = { urls: w.log.fetch.map(f => f.url), confirm: w.log.confirms, deferred: w.log.deferred,
+                    reloads: w.log.reloads, refreshes: w.log.refreshes, hidden: g.hidden() };
+
+  g = groupRows(41, 3);
+  w = world({ undo: true, all: g.all });
+  await w.ctx.deletePost([41, 42, 43], ['linkedin', 'threads', 'twitter'], g.btn);
+  out.deleteUndo = { fetches: w.log.fetch.length, confirm: w.log.confirms, reloads: w.log.reloads,
+                     refreshes: w.log.refreshes, hidden: g.hidden() };
+
+  w = world({ replies: [no('a'), ok, ok] });
   await w.ctx.deletePost([41, 42, 43], ['linkedin', 'threads', 'twitter']);
-  out.deleteAll = { urls: w.log.fetch.map(f => f.url), confirm: w.log.confirms, reloads: w.log.reloads };
+  out.deletePartial = { alerts: w.log.alerts, refreshes: w.log.refreshes };
 
   w = world({ replies: [ok, ok] });
   btn = button({});
   await w.ctx.retryPost([51, 52], ['threads', 'twitter'], btn);
-  out.retryAll = { urls: w.log.fetch.map(f => f.url), alerts: w.log.alerts, reloads: w.log.reloads };
+  out.retryAll = { urls: w.log.fetch.map(f => f.url), alerts: w.log.alerts, reloads: w.log.reloads,
+                   refreshes: w.log.refreshes };
 
   w = world({ replies: [no('still failing'), ok] });
   btn = button({});
   await w.ctx.retryPost([51, 52], ['threads', 'twitter'], btn);
-  out.retryPartial = { alerts: w.log.alerts, reloads: w.log.reloads, html: btn.innerHTML, disabled: btn.disabled };
+  out.retryPartial = { alerts: w.log.alerts, reloads: w.log.reloads, refreshes: w.log.refreshes,
+                       html: btn.innerHTML, disabled: btn.disabled };
 
   w = world({ replies: [no('still failing'), no('still failing')] });
   btn = button({});
   await w.ctx.retryPost([51, 52], ['threads', 'twitter'], btn);
-  out.retryNone = { alerts: w.log.alerts, reloads: w.log.reloads, html: btn.innerHTML, disabled: btn.disabled };
+  out.retryNone = { alerts: w.log.alerts, reloads: w.log.reloads, refreshes: w.log.refreshes,
+                    html: btn.innerHTML, disabled: btn.disabled };
 
   // --- bulk delete and move --------------------------------------------
-  w = world({ all: { '.post-checkbox:checked': [checkbox([1, 2]), checkbox([3]), checkbox([4, 5, 6])] },
+  let ticked = [checkbox([1, 2]), checkbox([3]), checkbox([4, 5, 6])];
+  w = world({ all: { '.post-checkbox:checked': ticked },
               replies: [{ body: { success: true, message: 'Deleted 6 posts' } }] });
   w.ctx.deleteSelected();
   await new Promise(r => setTimeout(r, 20));
-  out.bulkDelete = { body: w.log.fetch.map(f => f.json), confirm: w.log.confirms };
+  out.bulkDelete = { body: w.log.fetch.map(f => f.json), confirm: w.log.confirms, deferred: w.log.deferred,
+                     reloads: w.log.reloads, hidden: ticked.map(c => c.row.hidden) };
 
   w = world({ all: { '.post-checkbox:checked': [checkbox([3]), checkbox([7])] },
               replies: [{ body: { success: true, message: 'Deleted 2 posts' } }] });
   w.ctx.deleteSelected();
   await new Promise(r => setTimeout(r, 20));
-  out.bulkDeleteSingles = { confirm: w.log.confirms };
+  out.bulkDeleteSingles = { confirm: w.log.confirms, deferred: w.log.deferred };
+
+  ticked = [checkbox([1, 2]), checkbox([3])];
+  w = world({ undo: true, all: { '.post-checkbox:checked': ticked } });
+  await w.ctx.deleteSelected();
+  out.bulkDeleteUndo = { fetches: w.log.fetch.length, reloads: w.log.reloads, hidden: ticked.map(c => c.row.hidden) };
+
+  ticked = [checkbox([1, 2]), checkbox([3])];
+  w = world({ all: { '.post-checkbox:checked': ticked }, replies: [{ body: { error: 'database is locked' } }] });
+  await w.ctx.deleteSelected();
+  out.bulkDeleteFails = { alerts: w.log.alerts, reloads: w.log.reloads, hidden: ticked.map(c => c.row.hidden) };
 
   const moveBtn = { innerHTML: 'Move', disabled: false };
   w = world({ all: { '.post-checkbox:checked': [checkbox([1, 2]), checkbox([3], false), checkbox([4, 5, 6])] },
@@ -982,7 +1041,12 @@ const out = {};
               replies: [{ body: { success: true } }] });
   w.ctx.moveSelectedPosts('top');
   await new Promise(r => setTimeout(r, 20));
-  out.bulkMove = { body: w.log.fetch.map(f => f.json), confirm: w.log.confirms };
+  out.bulkMove = { body: w.log.fetch.map(f => f.json), confirm: w.log.confirms, labels: w.log.labels };
+
+  w = world({ confirm: false, all: { '.post-checkbox:checked': [checkbox([1, 2])] },
+              dom: { 'move-bottom-btn': { innerHTML: 'Move', disabled: false } } });
+  await w.ctx.moveSelectedPosts('bottom');
+  out.bulkMoveDeclined = { fetches: w.log.fetch.length, confirm: w.log.confirms };
 
   // --- Edit Time ----------------------------------------------------------
   w = world();
@@ -997,7 +1061,8 @@ const out = {};
   w.el('edit-datetime').value = '2099-01-01T09:30';
   w.ctx.submitEdit();
   await new Promise(r => setTimeout(r, 20));
-  out.submitEdit = { url: w.log.fetch[0].url, fields: w.log.fetch[0].fields };
+  out.submitEdit = { url: w.log.fetch[0].url, fields: w.log.fetch[0].fields, alerts: w.log.alerts,
+                     reloads: w.log.reloads, refreshes: w.log.refreshes };
 
   // --- Edit Content ------------------------------------------------------
   w = world();
@@ -1087,64 +1152,106 @@ def section_js():
     check(p["urls"] == ["/schedule/11/post-now", "/schedule/12/post-now", "/schedule/13/post-now"]
           and set(p["methods"]) == {"POST"}, f"Post Now must call every member, in order: {p['urls']}")
     check("linkedin, threads, twitter" in p["confirm"][0], f"the confirm names every platform: {p['confirm']}")
+    check(p["confirm"] == ["Post to linkedin, threads, twitter now?\n\n"
+                           "It goes live at once on 3 platforms, instead of at its scheduled time."]
+          and p["labels"] == ["Post now"], f"Post Now leaves Insights: a named confirm with a named button: {p}")
     check(p["btn"] == "✅ Posted!" and p["reloadsScheduled"] == 1 and not p["alerts"],
           f"a fully successful Post Now: {p}")
     p = r["postPartial"]
     check(len(p["urls"]) == 3, "a failure must not stop the remaining platforms")
     check(p["alerts"] and "Posted to 2 of 3" in p["alerts"][0] and "threads: rate limited" in p["alerts"][0],
           f"a partial failure must say what posted and what did not: {p['alerts']}")
-    check(p["reloads"] == 1 and p["disabled"] is False and p["html"] == "ORIGINAL",
-          f"a partial Post Now reloads (something was posted) and frees the button: {p}")
+    check(p["alerts"] == ["Posted to 2 of 3 platforms. Not posted:\nthreads: rate limited"],
+          f"a partial Post Now says it in one message: {p['alerts']}")
+    check(p["refreshes"] == 1 and p["reloads"] == 0 and p["disabled"] is False and p["html"] == "ORIGINAL",
+          f"a partial Post Now redraws the queue in place (something was posted, and the message stays) "
+          f"and frees the button: {p}")
     p = r["postNone"]
-    check(p["reloads"] == 0 and p["disabled"] is False and p["html"] == "ORIGINAL"
+    check(p["reloads"] == 0 and p["refreshes"] == 0 and p["disabled"] is False and p["html"] == "ORIGINAL"
           and "threads: a" in p["alerts"][0] and "twitter: b" in p["alerts"][0],
           f"when every platform fails nothing reloads, the button is freed, each reason shows: {p}")
     p = r["postThrows"]
-    check(len(p["urls"]) == 3 and "Error: offline" in p["alerts"][0] and p["reloads"] == 1,
-          f"a network error on one platform is reported and the others are still sent: {p}")
+    check(len(p["urls"]) == 3 and "threads: Could not reach Insights. Check your connection, then try again." in p["alerts"][0]
+          and p["refreshes"] == 1 and p["reloads"] == 0,
+          f"a network error on one platform is reported in plain words and the others are still sent: {p}")
     p = r["postSingle"]
-    check(p["confirm"] == ["Post this threads content immediately?"] and p["urls"] == ["/schedule/21/post-now"],
-          f"a lone entry behaves as before: {p}")
+    check(p["confirm"] == ["Post to threads now?\n\nIt goes live at once, instead of at its scheduled time."]
+          and p["urls"] == ["/schedule/21/post-now"], f"a lone entry behaves as before: {p}")
     check(r["postDeclined"] == {"fetches": 0, "html": "ORIGINAL", "disabled": False},
           f"declining sends nothing: {r['postDeclined']}")
 
     # Cancel / Delete / Retry
+    # Cancel and Delete stay inside Insights: no question, the rows go at once
+    # with Undo, and the requests go when the Undo window closes.
     c = r["cancelAll"]
-    check(c["urls"] == ["/schedule/31/cancel", "/schedule/32/cancel"] and c["reloads"] == 1 and not c["alerts"]
-          and "all 2 platforms" in c["confirm"][0], f"cancel a group: {c}")
+    check(c["urls"] == ["/schedule/31/cancel", "/schedule/32/cancel"] and c["refreshes"] == 1 and c["reloads"] == 0
+          and not c["alerts"] and c["confirm"] == [] and c["deferred"] == ["Cancelled this post on 2 platforms."],
+          f"cancel a group: {c}")
+    check(c["hidden"] == [True, True, True], f"cancelling a group hides its row and its per-platform rows: {c}")
     c = r["cancelPartial"]
-    check("threads: already posted" in c["alerts"][0] and c["reloads"] == 1,
-          f"a partly-cancelled group reports and reloads: {c}")
+    check(c["alerts"] == ["Cancelled on 1 of 2 platforms. Not cancelled:\nthreads: already posted"]
+          and c["refreshes"] == 1 and c["reloads"] == 0,
+          f"a partly-cancelled group reports and redraws: {c}")
     c = r["cancelNone"]
-    check(c["reloads"] == 0 and "threads: gone" in c["alerts"][0] and "twitter: gone too" in c["alerts"][0],
+    check(c["reloads"] == 0 and c["refreshes"] == 0 and "threads: gone" in c["alerts"][0]
+          and "twitter: gone too" in c["alerts"][0],
           f"nothing cancelled: report, no reload: {c}")
+    check(c["alerts"][0].startswith("Could not cancel the post, so it is back in the queue.")
+          and c["hidden"] == [False, False, False], f"nothing cancelled: the rows come back: {c}")
     c = r["cancelSingle"]
-    check(c["confirm"] == ["Cancel this scheduled post?"] and c["urls"] == ["/schedule/33/cancel"]
-          and c["reloads"] == 1, f"cancel a lone entry as before: {c}")
+    check(c["deferred"] == ["Cancelled the scheduled post."] and c["confirm"] == [] and c["urls"] == ["/schedule/33/cancel"]
+          and c["refreshes"] == 1, f"cancel a lone entry: {c}")
+    c = r["cancelUndo"]
+    check(c["fetches"] == 0 and c["hidden"] == [False, False, False] and c["reloads"] == 0 and c["refreshes"] == 0
+          and not c["alerts"] and c["deferred"] == ["Cancelled this post on 2 platforms."],
+          f"Undo on a cancel sends nothing and puts every row back: {c}")
     d = r["deleteAll"]
     check(d["urls"] == ["/schedule/41/delete", "/schedule/42/delete", "/schedule/43/delete"]
-          and d["reloads"] == 1 and "all 3 platforms" in d["confirm"][0], f"delete a group: {d}")
+          and d["refreshes"] == 1 and d["reloads"] == 0 and d["confirm"] == []
+          and d["deferred"] == ["Deleted this post from 3 platforms."], f"delete a group: {d}")
+    check(d["hidden"] == [True, True, True, True], f"deleting a group hides the whole group: {d}")
+    d = r["deleteUndo"]
+    check(d["fetches"] == 0 and d["confirm"] == [] and d["hidden"] == [False, False, False, False]
+          and d["reloads"] == 0 and d["refreshes"] == 0, f"Undo on a delete sends nothing and restores the group: {d}")
+    d = r["deletePartial"]
+    check(d["alerts"] == ["Deleted from 2 of 3 platforms. Not deleted:\nlinkedin: a"] and d["refreshes"] == 1,
+          f"a partly-deleted group says what went and what stayed: {d}")
     t = r["retryAll"]
-    check(t["urls"] == ["/schedule/51/retry", "/schedule/52/retry"] and t["alerts"] == ["Post successful!"]
-          and t["reloads"] == 1, f"retry a group: {t}")
+    check(t["urls"] == ["/schedule/51/retry", "/schedule/52/retry"] and t["alerts"] == ["Posted to threads, twitter."]
+          and t["refreshes"] == 1 and t["reloads"] == 0, f"retry a group: {t}")
     t = r["retryPartial"]
-    check("threads: still failing" in t["alerts"][0] and t["reloads"] == 1
+    check("threads: still failing" in t["alerts"][0] and t["refreshes"] == 1 and t["reloads"] == 0
           and t["disabled"] is False and t["html"] == "ORIGINAL", f"retry partly failing: {t}")
+    check(t["alerts"] == ["Posted to 1 of 2 platforms. Not posted:\nthreads: still failing"],
+          f"a partial retry says what posted: {t['alerts']}")
     t = r["retryNone"]
-    check(t["reloads"] == 0 and t["disabled"] is False and t["html"] == "ORIGINAL", f"retry all failing: {t}")
+    check(t["reloads"] == 0 and t["refreshes"] == 0 and t["disabled"] is False and t["html"] == "ORIGINAL",
+          f"retry all failing: {t}")
 
     # bulk
     b = r["bulkDelete"]
     check(b["body"] == [{"post_ids": [1, 2, 3, 4, 5, 6]}], f"bulk delete must send every member id: {b['body']}")
-    check("3 selected posts (6 platform entries)" in b["confirm"][0], f"bulk delete says both counts: {b['confirm']}")
-    check("2 selected posts?" in r["bulkDeleteSingles"]["confirm"][0].replace("Delete 2 selected posts? ", "2 selected posts? ")
-          and "platform entries" not in r["bulkDeleteSingles"]["confirm"][0],
-          f"singles need no entry count: {r['bulkDeleteSingles']['confirm']}")
+    check(b["deferred"] == ["Deleted 3 posts (6 platform entries)."] and b["confirm"] == [],
+          f"bulk delete says both counts, with Undo instead of a question: {b}")
+    check(b["hidden"] == [True, True, True] and b["reloads"] == 1,
+          f"bulk delete hides the ticked rows at once and reloads once it went through: {b}")
+    check(r["bulkDeleteSingles"]["deferred"] == ["Deleted 2 posts."]
+          and "platform entries" not in r["bulkDeleteSingles"]["deferred"][0] and r["bulkDeleteSingles"]["confirm"] == [],
+          f"singles need no entry count: {r['bulkDeleteSingles']}")
+    check(r["bulkDeleteUndo"] == {"fetches": 0, "reloads": 0, "hidden": [False, False]},
+          f"Undo on a bulk delete sends nothing and puts the rows back: {r['bulkDeleteUndo']}")
+    f = r["bulkDeleteFails"]
+    check(f["alerts"] == ["Could not delete 2 posts (3 platform entries), so they are back. database is locked"]
+          and f["reloads"] == 0 and f["hidden"] == [False, False], f"a refused bulk delete brings the rows back: {f}")
     b = r["bulkMove"]
     check(b["body"] == [{"post_ids": [1, 2, 4, 5, 6], "position": "top"}],
           f"bulk move sends every pending member id and skips non-pending rows: {b['body']}")
-    check(b["confirm"] == ["Move 2 posts to the top of the queue?"],
+    check(b["confirm"] == ["Move 2 posts to the top of the queue?\n\n"
+                           "Their scheduled times change, and the other pending posts shift to make room."],
           f"bulk move counts posts (rows), not platform entries: {b['confirm']}")
+    check(b["labels"] == ["Move to top"], f"the move button names the move: {b['labels']}")
+    check(r["bulkMoveDeclined"]["fetches"] == 0 and r["bulkMoveDeclined"]["confirm"][0].startswith("Move 1 post to the bottom"),
+          f"declining the move sends nothing: {r['bulkMoveDeclined']}")
 
     # Edit Time
     check(str(r["openEdit"]["id"]) == "61" and r["openEdit"]["ids"] == "61,62,63" and r["openEditNoIds"]["ids"] == "64",
@@ -1152,6 +1259,8 @@ def section_js():
     e = r["submitEdit"]
     check(e["url"] == "/schedule/61/edit" and ["ids", "61,62,63"] in e["fields"]
           and ["scheduled_for", "2099-01-01T09:30"] in e["fields"], f"Edit Time sends the ids: {e}")
+    check(e["alerts"] == ["Post rescheduled for Monday."] and e["refreshes"] == 1 and e["reloads"] == 0,
+          f"Edit Time says the new time and redraws in place, so the message stays: {e}")
 
     # Edit Content
     check(r["openContent"] == {"ids": "70,71", "platform": "🧵 Threads + 𝕏 Twitter"},
@@ -1172,6 +1281,7 @@ def section_js():
     s = r["contentSocialPartial"]
     check(len(s["urls"]) == 3 and "nope" in s["alerts"][0] and s["reloads"] == 0,
           f"a failed social edit says so and does not reload: {s}")
+    check(s["alerts"] == ["Saved 2 of 3 copies. Not saved:\nnope"], f"a partial social edit says what saved: {s['alerts']}")
     check(r["contentFails"]["calls"] == 1 and "Content is required" in r["contentFails"]["alerts"][0]
           and r["contentFails"]["reloads"] == 0, f"failed content save: {r['contentFails']}")
     check(r["contentImageFails"]["calls"] == 2 and "bad image" in r["contentImageFails"]["alerts"][0]

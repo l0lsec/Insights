@@ -1,7 +1,12 @@
 # UX rollout plan: the 20 laws across Insights
 
-Status (2026-11-26, main at 8ce69a8): **Phases 0, 1 and 2 built on branch `claude/ux-design-principles-c44154`** (`static/insights-ui.js`, base.html CSS, `scripts/check_ux.py` with 8 registered gates, baseline of 663 retired patterns). **Phases 3 to 5 not started.** Gates are in `GATES.md`
-next to this file. The laws and the Insights checklist are `docs/UX_PRINCIPLES.md`.
+Status (2026-11-26, main at 8ce69a8): **all phases built on branch `claude/ux-design-principles-c44154`** (PR
+l0lsec/Insights#27). Phase 1+2: `static/insights-ui.js`, base.html CSS, `scripts/check_ux.py` ratchet. Phase 3: every
+template migrated off `alert(`/`confirm(`/toast copies (baseline lowered to match), deletes behind Undo, exits behind a
+named confirm, every node harness fed `window.Insights` from `scripts/_insights_stub.py`. Phase 4: Compose's
+getting-started card, disabled-with-a-reason states, end-of-flow `Insights.done`. Phase 5: browser walk. Gates are in
+`GATES.md` next to this file. The laws and the Insights checklist are `docs/UX_PRINCIPLES.md`; the owner's laws are also
+a global rule for every project (`~/.claude/UX_PRINCIPLES.md`, pointer in `~/.claude/CLAUDE.md`, 2026-11-26).
 
 This file and `GATES.md` are tracked from branch `claude/ux-design-principles-c44154` on (a `.gitignore`
 exception, since `*.md` is ignored). Older untracked copies from 2026-11-01 sit at the same paths in the main
@@ -199,7 +204,6 @@ screenshots as evidence; `python scripts/run_all_gates.py` green.
 2. Ratchet strictness: planned as "fail above baseline, and fail below until lowered". Default unless the owner
    says otherwise.
 3. Compose timing: no longer blocked; start after the Phase 1+2 PR merges.
-4. **Open:** the owner pasted the same 20 laws into sessions in other repositories (fire-calculator,
-   loan-serv-app) on 2026-11-26. Should the laws become a global rule for every project (one
-   `~/.claude/UX_PRINCIPLES.md` plus a generic pointer, with Insights keeping its own checklist), or stay
-   per-repo? Those sessions may edit `~/.claude/CLAUDE.md` too, so only one session should make that change.
+4. **Decided 2026-11-26:** the laws are a global rule for every project. `~/.claude/UX_PRINCIPLES.md` holds them
+   verbatim with a short "how to apply" list; `~/.claude/CLAUDE.md` points every session at it, above the
+   per-project sections (Insights, loan-serv-app, FIRE Planner), whose own checklists win on project specifics.

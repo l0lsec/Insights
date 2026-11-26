@@ -13,6 +13,7 @@
  *   explain    plain words for a failure, never a raw error (law 15)
  *   fieldError the problem next to the field, with the input kept (laws 8, 15)
  *   deferred   Undo for a delete that stays inside Insights, without a soft delete (laws 15, 18)
+ *   done       the end of a flow: what happened, and the next step as a button (law 10)
  *
  * scripts/check_ux.py runs this file under node (mode "behavior") and fails if
  * any of the above stops being true.
@@ -64,7 +65,7 @@
     function toast(message, opts) {
         if (typeof opts === 'string') opts = { type: opts };
         opts = opts || {};
-        var type = TYPES[opts.type] ? opts.type : 'info';
+        var type = opts.type === 'danger' ? 'error' : (TYPES[opts.type] ? opts.type : 'info');   // Bootstrap's name too
         var duration = opts.duration != null ? opts.duration
             : (opts.undo ? 6000 : (opts.sticky ? 0 : LIFETIME[type]));
 
@@ -434,6 +435,23 @@
     }
     if (global.addEventListener) global.addEventListener('pagehide', flushPending);
 
+    /* -------------------------------------------------------------- done */
+
+    /**
+     * Insights.done(message, next) -> the toast
+     * The end of a flow (law 10): say what happened and offer the one next step
+     * as the toast's button, e.g.
+     *     Insights.done('Queued on LinkedIn for Tue, Nov 26 at 09:00.', {label: 'Open Schedule', href: '/schedule'})
+     * It stays 10 s (hover or focus holds it) so there is time to take the step.
+     */
+    function done(message, next) {
+        var opts = { type: 'success', duration: 10000 };
+        if (next && next.label && (next.href || next.run)) {
+            opts.action = { label: next.label, run: next.run || function () { global.location.href = next.href; } };
+        }
+        return toast(message, opts);
+    }
+
     /* ------------------------------------------------ declarative markup */
 
     /*
@@ -547,6 +565,7 @@
         explain: explain,
         fieldError: fieldError,
         deferred: deferred,
+        done: done,
         _flushPending: flushPending
     };
 

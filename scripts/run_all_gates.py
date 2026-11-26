@@ -565,6 +565,12 @@ UX_GATES = [
     ("check_ux.py", "UX_UNDO_OK",
      "every delete inside Insights waits behind Undo, and every publish, send or disconnect asks with a dialog that names the action",
      ("undo",)),
+    ("check_ux.py", "UX_DISABLED_STATES_OK",
+     "compose, schedule and accounts disable posting, queueing, clearing and connecting that cannot work yet, and say why next to the control",
+     ("disabled-states",)),
+    ("check_ux.py", "UX_FLOWS_OK",
+     "Compose's getting-started card counts real progress and leaves when done, and queueing or publishing ends on the next step",
+     ("flows",)),
 ]
 
 NOT_GATES = {}

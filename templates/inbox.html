@@ -321,7 +321,9 @@
     var state = {
         filters: {status: 'open', assignee: 'all', channel: '', label: '', needs_reply: false, q: ''},
         list: [], current: null, detail: null, mode: 'reply', canned: DATA.canned || [],
-        drafts: {}, loadingList: false, pickerIndex: 0, pickerItems: [], undoCanned: null
+        drafts: {}, loadingList: false, pickerIndex: 0, pickerItems: [], undoCanned: null,
+        // Deletes waiting behind Undo: kept out of every re-render until they go through or come back.
+        hiddenNotes: {}, hiddenCanned: {}
     };
 
     var $ = function (id) { return document.getElementById(id); };
@@ -351,9 +353,10 @@
     }
     function channelName(key) { return DATA.channelNames[key] || key; }
 
-    async function api(url, payload) {
+    async function api(url, payload, extra) {
         var opts = payload === undefined ? {headers: {'X-Requested-With': 'XMLHttpRequest'}}
             : {method: 'POST', headers: XHR, body: JSON.stringify(payload)};
+        if (extra && extra.keepalive) opts.keepalive = true;   // a deferred delete still goes out if the page is left
         var resp, body;
         try {
             resp = await fetch(url, opts);
@@ -554,7 +557,9 @@
             thread.innerHTML = '<p class="text-muted small">No messages yet.</p>';
             return;
         }
-        thread.innerHTML = d.timeline.map(function (t) {
+        thread.innerHTML = d.timeline.filter(function (t) {
+            return !(t.type === 'note' && state.hiddenNotes[t.id]);
+        }).map(function (t) {
             if (t.type === 'note') {
                 return '<div class="msg msg-note"><div class="msg-context">Private note' +
                     (t.author ? ' by ' + esc(t.author) : '') + '</div><div class="msg-bubble bg-warning-subtle">' +
@@ -581,14 +586,25 @@
         thread.scrollTop = thread.scrollHeight;
     }
 
+    // Deleting a note stays inside Insights: it disappears at once and is deleted
+    // after the Undo window; Undo or a failure brings it back.
+    function rerenderTimeline() { if (state.detail) renderTimeline(); }
     $('thread').addEventListener('click', async function (e) {
         var btn = e.target.closest('[data-delete-note]');
         if (!btn) return;
-        var done = busy(btn, 'Deleting...');
-        var res = await api('/inbox/notes/' + btn.dataset.deleteNote + '/delete', {});
-        done();
-        if (!res.ok) { setStatus($('composer-status'), res.data.error, 'error'); return; }
-        loadConversation(state.current, {quiet: true});
+        var noteId = btn.dataset.deleteNote, conversation = state.current;
+        var r = await Insights.deferred(function (o) {
+            return api('/inbox/notes/' + noteId + '/delete', {}, {keepalive: o.keepalive}).then(function (res) {
+                if (!res.ok) throw {error: res.data.error, status: res.status};
+                return res;
+            });
+        }, {
+            message: 'Deleted the private note.',
+            hide: function () { state.hiddenNotes[noteId] = true; rerenderTimeline(); },
+            restore: function () { delete state.hiddenNotes[noteId]; rerenderTimeline(); },
+            failMessage: 'Could not delete the note, so it is back.'
+        });
+        if (r.committed && state.current === conversation) loadConversation(conversation, {quiet: true});
     });
 
     function renderContact() {
@@ -939,7 +955,10 @@
 
     async function refreshCanned() {
         var res = await api('/inbox/canned');
-        if (res.ok) { state.canned = res.data.canned; renderCanned(); }
+        if (res.ok) {
+            state.canned = res.data.canned.filter(function (c) { return !state.hiddenCanned[c.id]; });
+            renderCanned();
+        }
     }
 
     $('canned-form').addEventListener('submit', async function (e) {
@@ -970,25 +989,34 @@
             return;
         }
         if (del) {
+            // Stays inside Insights: gone from the list at once, deleted after the Undo
+            // window, back in its place on Undo or a failure (same id, nothing re-created).
             var gone = state.canned.find(function (c) { return String(c.id) === del.dataset.deleteCanned; });
-            var done = busy(del, 'Deleting...');
-            var res = await api('/inbox/canned/' + gone.id + '/delete', {});
-            done();
-            var status = $('canned-status');
-            if (!res.ok) { setStatus(status, res.data.error, 'error'); return; }
-            setStatus(status, 'Deleted /' + gone.short_code + '.', 'ok');
-            var undo = document.createElement('button');
-            undo.type = 'button';
-            undo.className = 'btn btn-link btn-sm p-0 ms-2';
-            undo.textContent = 'Undo';
-            undo.addEventListener('click', async function () {
-                undo.disabled = true;
-                var back = await api('/inbox/canned', {short_code: gone.short_code, content: gone.content});
-                if (back.ok) { setStatus(status, 'Restored /' + gone.short_code + '.', 'ok'); refreshCanned(); }
-                else setStatus(status, back.data.error, 'error');
+            if (!gone) return;
+            var at = state.canned.indexOf(gone);
+            setStatus($('canned-status'), '', 'ok');
+            var r = await Insights.deferred(function (o) {
+                return api('/inbox/canned/' + gone.id + '/delete', {}, {keepalive: o.keepalive}).then(function (res) {
+                    if (!res.ok) throw {error: res.data.error, status: res.status};
+                    return res;
+                });
+            }, {
+                message: 'Deleted the canned reply /' + gone.short_code + '.',
+                hide: function () {
+                    state.hiddenCanned[gone.id] = true;
+                    state.canned = state.canned.filter(function (c) { return c.id !== gone.id; });
+                    renderCanned();
+                },
+                restore: function () {
+                    delete state.hiddenCanned[gone.id];
+                    if (!state.canned.some(function (c) { return c.id === gone.id; })) {
+                        state.canned.splice(Math.min(at, state.canned.length), 0, gone);
+                    }
+                    renderCanned();
+                },
+                failMessage: 'Could not delete /' + gone.short_code + ', so it is back.'
             });
-            status.appendChild(undo);
-            refreshCanned();
+            if (r.committed) refreshCanned();
         }
     });
     renderCanned();

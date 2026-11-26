@@ -557,6 +557,8 @@
             var label = a.classList.contains('dropdown-item') ? a.firstChild.textContent.trim() : a.textContent.trim();
             entries.push({ label: label, group: group, href: href });
         });
+        // Not a nav link: brings back Compose's getting-started card after "Hide for now".
+        entries.push({ label: 'Getting started', group: 'Compose', href: '{{ url_for("compose_page") }}?getting_started=1' });
 
         var shown = [], active = 0, returnFocus = null;
 

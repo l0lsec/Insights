@@ -71,7 +71,7 @@
 </div>
 
 {% if episodes %}
-<form id="bulk-delete-form" method="post" action="{{ url_for('bulk_delete_episodes') }}">
+<form id="bulk-delete-form" onsubmit="return false;">
 <div class="table-responsive">
     <table class="table table-striped table-hover">
         <thead class="table-light">
@@ -148,7 +148,9 @@
                         {% if ep.status in ['complete', 'error'] %}
                         <a href="{{ url_for('reprocess_episode', episode_id=ep.id) }}" 
                            class="btn btn-outline-warning"
-                           onclick="return confirm('Reprocess this episode? This will regenerate the summary and action items.');"
+                           data-confirm="Its summary and action items are made again from scratch, and the current ones are replaced."
+                           data-confirm-title="Reprocess {{ ep.title|truncate(60) }}?"
+                           data-confirm-label="Reprocess"
                            data-processing="true">
                             Reprocess
                         </a>
@@ -156,7 +158,8 @@
                         
                         <a href="{{ url_for('delete_episode', episode_id=ep.id) }}" 
                            class="btn btn-outline-danger"
-                           onclick="return confirm('Delete this episode and all its associated data?');">
+                           data-undo="Deleted the episode {{ ep.title|truncate(60) }} with its articles and tickets."
+                           data-undo-row="tr">
                             Delete
                         </a>
                     </div>
@@ -169,26 +172,55 @@
 </form>
 
 <script>
+// Rows whose delete is waiting behind Undo are hidden; selection ignores them.
+function visibleEpisodeBoxes() {
+    return Array.from(document.querySelectorAll('.episode-checkbox')).filter(cb => !cb.closest('tr').hidden);
+}
+
 function toggleSelectAll(checkbox) {
-    const episodeCheckboxes = document.querySelectorAll('.episode-checkbox');
-    episodeCheckboxes.forEach(cb => cb.checked = checkbox.checked);
+    visibleEpisodeBoxes().forEach(cb => cb.checked = checkbox.checked);
     updateSelectedCount();
 }
 
 function updateSelectedCount() {
-    const checked = document.querySelectorAll('.episode-checkbox:checked').length;
-    const total = document.querySelectorAll('.episode-checkbox').length;
+    const boxes = visibleEpisodeBoxes();
+    const checked = boxes.filter(cb => cb.checked).length;
+    const total = boxes.length;
     document.getElementById('selected-count').textContent = checked;
     document.getElementById('bulk-delete-btn').classList.toggle('d-none', checked === 0);
     document.getElementById('select-all').checked = checked === total && total > 0;
     document.getElementById('select-all').indeterminate = checked > 0 && checked < total;
 }
 
-function confirmBulkDelete() {
-    const count = document.querySelectorAll('.episode-checkbox:checked').length;
+// Deleting stays inside Insights, so it waits behind Undo instead of asking first:
+// the rows hide at once and the request goes out only after the Undo window.
+async function confirmBulkDelete() {
+    const boxes = visibleEpisodeBoxes().filter(cb => cb.checked);
+    const count = boxes.length;
     if (count === 0) return;
-    if (confirm(`Delete ${count} episode${count > 1 ? 's' : ''} and ALL their associated articles and tickets? This cannot be undone!`)) {
-        document.getElementById('bulk-delete-form').submit();
+    const rows = boxes.map(cb => cb.closest('tr'));
+    const body = new FormData();
+    boxes.forEach(cb => body.append('episode_ids', cb.value));
+    const noun = `${count} episode${count > 1 ? 's' : ''}`;
+    const r = await Insights.deferred(o => fetch('{{ url_for("bulk_delete_episodes") }}', {
+        method: 'POST', body, credentials: 'same-origin', keepalive: o.keepalive
+    }), {
+        message: `Deleted ${noun} with ${count > 1 ? 'their' : 'its'} articles and tickets.`,
+        hide: () => {
+            rows.forEach(row => row.hidden = true);
+            boxes.forEach(cb => cb.checked = false);
+            updateSelectedCount();
+        },
+        restore: () => {
+            rows.forEach(row => row.hidden = false);
+            boxes.forEach(cb => cb.checked = true);
+            updateSelectedCount();
+        },
+        failMessage: `Could not delete ${noun}, so ${count > 1 ? 'they are' : 'it is'} back.`
+    });
+    if (r.committed) {
+        rows.forEach(row => row.remove());
+        updateSelectedCount();
     }
 }
 </script>

@@ -133,7 +133,12 @@ async function run(scenario) {
       return { ok: scenario.ok !== false, json: async () => scenario.reply };
     },
   };
-  ctx.Insights = makeInsights(ctx);
+  // Removing a video is deferred with Undo: the Undo toast is logged as ['undo', message],
+  // and scenario.undo presses Undo before anything is sent.
+  ctx.Insights = makeInsights(Object.assign({}, ctx, {
+    undo: scenario.undo === true,
+    deferred: (o) => log.toast.push(['undo', o.message]),
+  }));
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   scenario.setup && scenario.setup(els, ctx);
@@ -176,7 +181,7 @@ const results = {};
   results.offline = await run({ hasVideo: false, reject: true, reply: {},
     act: async (c, e) => { e['video-url-input-4'].value = 'https://cdn.test/new.mp4'; c.savePostVideoUrl(4); } });
 
-  results.removeCancelled = await run({ hasVideo: true, confirm: false, reply: { success: true, video_url: null },
+  results.removeUndone = await run({ hasVideo: true, undo: true, reply: { success: true, video_url: null },
     act: async (c) => { c.removePostVideo(4); } });
   results.remove = await run({ hasVideo: true, reply: { success: true, video_url: null, warnings: [] },
     act: async (c) => { c.removePostVideo(4); } });
@@ -323,15 +328,17 @@ def section_ui():
     check(off["section"] == "" and off["toasts"][0][0] == "error" and off["progressHidden"],
           f"a network failure must be reported and leave the card alone: {off}")
 
-    c = ok("removeCancelled")
-    check(c["confirms"] == 1 and c["fetches"] == 0 and c["section"] == "https://old.test/a.mp4",
-          "cancelling the confirm must remove nothing")
+    c = ok("removeUndone")
+    check(c["confirms"] == 0 and c["fetches"] == 0 and c["section"] == "https://old.test/a.mp4"
+          and c["playerSrc"] == "https://old.test/a.mp4" and not c["previewHidden"] and c["previewFlex"]
+          and c["addHidden"] and c["toasts"] == [["undo", "Video removed from this post."]],
+          f"Undo must send nothing and put the video back on the card: {c}")
     rm = ok("remove")
     check(rm["fetches"] == 1 and rm["body"] == {"video_url": "", "post_ids": "4,5,6"},
           f"removing must send an empty video for every row of the card: {rm['body']}")
     check(rm["section"] == "" and rm["previewHidden"] and not rm["previewFlex"] and rm["noteHidden"]
-          and not rm["addHidden"] and rm["toasts"] == [["success", "Video removed!"]],
-          f"the card did not return to having no video: {rm}")
+          and not rm["addHidden"] and rm["confirms"] == 0 and rm["toasts"] == [["undo", "Video removed from this post."]],
+          f"the card did not return to having no video, or did not offer Undo instead of asking: {rm}")
 
     for name, note in (("uploadBadType", "an AVI"), ("uploadTooBig", "a 101 MB file")):
         u = ok(name)
@@ -450,7 +457,8 @@ async function run(scenario) {
     location: { reload: () => { log.reload++; } },
     fetch: async (url, init) => {
       log.fetch.push({ url, method: init.method, body: init.body });
-      if (scenario.reject) throw new Error('offline');
+      // What a browser's fetch rejects with when it cannot reach the server.
+      if (scenario.reject) throw new TypeError('Failed to fetch');
       return { json: async () => scenario.reply };
     },
   };
@@ -692,11 +700,12 @@ def section_newpost():
     check(not {"video", "video_url"} & {k for k, _ in sn["entries"]} and sn["reloads"] == 1
           and "Uploading" not in sn["saveText"], f"a post with no video must send none: {sn['entries']}")
     sx = ok("saveFails")
-    check(sx["reloads"] == 0 and sx["alerts"] == ["Error: URL host resolves to non-public address"]
+    check(sx["reloads"] == 0 and sx["alerts"] == ["Could not save the post. URL host resolves to non-public address"]
           and not sx["saveDisabled"] and "Save Post" in sx["saveText"],
           f"a refused video must be reported and leave the form usable: {sx}")
     so = ok("saveOffline")
-    check(so["reloads"] == 0 and so["alerts"] == ["Error: offline"] and not so["saveDisabled"],
+    check(so["reloads"] == 0 and not so["saveDisabled"] and so["alerts"] == [
+              "Could not save the post. Could not reach Insights. Check your connection, then try again."],
           f"a network failure must be reported and leave the form usable: {so}")
     check(ok("saveNoText")["fetches"] == 0, "a post with no text must not be sent, video or not")
 
