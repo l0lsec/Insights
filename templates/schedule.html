@@ -620,9 +620,13 @@ th[onclick]:hover {
                 <button class="btn btn-sm btn-outline-primary" onclick="refreshQueue()" id="refresh-queue-btn" title="Refresh Queue">
                     🔄 Refresh
                 </button>
-                <button class="btn btn-sm btn-outline-danger" onclick="clearQueue()" title="Clear all pending posts">
+                <button type="button" class="btn btn-sm btn-outline-danger" onclick="clearQueue()" title="Clear all pending posts"
+                        {% if not pending_total %}disabled aria-describedby="clear-pending-why"{% endif %}>
                     🗑️ Clear Pending
                 </button>
+                {% if not pending_total %}
+                <span class="small text-muted" id="clear-pending-why">Nothing is pending, so there is nothing to clear.</span>
+                {% endif %}
             </div>
         </div>
     </div>
@@ -2035,7 +2039,9 @@ async function disconnectTwitter() {
 }
 
 async function postNow(ids, platforms, btn) {
-    const where = platforms.join(', ');
+    // Platform names as people read them ("Threads", not "threads").
+    const names = { linkedin: 'LinkedIn', threads: 'Threads', twitter: 'X', facebook: 'Facebook', instagram: 'Instagram' };
+    const where = platforms.map(p => names[p] || p).join(', ');
     // It goes out to the platforms at once: ask, and say where and how many.
     const yes = await Insights.confirm({
         title: `Post to ${where} now?`,
@@ -2104,7 +2110,8 @@ async function retryPost(ids, platforms, btn) {
     
     const failed = await requestEach(ids, id => fetch(`/schedule/${id}/retry`, { method: 'POST' }), 'Retry failed');
     if (failed.length === 0) {
-        Insights.toast(`Posted to ${platforms.join(', ') || 'its platform'}.`, 'success');
+        const names = { linkedin: 'LinkedIn', threads: 'Threads', twitter: 'X', facebook: 'Facebook', instagram: 'Instagram' };
+        Insights.toast(`Posted to ${platforms.map(p => names[p] || p).join(', ') || 'its platform'}.`, 'success');
         refreshQueue();
         return;
     }

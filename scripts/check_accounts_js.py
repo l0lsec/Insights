@@ -137,7 +137,7 @@ class FakeFormData {
 // test is the page's own source, so a call from one to another is a real call.
 function world(opts = {}) {
   const log = { fetch: [], alerts: [], toasts: [], confirms: [], selectors: [],
-                replaced: [], cardRefreshes: 0, usedRefreshes: 0 };
+                replaced: [], cardRefreshes: 0, usedRefreshes: 0, dones: [], undos: [] };
   const chips = opts.chips || {};
   const postItem = {
     dataset: opts.dataset || {},
@@ -168,7 +168,9 @@ function world(opts = {}) {
                json: async () => reply.body };
     },
   };
-  ctx.Insights = makeInsights(ctx);
+  ctx.Insights = makeInsights(Object.assign({}, ctx, {
+    done: (m, next) => log.dones.push([m, next && next.label, next && next.href]),
+    deferred: (o) => log.undos.push(o.message), undo: opts.undo === true }));
   vm.createContext(ctx);
   vm.runInContext(source, ctx);
   const button = {
@@ -297,6 +299,13 @@ const out = {};
   await w.ctx.queueAllFromCard(w.button);
   out.queueAllClean = { toasts: w.log.toasts, alerts: w.log.alerts };
 
+  // The end of the flow names where and when, and offers the next step.
+  w = world({ dataset: CARD, replies: [{ status: 200, body: { success: true, partial: false, message: 'Queued for 2 targets',
+    queued: [{ post_id: 11, target: 'Work', scheduled_for_display: 'Tuesday, Dec 01 at 09:00 AM' },
+             { post_id: 12, target: 'Threads', scheduled_for_display: 'Tuesday, Dec 01 at 10:00 AM' }], skipped: [] } }] });
+  await w.ctx.queueAllFromCard(w.button);
+  out.queueAllNamed = { toasts: w.log.toasts, dones: w.log.dones, alerts: w.log.alerts };
+
   // Nothing could be queued: the server answers 400 with an empty list. The
   // user must be told nothing was queued, not that something was.
   w = world({ dataset: CARD, replies: [{ status: 400, body: { success: false, queued: [],
@@ -346,6 +355,18 @@ const out = {};
   await w.ctx.togglePostPlatform(w.button, 'linkedin');
   out.tickRefused = { toasts: w.log.toasts, disabled: w.button.disabled, replaced: w.log.replaced.length };
 
+  // Unticking the only platform deletes the post: hidden at once, Undo offered,
+  // the delete sent after the window, never the platform-removal request.
+  const ONE = { postId: '21', postIds: '21', postIndex: '1', targets: '[]' };
+  const onlyChip = () => ({ dataset: { accountId: '4', platformPostId: '21' }, classList: { contains: () => true } });
+  w = world({ dataset: ONE, chip: onlyChip(), replies: [{ status: 200, body: { success: true } }] });
+  await w.ctx.togglePostPlatform(w.button, 'linkedin');
+  out.untickLast = { urls: w.log.fetch.map(f => f.url), alerts: w.log.alerts, replaced: w.log.replaced,
+                     hidden: w.postItem.hidden, undos: w.log.undos };
+  w = world({ dataset: ONE, chip: onlyChip(), undo: true });
+  await w.ctx.togglePostPlatform(w.button, 'linkedin');
+  out.untickLastUndone = { urls: w.log.fetch.map(f => f.url), replaced: w.log.replaced, hidden: w.postItem.hidden };
+
   console.log(JSON.stringify(out));
 })();
 """
@@ -354,8 +375,10 @@ COMPOSE_FUNCTIONS = (
     "cardTargets", "cardPostIds", "selectedAccountTargets", "newPostTargets",
     "newPostPlatforms", "publishCardPlatform", "postNowAllFromCard",
     "queueAllFromCard", "markChipPosted", "postedUrlFrom", "togglePostPlatform",
+    # unticking a card's only platform deletes the post, behind the Delete button's Undo
+    "deferDeleteCard", "deleteUndoText",
     # the requests the card's publish-all and queue-all share with Find & Replace
-    "publishAllConfirmText", "publishCardToAll", "queueCardToAll",
+    "publishAllConfirmText", "publishCardToAll", "queueCardToAll", "queuedSummary",
     # a post that lands but loses its link comment (or reply) is reported by both publishers
     "noteFirstComment", "renderLinkCommentState", "linkCommentNoun",
 )
@@ -453,6 +476,11 @@ def section_compose():
           f"a partial queue must say so, as a warning: {q['toasts']}")
     check(q["cardRefreshes"] == 1 and q["html"] == "ORIGINAL" and q["disabled"] is False,
           f"the card must redraw and the button come back: {q}")
+    qn = r["queueAllNamed"]
+    named = "Queued on Work for Tuesday, Dec 01 at 09:00 AM, Threads for Tuesday, Dec 01 at 10:00 AM."
+    check(qn["toasts"] == [[named, "success"]] and qn["alerts"] == []
+          and qn["dones"] == [[named, "Open Schedule", "/schedule"]],
+          f"a full queue must end by naming each account and time, with Open Schedule as the next step: {qn}")
     check(r["queueAllClean"]["toasts"] == [["Queued for 3 targets", "success"]]
           and r["queueAllClean"]["alerts"] == [],
           f"a full queue must read as success with nothing to apologise for: {r['queueAllClean']}")
@@ -482,6 +510,13 @@ def section_compose():
     check(a["replaced"] == ["<div>card</div>"] and a["toasts"] == [["Added to Studio", "success"]],
           f"a ticked chip must redraw the card and name the account: {a}")
 
+    u = r["untickLast"]
+    check(u["urls"] == ["/compose/post/21/delete"] and u["undos"] == ["LinkedIn was this post's only platform, so the post is deleted."]
+          and u["hidden"] is True and u["replaced"] == [""] and u["alerts"] == [],
+          f"unticking a card's only platform must delete it behind Undo, not remove it outright: {u}")
+    v = r["untickLastUndone"]
+    check(v["urls"] == [] and v["replaced"] == [] and v["hidden"] is False,
+          f"Undo on unticking the only platform must send nothing and bring the card back: {v}")
     a = r["tickRemove"]
     f = fields(a["fetch"][0])
     check(a["fetch"][0]["url"] == "/compose/post/12/platform" and f.get("action") == ["remove"]

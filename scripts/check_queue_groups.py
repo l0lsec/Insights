@@ -1151,8 +1151,8 @@ def section_js():
     p = r["postAll"]
     check(p["urls"] == ["/schedule/11/post-now", "/schedule/12/post-now", "/schedule/13/post-now"]
           and set(p["methods"]) == {"POST"}, f"Post Now must call every member, in order: {p['urls']}")
-    check("linkedin, threads, twitter" in p["confirm"][0], f"the confirm names every platform: {p['confirm']}")
-    check(p["confirm"] == ["Post to linkedin, threads, twitter now?\n\n"
+    check("LinkedIn, Threads, X" in p["confirm"][0], f"the confirm names every platform as people read it: {p['confirm']}")
+    check(p["confirm"] == ["Post to LinkedIn, Threads, X now?\n\n"
                            "It goes live at once on 3 platforms, instead of at its scheduled time."]
           and p["labels"] == ["Post now"], f"Post Now leaves Insights: a named confirm with a named button: {p}")
     check(p["btn"] == "✅ Posted!" and p["reloadsScheduled"] == 1 and not p["alerts"],
@@ -1175,7 +1175,7 @@ def section_js():
           and p["refreshes"] == 1 and p["reloads"] == 0,
           f"a network error on one platform is reported in plain words and the others are still sent: {p}")
     p = r["postSingle"]
-    check(p["confirm"] == ["Post to threads now?\n\nIt goes live at once, instead of at its scheduled time."]
+    check(p["confirm"] == ["Post to Threads now?\n\nIt goes live at once, instead of at its scheduled time."]
           and p["urls"] == ["/schedule/21/post-now"], f"a lone entry behaves as before: {p}")
     check(r["postDeclined"] == {"fetches": 0, "html": "ORIGINAL", "disabled": False},
           f"declining sends nothing: {r['postDeclined']}")
@@ -1217,7 +1217,7 @@ def section_js():
     check(d["alerts"] == ["Deleted from 2 of 3 platforms. Not deleted:\nlinkedin: a"] and d["refreshes"] == 1,
           f"a partly-deleted group says what went and what stayed: {d}")
     t = r["retryAll"]
-    check(t["urls"] == ["/schedule/51/retry", "/schedule/52/retry"] and t["alerts"] == ["Posted to threads, twitter."]
+    check(t["urls"] == ["/schedule/51/retry", "/schedule/52/retry"] and t["alerts"] == ["Posted to Threads, X."]
           and t["refreshes"] == 1 and t["reloads"] == 0, f"retry a group: {t}")
     t = r["retryPartial"]
     check("threads: still failing" in t["alerts"][0] and t["refreshes"] == 1 and t["reloads"] == 0

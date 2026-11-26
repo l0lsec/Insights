@@ -885,8 +885,8 @@ def mode_flows():
         if not m:
             problems.append(f"compose.html has no function {name}")
             continue
-        body = [js[s:e + 1] for s, e in spans if s > m.start() and s - m.end() < 400]
-        body = min(body, key=len) if body else ""
+        own = [(s, e) for s, e in spans if s > m.start() and s - m.end() < 400]
+        body = js[min(own)[0]:min(own)[1] + 1] if own else ""   # the function's own body, not a callback in it
         if not re.search(r"Insights\.done\([^;]*\{[^}]*label\s*:[^}]*(href|run)\s*:", body, re.S):
             problems.append(f"{name} does not end with Insights.done(message, {{label, href}}) naming the next step")
 

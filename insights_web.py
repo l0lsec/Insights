@@ -5110,6 +5110,9 @@ def schedule_list():
         linkedin_count=linkedin_count,
         threads_count=threads_count,
         facebook_count=facebook_count,
+        # Clear Pending clears every pending post, filtered out or not, so its
+        # disabled state reads the whole queue, not the rows on screen.
+        pending_total=len(list_scheduled_posts(status='pending')),
     )
 
 
@@ -5999,7 +6002,7 @@ def _connected_platforms():
 FIRST_RUN_STEPS = (
     # key, label, done when, where to do it
     ('accounts', 'Connect an account', 'accounts', '/accounts'),
-    ('posts', 'Write or generate your first post', 'posts', '#generate'),
+    ('posts', 'Write or generate your first post', 'posts', '#sourceTypeTabs'),
     ('queued', 'Queue it with the \u2795 next to a platform', 'queued', None),
     ('posted', 'See it go out', 'posted', '/schedule'),
 )

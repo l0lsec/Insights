@@ -65,8 +65,14 @@
             undo: function () {
                 card.hidden = false;
                 try { window.localStorage.removeItem(KEY); } catch (e) {}
+                document.getElementById('first-run-hide').focus();
             }
         });
+        // The button just vanished with its card: keep keyboard focus on something
+        // that is still there, the toast's Undo.
+        var undo = Array.prototype.filter.call(document.querySelectorAll('#insightsToasts button'),
+                                               function (b) { return b.textContent === 'Undo'; }).pop();
+        if (undo) undo.focus();
     });
 })();
 </script>

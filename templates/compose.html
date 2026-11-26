@@ -266,6 +266,10 @@
     .platform-chip .chip-posted:hover {
         background: rgba(0, 0, 0, 0.06);
     }
+    /* Disabled because the platform is not connected; .card-why says so and links to Accounts. */
+    .platform-chip .chip-queue:disabled { opacity: 0.45; cursor: not-allowed; background: none; }
+    .card-why { color: var(--warn); }
+    .card-why a { color: inherit; font-weight: 600; }
 {% for platform, meta in PLATFORM_META.items() %}
     .platform-chip[data-platform="{{ platform }}"] { --chip-color: {{ meta.color }}; --chip-tint: {{ meta.tint }}; }
 {%- endfor %}
@@ -469,6 +473,8 @@
     .search-goto-badge { cursor: pointer; }
     .search-goto-badge:hover { background-color: #495057 !important; }
 </style>
+
+{% include 'partials/first_run.html' %}
 
 <!-- Platform Connections: summary strip, full cards fold away behind it -->
 {% call connection_strip() %}
@@ -3941,7 +3947,7 @@ function deleteUndoText(platforms) {
 // Delete every row of a card, with Undo: hide() runs at once, the request goes
 // when the Undo window closes, and restore() runs on Undo or a failure.
 // Resolves to Insights.deferred's result ({committed} | {undone} | {failed}).
-function deferDeleteCard(postId, postIds, platforms, hide, restore) {
+function deferDeleteCard(postId, postIds, platforms, hide, restore, message) {
     return Insights.deferred(async (o) => {
         const body = new FormData();
         body.append('post_ids', postIds.join(','));
@@ -3950,7 +3956,7 @@ function deferDeleteCard(postId, postIds, platforms, hide, restore) {
         if (!res.ok || !data.success) throw new Error(data.error || 'Could not delete');
         return data;
     }, {
-        message: deleteUndoText(platforms),
+        message: message || deleteUndoText(platforms),
         hide,
         restore,
         failMessage: 'Could not delete the post, so it is back.',
@@ -4131,7 +4137,11 @@ async function postNowFromCard(btn, postId, platform, accountId) {
     btn.innerHTML = original;
     btn.disabled = false;
     if (posted) {
-        showToast(`Posted to ${label}!`, 'success');
+        // The end of the flow (law 10): what happened, and the next step.
+        const live = postItem && postItem.querySelector(`.platform-chip[data-platform="${platform}"] .chip-posted`);
+        Insights.done(`Posted to ${label}. It is live now.`, live && live.href
+            ? { label: `View on ${label}`, run: () => window.open(live.href, '_blank', 'noopener') }
+            : { label: 'Open Schedule', href: '/schedule' });
         refreshCardUsedState(postItem);
     }
 }
@@ -4211,6 +4221,14 @@ async function queueAllFromCard(btn) {
     btn.disabled = false;
 }
 
+// "Queued on Work for Tuesday, Nov 26 at 09:00 AM, Threads for ...": the
+// targets and times the server chose, or `fallback` when it did not name them.
+function queuedSummary(queued, fallback) {
+    const named = (queued || []).filter(q => q.target && q.scheduled_for_display);
+    if (!named.length) return fallback;
+    return 'Queued on ' + named.map(q => `${q.target} for ${q.scheduled_for_display}`).join(', ') + '.';
+}
+
 // Queue a card for every account it goes to, each in its own next slot, and
 // say what went in. Resolves to the server's reply, or null when the request
 // itself failed.
@@ -4231,8 +4249,11 @@ async function queueCardToAll(postId, postIds) {
             // Nothing went in. Saying "Queued" here, as this once did, is the one
             // thing this button must never do: the user would stop looking.
             showToast(data.error || 'Nothing was queued', 'error');
+        } else if (data.success && !data.partial) {
+            // The end of the flow (law 10): where and when it goes, and the next step.
+            Insights.done(queuedSummary(data.queued, data.message || 'Queued'), { label: 'Open Schedule', href: '/schedule' });
         } else {
-            showToast(data.message || 'Queued', data.success && !data.partial ? 'success' : 'warning');
+            showToast(data.message || 'Queued', 'warning');
         }
         return data;
     } catch (e) {
@@ -5537,6 +5558,20 @@ async function togglePostPlatform(btn, platform) {
     // light up.
     const accountId = chip.dataset.accountId || '';
 
+    // Unticking the card's only platform deletes the whole post (a post with no
+    // platform is not kept), so it gets the same Undo as the Delete button rather
+    // than vanishing for good (law 15). A queued or published one still goes
+    // through the server's question below.
+    const queuedOrPosted = chip.querySelector && chip.querySelector('.chip-queue.is-queued, .chip-posted');
+    if (!adding && cardPostIds(postItem, false).length === 1 && !queuedOrPosted) {
+        const label = PLATFORM_LABELS[platform] || platform;
+        const result = await deferDeleteCard(postId, cardPostIds(postItem, false), [platform],
+            () => { postItem.hidden = true; }, () => { postItem.hidden = false; },
+            `${label} was this post's only platform, so the post is deleted.`);
+        if (result.committed) replaceCard(postItem, '');
+        return;
+    }
+
     const send = (force) => {
         const body = new FormData();
         body.append('platform', platform);
@@ -5889,7 +5924,8 @@ async function toggleQueue(postId, postType, platform, btn, isQueued) {
             btn.disabled = false;
             if (data.success) {
                 setChipQueuedUI(btn, true, data.scheduled_for);
-                showToast(data.message, 'success');
+                Insights.done(`Queued on ${label} for ${data.scheduled_for_display || data.scheduled_for}.`,
+                              { label: 'Open Schedule', href: '/schedule' });
                 recheckCardFilters(btn.closest('.post-item'));
             } else {
                 btn.innerHTML = originalText;

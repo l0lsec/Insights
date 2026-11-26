@@ -831,7 +831,7 @@ def actions_functions(source):
              "queueAllFromSearchResult", "scheduleFromSearchResult", "deleteSearchResult",
              "requestToggleUsed", "toggleUsed", "deleteUndoText", "deferDeleteCard", "noteCardDeleted",
              "noteCardLeftList",
-             "deletePost", "postNowConfirmText", "publishAllConfirmText", "publishCardToAll", "queueCardToAll",
+             "deletePost", "postNowConfirmText", "publishAllConfirmText", "publishCardToAll", "queueCardToAll", "queuedSummary",
              "publishCardPlatform", "markChipPosted", "postedUrlFrom", "platformConnected",
              "noteFirstComment", "renderLinkCommentState", "linkCommentNoun",
              "adjustPostCountBadge", "loadMoreControls", "setLoadMoreLabels", "cardPostIds", "cardPlatforms"]

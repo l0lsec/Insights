@@ -111,9 +111,10 @@
                 {% if entry.accounts %}Connect another{% else %}Connect{% endif %}
             </a>
             {% else %}
-            <span class="badge bg-light text-dark border" title="Set this platform's API credentials in .env to connect it">
-                Not configured
-            </span>
+            {# Cannot work yet (law 14): disabled, with the reason right next to it. #}
+            <span class="small text-muted me-2" id="connect-why-{{ entry.platform }}">Add its API keys to <code>.env</code> first</span>
+            <button type="button" class="btn btn-sm btn-outline-primary" disabled
+                    aria-describedby="connect-why-{{ entry.platform }}">Connect</button>
             {% endif %}
         </div>
     </div>
@@ -202,7 +203,7 @@
         {% if entry.configured %}
         No {{ entry.name }} account connected yet.
         {% else %}
-        Set this platform's API credentials in <code>.env</code> to connect an account.
+        {{ entry.name }} is not set up yet: add its API keys to <code>.env</code> and restart Insights, then Connect works.
         {% endif %}
     </div>
     {% endif %}

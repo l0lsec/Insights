@@ -3,7 +3,7 @@
    `group` is a card dict from _enrich_post_group(): `platforms` lists the rows
    that exist (platform, row id, queue + posted state) and `post_ids` is all of
    them, which is what the page sends back so a card-wide edit reaches every
-   row. Every element id keys off `group.id` — the card's primary row — so the
+   row. Every element id keys off `group.id` (the card's primary row), so the
    per-post JS (image editor, Instagram builder, inline edit) needs no notion of
    groups at all. #}
 {# The one platform table: the chips here, the chip CSS and the JS tables in
@@ -23,6 +23,13 @@
    already reports its platform's default one, so the keys line up either way. #}
 {% set entries = {} %}
 {% for entry in group.platforms %}{% set _ = entries.update({(entry.platform ~ ':' ~ (entry.account_id|string if entry.account_id else '')): entry}) %}{% endfor %}
+{# What cannot work yet (law 14): posting or queueing to a platform nobody has
+   connected. Those controls are disabled and point at one note on the card that
+   says why and links to the fix, instead of failing after the click. #}
+{% set unconnected = [] %}
+{% for entry in group.platforms %}{% if entry.platform not in CONNECTED_PLATFORMS and entry.platform not in unconnected %}{% set _ = unconnected.append(entry.platform) %}{% endif %}{% endfor %}
+{% set why_id = 'card-why-' ~ group.id %}
+{% set none_connected = group.platforms and unconnected | length == group.platforms | map(attribute='platform') | unique | list | length %}
                     <div class="post-item" data-post-id="{{ group.id }}"
                          data-post-ids="{{ group.post_ids | join(',') }}"
                          data-platforms='{{ group.platform_ids | tojson }}'
@@ -70,13 +77,15 @@
                                 </button>
                                 <ul class="dropdown-menu dropdown-menu-end">
                                     {% for entry in group.platforms %}
-                                    <li><button class="dropdown-item" type="button" onclick="postNowFromCard(this, {{ entry.id }}, '{{ entry.platform }}', {{ entry.account_id or 'null' }})">
+                                    <li><button class="dropdown-item" type="button" onclick="postNowFromCard(this, {{ entry.id }}, '{{ entry.platform }}', {{ entry.account_id or 'null' }})"
+                                                {% if entry.platform in unconnected %}disabled aria-describedby="{{ why_id }}"{% endif %}>
                                         {{ PLATFORM_META.get(entry.platform, {}).get('icon', '📱') }} Post to {{ entry.account_label or PLATFORM_META.get(entry.platform, {}).get('label', entry.platform|capitalize) }} now
                                     </button></li>
                                     {% endfor %}
                                     {% if group.platforms | length > 1 %}
                                     <li><hr class="dropdown-divider"></li>
-                                    <li><button class="dropdown-item fw-semibold" type="button" onclick="postNowAllFromCard(this)">
+                                    <li><button class="dropdown-item fw-semibold" type="button" onclick="postNowAllFromCard(this)"
+                                                {% if none_connected %}disabled aria-describedby="{{ why_id }}"{% endif %}>
                                         🚀 Post to all {{ group.platforms | length }} accounts
                                     </button></li>
                                     {% endif %}
@@ -86,13 +95,15 @@
                                 </button>
                                 <ul class="dropdown-menu dropdown-menu-end">
                                     {% for entry in group.platforms %}
-                                    <li><button class="dropdown-item" type="button" onclick="openScheduleModal({{ entry.id }}, 'standalone', '{{ entry.platform }}')">
+                                    <li><button class="dropdown-item" type="button" onclick="openScheduleModal({{ entry.id }}, 'standalone', '{{ entry.platform }}')"
+                                                {% if entry.platform in unconnected %}disabled aria-describedby="{{ why_id }}"{% endif %}>
                                         {{ PLATFORM_META.get(entry.platform, {}).get('icon', '📱') }} Schedule for {{ entry.account_label or PLATFORM_META.get(entry.platform, {}).get('label', entry.platform|capitalize) }}
                                     </button></li>
                                     {% endfor %}
                                     {% if group.platforms | length > 1 %}
                                     <li><hr class="dropdown-divider"></li>
-                                    <li><button class="dropdown-item fw-semibold" type="button" onclick="queueAllFromCard(this)">
+                                    <li><button class="dropdown-item fw-semibold" type="button" onclick="queueAllFromCard(this)"
+                                                {% if none_connected %}disabled aria-describedby="{{ why_id }}"{% endif %}>
                                         📅 Queue all {{ group.platforms | length }} accounts
                                     </button></li>
                                     {% endif %}
@@ -127,6 +138,7 @@
                                 {% if entry %}
                                 <button type="button" class="chip-queue {% if entry.queued %}is-queued{% endif %}"
                                         data-queued="{{ 'true' if entry.queued else 'false' }}"
+                                        {% if platform in unconnected and not entry.queued %}disabled aria-describedby="{{ why_id }}"{% endif %}
                                         onclick="toggleChipQueue(this)"
                                         title="{% if entry.queued %}Queued for {{ entry.queued }}, click to remove{% else %}Add to the {{ name }} queue{% endif %}">{% if entry.queued %}✅{% else %}➕{% endif %}</button>
                                 {% if entry.posted and entry.posted.url %}
@@ -137,6 +149,12 @@
                             </span>
                             {% endfor %}
                         </div>
+                        {% if unconnected %}
+                        {% set names = [] %}{% for pl in unconnected %}{% set _ = names.append(PLATFORM_META.get(pl, {}).get('label', pl)) %}{% endfor %}
+                        <p class="card-why small mb-2" id="{{ why_id }}">
+                            Connect {{ names | join(' and ') }} in <a href="/accounts">Accounts</a> to post or queue {{ 'it' if none_connected else 'it there' }}.
+                        </p>
+                        {% endif %}
 
                         {# Where the post carries its link on LinkedIn, Threads and X. They show posts
                            that link out to fewer people, so "first comment" (a first reply on Threads

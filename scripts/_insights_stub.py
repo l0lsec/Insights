@@ -27,7 +27,7 @@ the answers and the assertions stay exactly as they were:
                          true, run({keepalive: false}) at once (the Undo window is the
                          browser's business; the behaviour gate covers it). A failed run
                          restores and is reported through toast(..., 'error')
-    done(m, next)     -> stubs.done(m, next) if given, then toast(m, 'success')
+    done(m, next)     -> stubs.done(m, next) if given, then stubs.showToast(m, 'success'), else toast
     busy(btn, work)   -> runs work
     fieldError(i, m)  -> stubs.fieldError(i, m) if given, else toast(m, 'error')
     explain           -> the real one, read from static/insights-ui.js, so a harness
@@ -65,7 +65,9 @@ const makeInsights = (() => {
       __ui: 1,
       toast,
       done(message, next) {
+        // A success message: it goes where the harness sends success toasts.
         if (typeof stubs.done === 'function') stubs.done(message, next);
+        if (typeof stubs.showToast === 'function') { stubs.showToast(message, 'success'); return { dismiss() {} }; }
         return toast(message, 'success');
       },
       confirm(o) {
