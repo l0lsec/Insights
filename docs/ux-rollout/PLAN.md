@@ -1,6 +1,6 @@
 # UX rollout plan: the 20 laws across Insights
 
-Status (2026-11-26, main at 8ce69a8): **all phases built on branch `claude/ux-design-principles-c44154`** (PR
+Status (2026-11-26): **all phases built and merged to main (8ea162d)** via branch `claude/ux-design-principles-c44154` (PR
 l0lsec/Insights#27). Phase 1+2: `static/insights-ui.js`, base.html CSS, `scripts/check_ux.py` ratchet. Phase 3: every
 template migrated off `alert(`/`confirm(`/toast copies (baseline lowered to match), deletes behind Undo, exits behind a
 named confirm, every node harness fed `window.Insights` from `scripts/_insights_stub.py`. Phase 4: Compose's
