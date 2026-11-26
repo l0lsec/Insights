@@ -262,9 +262,9 @@ class FacebookClient:
         """Publish a post with an image to a Facebook Page.
 
         Tries URL-based upload first (lets Facebook fetch the image itself).
-        On Facebook's generic ``code=1`` (``API_UNKNOWN``) error — which in
+        On Facebook's generic ``code=1`` (``API_UNKNOWN``) error, which in
         practice almost always means FB's fetcher failed on the remote URL,
-        despite the misleading "reduce the amount of data" wording — falls
+        despite the misleading "reduce the amount of data" wording, falls
         back to downloading the bytes locally and uploading them via
         multipart ``source=``. This mirrors what the LinkedIn/Threads clients
         do and is far more reliable for images hosted on slow or finicky

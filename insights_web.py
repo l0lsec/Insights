@@ -404,7 +404,7 @@ _secret_key_env = os.environ.get("FLASK_SECRET_KEY")
 if not _secret_key_env:
     import logging as _logging
     _logging.getLogger(__name__).warning(
-        "FLASK_SECRET_KEY is not set. Generating an ephemeral key — all "
+        "FLASK_SECRET_KEY is not set. Generating an ephemeral key; all "
         "sessions will be invalidated on restart. Set FLASK_SECRET_KEY in .env "
         "to a stable value (e.g. python -c \"import secrets; print(secrets.token_hex(32))\")."
     )
@@ -454,7 +454,7 @@ ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
 # Video uploads: a post's video on any platform, and Instagram Reels / video Stories
 # / video carousel items.
 ALLOWED_VIDEO_EXTENSIONS = {'mp4', 'mov'}
-MAX_IMAGE_BYTES = 16 * 1024 * 1024   # 16MB — enforced manually on the image path
+MAX_IMAGE_BYTES = 16 * 1024 * 1024   # 16MB, enforced manually on the image path
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 # Global cap is raised for video; the image route re-checks MAX_IMAGE_BYTES so the
 # effective image limit is unchanged.
@@ -1515,7 +1515,7 @@ def _proactive_worker() -> None:
     """Run the episode ``worker`` with every generation tagged as proactive.
 
     The background queue is automated (non-interactive) work, so all AI usage it
-    incurs — transcription, summaries, action items — is metered as ``proactive``.
+    incurs (transcription, summaries, action items) is metered as ``proactive``.
     ContextVars are per-thread, so this override is scoped to the worker thread.
     """
     with usage_meter.usage_context("proactive"):
@@ -5770,8 +5770,8 @@ def _group_standalone_posts(rows):
     """Collapse per-platform rows into one entry per distinct post.
 
     Compose shows a single card per piece of copy, with a tick for each platform
-    it goes to. The database still stores one row per (platform, content) — that
-    row is what queueing, scheduling and publishing key on — so the card is a
+    it goes to. The database still stores one row per (platform, content), that
+    row is what queueing, scheduling and publishing key on, so the card is a
     view over a set of rows, not a new kind of record.
 
     Rows group when they share the content, the image and the video, capped at one
@@ -6122,7 +6122,7 @@ def _enrich_post_group(group, scheduled_info, posted_info, brief_names):
 @app.route('/compose')
 def compose_page():
     """Command Center page for generating social media posts."""
-    # All saved posts (newest first) — cheap to load; we only render the first page.
+    # All saved posts (newest first), cheap to load; we only render the first page.
     posts = list_standalone_posts()
 
     # Map brief ids -> names so agent-curated posts can show/filter by their brief
@@ -6238,7 +6238,7 @@ def compose_posts_more():
 
     Honours the Compose filter bar. The page renders only the first
     POSTS_PAGE_SIZE cards, so filtering in the browser could only ever reveal
-    matches that happened to be loaded already — a post further down the list
+    matches that happened to be loaded already; a post further down the list
     stayed invisible no matter what the filter said. Paging through the
     *filtered* set here is what lets a filter reach every saved post.
 
@@ -6318,8 +6318,8 @@ def _sort_post_groups(groups, sort):
 
     Applied after filtering, and after the display indexes are taken, so a post
     keeps the same "Post N" label whichever order it is shown in. Each card
-    sorts by its ``head`` row — the one whose position put the card where the
-    unsorted list had it — so a card can't change places just because one of its
+    sorts by its ``head`` row, the one whose position put the card where the
+    unsorted list had it, so a card can't change places just because one of its
     platforms was added later.
     """
     key = _POST_SORT_KEYS.get((sort or '').strip())
@@ -6397,7 +6397,7 @@ def _filtered_post_groups(args):
     than only the posts currently rendered.
 
     Cards are grouped over *every* saved post before filtering, so a card always
-    shows every platform its copy goes to — including platforms the current
+    shows every platform its copy goes to, including platforms the current
     filter excludes, which is what the ticks have to reflect to be honest.
     ``index_by_id`` maps each row to its card's 1-based position in the
     unfiltered list: the "Post N" label the page and Find & Replace both show.
@@ -6433,7 +6433,7 @@ def _filtered_standalone_posts(args):
     Find & Replace and the bulk actions still work one post row at a time, so
     they take the rows of every matching card. Deriving both from
     _filtered_post_groups is what keeps them acting on exactly the cards the
-    page is showing — there is no second copy of the predicate to drift.
+    page is showing; there is no second copy of the predicate to drift.
 
     A platform filter narrows to that platform's rows: with the list showing
     only X, a bulk delete must not take the Threads twin with it.
@@ -6447,7 +6447,7 @@ def _selected_standalone_posts(payload):
 
     Two payload shapes:
       ``{"post_ids": [...]}``  the checkboxes ticked on the page
-      ``{"filters": {...}}``   "select all across every page" — the server
+      ``{"filters": {...}}``   "select all across every page": the server
                                re-derives the matching set from the filter bar,
                                so the browser never has to ship (or go stale on)
                                thousands of ids.
@@ -6500,7 +6500,7 @@ def compose_posts_ids():
 
 
 # How many matching posts the Find & Replace modal renders at once. Replace All
-# still applies to every match — the cap only bounds the preview list.
+# still applies to every match, the cap only bounds the preview list.
 POST_SEARCH_RESULT_LIMIT = 200
 
 
@@ -6519,7 +6519,7 @@ def _search_exclude_words(raw):
 
 
 def _post_search_pattern(find_text, case_sensitive, whole_word):
-    """The Find & Replace pattern — identical to the one the replace applies."""
+    """The Find & Replace pattern, identical to the one the replace applies."""
     flags = 0 if case_sensitive else re.IGNORECASE
     body = re.escape(find_text)
     if whole_word:
@@ -6533,7 +6533,7 @@ def compose_posts_search():
 
     The modal used to download all post text and match it in JavaScript. Doing
     it here keeps the response to the posts that actually match, and makes the
-    preview use the exact same regex that /compose/posts/replace will apply —
+    preview use the exact same regex that /compose/posts/replace will apply,
     previously JS did the finding and Python did the replacing, so the two could
     disagree on what matched.
     """
@@ -6550,7 +6550,7 @@ def compose_posts_search():
 
     # One result per card, not per platform row. The rows behind a card all hold
     # the same copy, so listing them separately would show the same hit two or
-    # three times over — and replacing in only some of them would split the card.
+    # three times over, and replacing in only some of them would split the card.
     groups, _ = _filtered_post_groups(request.args)
     platform = _valid_post_platform(request.args.get('platform'))
     pattern = _post_search_pattern(find_text, case_sensitive, whole_word)
@@ -6661,8 +6661,8 @@ def compose_posts_replace():
     platform = _valid_post_platform(filters.get('platform'))
     rows = _rows_for_groups(groups, platform)
 
-    # The results list shows one entry per card, so a post the user unticked —
-    # or an individual match they clicked to skip — has to carry to every row
+    # The results list shows one entry per card, so a post the user unticked,
+    # or an individual match they clicked to skip, has to carry to every row
     # behind that card. Applying it to the listed row alone would leave the other
     # platforms with the old text, splitting the card in two.
     siblings = {}
@@ -6785,10 +6785,10 @@ def compose_queue_all_unscheduled():
     """Queue unscheduled, unused saved posts (server-side).
 
     Two modes:
-      ``platform=<name>``   the platform card's "Queue All" — every unscheduled
+      ``platform=<name>``   the platform card's "Queue All": every unscheduled
                             post on that platform.
       ``{"filters": {...}, "platforms": [...]}``  a "select all across every
-                            page" selection — the server re-derives the matching
+                            page" selection: the server re-derives the matching
                             posts and queues each platform in this one request.
     """
     payload = request.get_json(silent=True) or {}
@@ -7655,8 +7655,8 @@ def _requested_post_ids(default_id, field='post_ids'):
 def _card_rows(post, post_ids):
     """The rows of ``post_ids`` that really are ``post``'s card, ``post`` first.
 
-    Ids from the browser can be stale — a twin may have been edited, deleted or
-    regrouped in another tab — so a row only counts while it still holds the
+    Ids from the browser can be stale: a twin may have been edited, deleted or
+    regrouped in another tab, so a row only counts while it still holds the
     same copy. That keeps a card-wide edit from rewriting an unrelated post.
     """
     rows = [post]
@@ -7673,7 +7673,7 @@ def _apply_card_image(post, image_url):
     """Set an image on every row of ``post``'s card; returns the ids written.
 
     Every path that attaches an image (upload, URL, library, stock, og:image,
-    source refresh) goes through here so the card's rows keep matching images —
+    source refresh) goes through here so the card's rows keep matching images,
     they would otherwise drift apart into separate cards.
     """
     rows = _card_rows(post, _requested_post_ids(post['id']))
@@ -7739,8 +7739,8 @@ def _post_card_html(post_ids, display_index=None):
 def compose_render_post_card(post_id: int):
     """Re-render one Compose card.
 
-    Used when a card loses some of its platforms but not all of them — a bulk
-    delete run under a platform filter, say — where patching the leftover DOM
+    Used when a card loses some of its platforms but not all of them (a bulk
+    delete run under a platform filter, say), where patching the leftover DOM
     is more error-prone than asking for the card again.
 
     With ``filters`` (the filter bar's state, as JSON) the reply also says
@@ -8437,7 +8437,7 @@ def compose_import_file():
                 skipped_details.append({
                     "row": i,
                     "reason": "duplicate",
-                    "message": f"Duplicate — identical {platform} post already exists (Post #{existing_id})",
+                    "message": f"Duplicate: identical {platform} post already exists (Post #{existing_id})",
                     "fix": "This post is already in the Command Center. Edit the copy in the file to make it unique, delete the existing post first, or set the 'repost' column to true to allow a duplicate.",
                     "platform": platform,
                     "preview": content_preview,
@@ -9771,7 +9771,7 @@ def _ig_pad_to_canvas(img: Image.Image, tw: int, th: int,
 def _store_fitted_image(jpeg_bytes: bytes, prefix: str) -> str:
     """Persist a processed JPEG to Cloudinary (if configured) or local uploads.
 
-    Returns the URL to use for the post — absolute for local storage, matching
+    Returns the URL to use for the post, absolute for local storage, matching
     the upload routes so Instagram's fetcher can reach it.
     """
     if CLOUDINARY_CONFIGURED:
@@ -9906,7 +9906,7 @@ _OVERLAY_FONT_CANDIDATES = [
 
 _OVERLAY_BG_STYLES = {
     "none": None,
-    "dark": (0, 0, 0, 153),        # 60% black — the classic story text pill
+    "dark": (0, 0, 0, 153),        # 60% black, the classic story text pill
     "light": (255, 255, 255, 191),  # 75% white
     "black": (0, 0, 0, 255),
     "white": (255, 255, 255, 255),
@@ -10165,7 +10165,7 @@ def compose_annotate_media():
             return jsonify({"error": "Could not save the image."}), 500
         return jsonify({"success": True, "image_url": new_url, "kind": "image"})
 
-    # Video path — needs ffmpeg on the server
+    # Video path: needs ffmpeg on the server
     if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
         return jsonify({
             "error": "Adding text to video needs ffmpeg installed on the server "
@@ -10257,7 +10257,7 @@ def compose_list_images():
 
 @app.route('/compose/post/<int:post_id>/delete', methods=['POST'])
 def compose_delete_post(post_id: int):
-    """Delete a standalone post — the whole card when the page sends its rows."""
+    """Delete a standalone post, the whole card when the page sends its rows."""
     post = get_standalone_post(post_id)
     if not post:
         return jsonify({"error": "Post not found"}), 404

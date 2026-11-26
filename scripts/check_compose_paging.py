@@ -477,8 +477,8 @@ def section_loadall():
     check(f["fetches"] == [["20", "100"], ["120", "100"], ["220", "100"]],
           f"Load all asks for 100 at a time from where the list ends: {f['fetches']}")
     check(f["cards"] == 250 and f["wrap"] is False, f"every card is loaded and the row goes: {f}")
-    check(f["progress"] == ["⏳ Loading… 20 of 250 — click to stop", "⏳ Loading… 120 of 250 — click to stop",
-                            "⏳ Loading… 220 of 250 — click to stop"],
+    check(f["progress"] == ["⏳ Loading… 20 of 250 (click to stop)", "⏳ Loading… 120 of 250 (click to stop)",
+                            "⏳ Loading… 220 of 250 (click to stop)"],
           f"the button shows progress, and says how to stop: {f['progress']}")
     check(f["toasts"] == [["success", "Loaded all 250 posts"]], f"a finished Load all says so once: {f['toasts']}")
     check(f["loading"] is False and f["running"] is False, "Load all leaves nothing marked as running")

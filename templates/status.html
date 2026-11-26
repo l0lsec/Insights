@@ -99,7 +99,7 @@
                            name="episode_ids" value="{{ ep.id }}" onchange="updateSelectedCount()">
                 </td>
                 <td>
-                    <small>{{ feeds.get(ep.feed_id) or ep_channels.get(ep.id, '—') }}</small>
+                    <small>{{ feeds.get(ep.feed_id) or ep_channels.get(ep.id, '–') }}</small>
                 </td>
                 <td>{{ ep.title }}</td>
                 <td>
@@ -109,8 +109,8 @@
                     <span class="badge badge-text">📄</span>
                     {% endif %}
                 </td>
-                <td class="text-nowrap">{{ ep.published[:10] if ep.published else '—' }}</td>
-                <td class="text-nowrap">{{ ep.processed_at[:10] if ep.processed_at else '—' }}</td>
+                <td class="text-nowrap">{{ ep.published[:10] if ep.published else '–' }}</td>
+                <td class="text-nowrap">{{ ep.processed_at[:10] if ep.processed_at else '–' }}</td>
                 <td>
                     {% if ep.status == 'complete' %}
                     <span class="badge bg-success">Complete</span>

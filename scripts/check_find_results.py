@@ -7,7 +7,7 @@
     python scripts/check_find_results.py server    FIND_ACTIONS_SERVER_OK
 
 Each result in the Find & Replace modal stands for one card. "Go to post" closes
-the modal, pages the list until that card is on it — however far down — and
+the modal, pages the list until that card is on it, however far down, and
 scrolls to it; the ⋯ menu copies, marks used, posts now, schedules, queues or
 deletes the whole card without leaving the results.
 
@@ -552,12 +552,12 @@ const summary = (w) => ({
   loading: w.run('postsLoading'), more: w.more() && w.more().innerHTML, offset: w.more() && String(w.more().dataset.offset),
 });
 (async () => {
-  // 1. deep: card 250 of 300 with 20 shown — batches of 100 until it lands, then stop
+  // 1. deep: card 250 of 300 with 20 shown, batches of 100 until it lands, then stop
   let w = world();
   await jump(w, 250);
   out.deep = summary(w);
 
-  // 2. near: card 45 — one request sized to reach it exactly
+  // 2. near: card 45, one request sized to reach it exactly
   w = world();
   await jump(w, 45);
   out.near = summary(w);
@@ -584,7 +584,7 @@ const summary = (w) => ({
   await jump(w, 999, { position: null });
   out.missing = summary(w);
 
-  // 7. a load already in flight (a scroll load): wait for it, then go on — never two at once
+  // 7. a load already in flight (a scroll load): wait for it, then go on, never two at once
   w = world();
   const release = w.hold();
   const scroll = w.run("loadMorePosts('scroll')");
@@ -669,7 +669,7 @@ def section_jump():
           f"a failed load stops the jump: {f}")
     fw = [t[1] for t in f["toasts"] if t[0] in ("warning", "error")]
     check(any(s.startswith("Failed to load more posts") for s in fw)
-          and any("try Go to post again" in s for s in fw)
+          and any("Try Go to post again" in s for s in fw)
           and not any("isn't in the list" in s for s in fw),
           f"a failure is not reported as 'not in the list': {f['toasts']}")
 

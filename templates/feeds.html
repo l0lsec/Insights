@@ -129,16 +129,16 @@
                     <small class="text-muted">({{ days_ago }}d ago)</small>
                     {% endif %}
                     {% elif not f.last_checked %}
-                    <span class="text-muted" title="Click Open to fetch">—</span>
+                    <span class="text-muted" title="Click Open to fetch">–</span>
                     {% else %}
-                    <span class="text-muted">—</span>
+                    <span class="text-muted">–</span>
                     {% endif %}
                 </td>
                 <td>
                     {% if f.item_count %}
                     <span class="badge bg-secondary">{{ f.item_count }}</span>
                     {% else %}
-                    <span class="text-muted">—</span>
+                    <span class="text-muted">–</span>
                     {% endif %}
                 </td>
                 <td class="text-truncate" style="max-width: 200px;">

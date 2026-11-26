@@ -10,9 +10,9 @@
 
 ---
 
-Insights is an AI-powered content platform that turns RSS feeds, podcasts, YouTube videos, articles, URLs, GitHub repositories, and images into summaries, generated articles, and platform-ready social media posts. It combines state-of-the-art speech recognition with OpenAI (and optional local Ollama models) to process audio, video, text, and visual content, then helps you publish and schedule posts across LinkedIn, Threads, Facebook, and X/Twitter — all from a single web interface or CLI.
+Insights is an AI-powered content platform that turns RSS feeds, podcasts, YouTube videos, articles, URLs, GitHub repositories, and images into summaries, generated articles, and platform-ready social media posts. It combines state-of-the-art speech recognition with OpenAI (and optional local Ollama models) to process audio, video, text, and visual content, then helps you publish and schedule posts across LinkedIn, Threads, Facebook, and X/Twitter, all from a single web interface or CLI.
 
-What started as a podcast transcription tool has grown into a complete content pipeline: ingest any source — RSS feeds, YouTube channels, individual videos, GitHub repos, web pages, images, or raw text — let AI do the heavy lifting, and push polished posts out on your schedule.
+What started as a podcast transcription tool has grown into a complete content pipeline: ingest any source (RSS feeds, YouTube channels, individual videos, GitHub repos, web pages, images, or raw text), let AI do the heavy lifting, and push polished posts out on your schedule.
 
 It also works on content you already have. The **Content Library** catalogues a media archive on disk and sorts it by year and subject, including archives too large to download and stored as cloud placeholders, so a backlog measured in years becomes something you can search and reuse.
 
@@ -38,7 +38,7 @@ It also works on content you already have. The **Content Library** catalogues a 
 - **Local Model Support** - Optionally route generation through a local Ollama instance (text and vision models) instead of OpenAI
 
 #### Content Library
-Catalogue a large media archive and sort it by **year** and **category** — built for backlogs measured in years and hundreds of gigabytes, including archives that live in a cloud folder and are not fully downloaded.
+Catalogue a large media archive and sort it by **year** and **category**: built for backlogs measured in years and hundreds of gigabytes, including archives that live in a cloud folder and are not fully downloaded.
 
 - **Metadata-only scanning** - Walks the archive reading nothing but file metadata, so it downloads nothing and completes in seconds even at tens of thousands of files
 - **Cloud-aware** - Detects OneDrive/iCloud "Files On-Demand" placeholders and treats downloading as a budgeted resource, so a pass can never exceed your free disk space
@@ -289,7 +289,7 @@ All variables can be set in a `.env` file in the project root. See `.env.example
 | `LLM_PROVIDER` | `openai` | Provider for text/vision generation: `openai` or `anthropic` (API keys), or `claude-code` or `codex` (your signed-in Claude or ChatGPT plan, no API credits; see [Using your Claude or ChatGPT subscription](#using-your-claude-or-chatgpt-subscription)) |
 | `OPENAI_MODEL` | `gpt-6.1-sol` | OpenAI model used for summarization, articles, and post generation. Also selectable in the Compose model dropdown: `gpt-6-astra` (most capable), `gpt-6-luna` (cheapest) |
 | `OPENAI_REASONING_EFFORT` | `low` | How hard GPT-5 and later think before answering: `low`, `medium`, `high`, `xhigh`, `max` |
-| `ANTHROPIC_API_KEY` | — | Anthropic (Claude) API key. Required when `LLM_PROVIDER=anthropic` |
+| `ANTHROPIC_API_KEY` | – | Anthropic (Claude) API key. Required when `LLM_PROVIDER=anthropic` |
 | `ANTHROPIC_MODEL` | `claude-opus-5-5` | Claude model used when `LLM_PROVIDER=anthropic`. Also selectable in the Compose dropdown: `claude-sonnet-5-5`, `claude-fable-5-1` (most capable, costs most), `claude-haiku-4-5` |
 | `ANTHROPIC_EFFORT` | `low` | Thinking depth for Opus 5.x, Sonnet 5.x and Fable: `low`, `medium`, `high`, `xhigh`, `max` |
 | `ANTHROPIC_REFUSAL_FALLBACK` | `1` | Re-run a request on a fallback model, in the same call, when a safety classifier declines it. Set `0` to turn off |
@@ -305,7 +305,7 @@ The Library reuses `OLLAMA_BASE_URL`, `OLLAMA_TEXT_MODEL`, and `OLLAMA_VISION_MO
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LIBRARY_PREFETCH_WORKERS` | `6` | Parallel downloads warmed ahead of the classifier. Cloud providers are limited by per-request latency rather than bandwidth, so this is the most effective performance knob — measured on a real archive, 1 thread sustained 0.30 MB/s and 4 reached 3.11 MB/s |
+| `LIBRARY_PREFETCH_WORKERS` | `6` | Parallel downloads warmed ahead of the classifier. Cloud providers are limited by per-request latency rather than bandwidth, so this is the most effective performance knob, measured on a real archive, 1 thread sustained 0.30 MB/s and 4 reached 3.11 MB/s |
 | `LIBRARY_PROBE_TIMEOUT` | `60` | Seconds to wait on a metadata probe of a single file. On a cloud path this includes the provider downloading the file first |
 | `LIBRARY_CONVERT_TIMEOUT` | `90` | Seconds to wait on a thumbnail or frame extraction |
 
@@ -358,10 +358,10 @@ The Library reuses `OLLAMA_BASE_URL`, `OLLAMA_TEXT_MODEL`, and `OLLAMA_VISION_MO
 |----------|-------------|
 | `INSTAGRAM_APP_ID` | Instagram App ID from your Meta app's **Instagram** product (not the Meta app's own ID) |
 | `INSTAGRAM_APP_SECRET` | Instagram App Secret from the same product |
-| `INSTAGRAM_REDIRECT_URI` | OAuth callback URL — must be **HTTPS** (default: `https://localhost:5001/instagram/callback`) |
+| `INSTAGRAM_REDIRECT_URI` | OAuth callback URL: must be **HTTPS** (default: `https://localhost:5001/instagram/callback`) |
 | `INSTAGRAM_SCOPES` | Optional; defaults to `instagram_business_basic,instagram_business_content_publish` |
 
-> Uses the "Instagram API with Instagram Login" flavor (no Facebook Page required). Requires a professional (Business/Creator) Instagram account. Feed/carousel/reel/story media must be publicly hosted — configure Cloudinary or paste public URLs.
+> Uses the "Instagram API with Instagram Login" flavor (no Facebook Page required). Requires a professional (Business/Creator) Instagram account. Feed/carousel/reel/story media must be publicly hosted: configure Cloudinary or paste public URLs.
 
 ### Outreach (Twilio texts)
 
@@ -525,9 +525,9 @@ Processed content is stored in a local SQLite database (`insights.db`) for quick
 
 YouTube videos are supported as a first-class content source. Paste any of these URL formats into the feed input:
 
-- **Single video** - `https://www.youtube.com/watch?v=VIDEO_ID` or `https://youtu.be/VIDEO_ID` — the video is added to a catch-all "YouTube Videos" feed and immediately queued for transcription
-- **Channel** - `https://www.youtube.com/@ChannelName` or `https://www.youtube.com/channel/UC...` — creates a feed from the channel's latest uploads
-- **Playlist** - `https://www.youtube.com/playlist?list=PL...` — creates a feed from all videos in the playlist
+- **Single video**: `https://www.youtube.com/watch?v=VIDEO_ID` or `https://youtu.be/VIDEO_ID`. The video is added to a catch-all "YouTube Videos" feed and immediately queued for transcription
+- **Channel**: `https://www.youtube.com/@ChannelName` or `https://www.youtube.com/channel/UC...`. Creates a feed from the channel's latest uploads
+- **Playlist**: `https://www.youtube.com/playlist?list=PL...`. Creates a feed from all videos in the playlist
 
 YouTube feeds display embedded video players alongside Queue and Process buttons. Audio is extracted from each video using yt-dlp, then transcribed through the same Whisper pipeline used for podcasts. From there, all downstream features work identically: summaries, action items, article generation, and social media post creation.
 
@@ -573,18 +573,18 @@ When generating from URLs or GitHub repos, extracted content (article body, repo
 
 ### Content Library
 
-The **Library** page catalogues a media archive on disk and sorts it by year and category. It is designed for archives that are far larger than your free disk space — a cloud folder whose files are mostly placeholders — so it separates work that is free from work that costs a download, and never spends the latter without telling you first.
+The **Library** page catalogues a media archive on disk and sorts it by year and category. It is designed for archives that are far larger than your free disk space: a cloud folder whose files are mostly placeholders, so it separates work that is free from work that costs a download, and never spends the latter without telling you first.
 
 **Setup:**
 1. Add the archive you want sorted as a folder
-2. If you have a folder you already sorted by hand, add it too and press **Learn categories** — its subfolder names become your starting taxonomy. This is optional; with discovery enabled the Library can build a taxonomy from nothing
+2. If you have a folder you already sorted by hand, add it too and press **Learn categories**: its subfolder names become your starting taxonomy. This is optional; with discovery enabled the Library can build a taxonomy from nothing
 3. Press **Scan**. This reads only file metadata, so it downloads nothing and finishes in seconds even for tens of thousands of files
 
 The scan alone gives you a browsable catalogue: files by year, file kinds, total size, how much is stored locally versus in the cloud, and duplicate groups with the space they waste.
 
 **Classifying:**
 
-Press **Estimate cost** before running anything. It measures your archive's real download throughput and reports exactly how much will be downloaded, roughly how long it will take, and what percentage of the archive the run will cover — then refuses to start a run that would not fit on your disk.
+Press **Estimate cost** before running anything. It measures your archive's real download throughput and reports exactly how much will be downloaded, roughly how long it will take, and what percentage of the archive the run will cover, and then refuses to start a run that would not fit on your disk.
 
 Classification runs cheapest-first:
 
@@ -596,11 +596,11 @@ Classification runs cheapest-first:
 
 Options worth knowing:
 
-- **Years** — scope a run to a year range and work through a large archive in stages
-- **Discover new categories** (on by default) — lets the classifier name subjects your folders never covered. A name is adopted once it recurs across 3 events; rarer proposals are saved switched off in the Categories panel for you to promote with one click
-- **Cloud mapping** — sends only the short text step to a cloud model, which is meaningfully more accurate at matching a caption to a category. Images are never sent
-- **Max file size** — the per-file download ceiling. Events whose smallest file exceeds it are deferred rather than downloaded, and a later run with a higher ceiling will pick them up
-- **Resume** (on by default) — skips events an earlier pass already finished, so an interrupted run continues instead of starting over
+- **Years**: scope a run to a year range and work through a large archive in stages
+- **Discover new categories** (on by default): lets the classifier name subjects your folders never covered. A name is adopted once it recurs across 3 events; rarer proposals are saved switched off in the Categories panel for you to promote with one click
+- **Cloud mapping**: sends only the short text step to a cloud model, which is meaningfully more accurate at matching a caption to a category. Images are never sent
+- **Max file size**: the per-file download ceiling. Events whose smallest file exceeds it are deferred rather than downloaded, and a later run with a higher ceiling will pick them up
+- **Resume** (on by default): skips events an earlier pass already finished, so an interrupted run continues instead of starting over
 
 **Reviewing and copying:**
 
@@ -768,7 +768,7 @@ Every Compose card has a **🎬 Add Video** control under the image, and the **W
 | X | Chunked media upload (`tweet_video`, segments ≤ 5 MB) and a wait for processing | 140 s without Premium, ≤ 1 GB here |
 | Threads | `VIDEO` container, polled until `FINISHED`, then published | ≤ 5 min, ≤ 1 GB, MP4/MOV |
 | Facebook | Page `/videos` edge by `file_url`, caption as the description | ≤ 20 min, ≤ 1 GB |
-| Instagram | Published as a **Reel** (a format you chose on purpose — carousel, story — is kept) | 3 s – 15 min |
+| Instagram | Published as a **Reel** (a format you chose on purpose, such as carousel or story, is kept) | 3 s – 15 min |
 
 - **The video replaces the image.** A card with a video posts the video; its image is not sent.
 - **No silent downgrade.** If a video can't be uploaded, processed or fetched, that target fails with the platform's reason. Image posts still fall back to text; video posts never do, because the copy was written to go with the video.
@@ -789,18 +789,18 @@ Every Compose card has a **🎬 Add Video** control under the image, and the **W
 5. Set `INSTAGRAM_APP_ID`, `INSTAGRAM_APP_SECRET`, and `INSTAGRAM_REDIRECT_URI` in your `.env`
 6. Click **Connect Instagram** in the web UI and authorize
 
-Requires a professional (**Business** or **Creator**) Instagram account. In Meta dev mode, tester access is sufficient for single-user posting — no App Review needed.
+Requires a professional (**Business** or **Creator**) Instagram account. In Meta dev mode, tester access is sufficient for single-user posting: no App Review needed.
 
 #### Post formats
 
 In the Command Center, each Instagram post has a **format selector**:
 
-- **Feed** — a single image (auto-attaches a stock image if none is set)
-- **Carousel** — 2–10 images and/or videos
-- **Reel** — a single video
-- **Story** — a single image or video (no caption; Stories expire after 24h)
+- **Feed**: a single image (auto-attaches a stock image if none is set)
+- **Carousel**: 2–10 images and/or videos
+- **Reel**: a single video
+- **Story**: a single image or video (no caption; Stories expire after 24h)
 
-Media is publicly hosted via Cloudinary (image/video upload) or a pasted public URL. Instagram has no text-only feed posts, so every post needs media. Videos must be MP4/MOV (H.264/AAC, ~90s) — Instagram rejects unsupported codecs/aspect ratios/durations, which the app surfaces as a readable error.
+Media is publicly hosted via Cloudinary (image/video upload) or a pasted public URL. Instagram has no text-only feed posts, so every post needs media. Videos must be MP4/MOV (H.264/AAC, ~90s), Instagram rejects unsupported codecs/aspect ratios/durations, which the app surfaces as a readable error.
 
 ### Outreach
 

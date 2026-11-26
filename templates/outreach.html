@@ -540,7 +540,7 @@ const GSM_BASIC = "@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞÆæßÉ !
 const GSM_EXT = "^{}\\[~]|€";
 
 function plainText(text) {
-    return (text || '').replace(/\s*—\s*/g, ', ')
+    return (text || '').replace(/\s*\u2014\s*/g, ', ')
         .replace(/[‘’‚‛]/g, "'").replace(/[“”„‟]/g, '"')
         .replace(/[–−]/g, '-').replace(/…/g, '...').replace(/ /g, ' ')
         .replace(/[​‌‍﻿]/g, '').trim();

@@ -59,7 +59,7 @@ _PLAIN_PUNCTUATION = {
 
 def plain_text(text: str) -> str:
     """Typographic punctuation replaced with plain characters; em dashes become commas."""
-    text = re.sub(r"\s*—\s*", ", ", text or "")
+    text = re.sub(r"\s*\u2014\s*", ", ", text or "")
     for fancy, plain in _PLAIN_PUNCTUATION.items():
         text = text.replace(fancy, plain)
     text = re.sub(r"[ \t]+\n", "\n", text)

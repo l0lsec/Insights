@@ -1119,7 +1119,7 @@
             </div>
             <textarea class="form-control" id="extra-context" rows="2"
                 placeholder="Add any specific instructions, tone preferences, target audience details, key points to emphasize, or hashtags to include... or click 📚 Library to insert a saved prompt or starter template."></textarea>
-            <small class="text-muted">Works with every tab — including From URL and From Saved Source. This context is added to the AI prompt to guide generation.</small>
+            <small class="text-muted">Works with every tab, including From URL and From Saved Source. This context is added to the AI prompt to guide generation.</small>
         </div>
         
         <!-- Save Button (manual tab) -->
@@ -1150,8 +1150,8 @@
 <!-- Saved Posts Section -->
 
 {# The composer for a brand new post: one body, ticks for where it should go.
-   Saving writes one saved post per ticked platform — the same rows a card is a
-   view over — so a new post lands as a single card. #}
+   Saving writes one saved post per ticked platform, the same rows a card is a
+   view over, so a new post lands as a single card. #}
 {% macro new_post_composer() %}
 <div class="mt-3 pt-3 border-top add-post-area" id="add-post-area">
     <button class="btn btn-sm btn-outline-primary w-100 add-post-toggle-btn" id="add-post-btn" onclick="showAddPostForm()">
@@ -1576,7 +1576,7 @@
                                 </div>
                             </div>
                             <button type="button" class="btn btn-success btn-sm w-100 mb-2" id="ig-bake-text-btn" onclick="igBakeText(this)">🔥 Bake text into media &amp; save</button>
-                            <div class="small text-muted" id="ig-text-note">Drag text to position it. Text is baked into the pixels — for tappable mentions use feed tags or the Instagram app.</div>
+                            <div class="small text-muted" id="ig-text-note">Drag text to position it. Text is baked into the pixels; for tappable mentions use feed tags or the Instagram app.</div>
                         </div>
                         <!-- People tags (real Instagram feed tags) -->
                         <div class="d-none" id="ig-tag-controls">
@@ -1587,7 +1587,7 @@
                                 <button type="button" class="btn btn-outline-primary" id="ig-tag-place-btn" onclick="igArmTagPlacement()">📍 Place on photo</button>
                             </div>
                             <div class="d-flex flex-wrap gap-1 mb-2" id="ig-tag-list"></div>
-                            <div class="small text-muted" id="ig-tag-note">Type a username, then tap the photo where they are. Tags are saved with the post and applied when it publishes (feed photos only — click a pin to remove it).</div>
+                            <div class="small text-muted" id="ig-tag-note">Type a username, then tap the photo where they are. Tags are saved with the post and applied when it publishes (feed photos only; click a pin to remove it).</div>
                         </div>
                         <div class="alert alert-warning py-2 small d-none mb-2" id="ig-video-note"></div>
                         <hr class="my-3">
@@ -4070,7 +4070,7 @@ function markChipPosted(postItem, platform, url, accountId) {
     link.target = '_blank';
     link.rel = 'noopener';
     link.className = 'chip-posted';
-    link.title = 'Posted just now — click to view';
+    link.title = 'Posted just now. Click to view';
     link.textContent = '🔗';
     chip.appendChild(link);
 }
@@ -4103,7 +4103,7 @@ async function publishCardPlatform(postItem, postId, platform, accountId) {
 }
 
 // A card counts as used once every platform it targets has gone out, which is
-// what the server records too — so re-read it rather than guessing.
+// what the server records too, so re-read it rather than guessing.
 async function refreshCardUsedState(postItem) {
     if (!postItem) return;
     const ids = cardPostIds(postItem, false);
@@ -4312,7 +4312,7 @@ function renderIgStrip(postId) {
             // Feed uses the single post image; show its aspect-ratio fit instead
             igCheckFeedImage(postId);
         } else {
-            let msg = `${lim.label} — ${items.length} added`;
+            let msg = `${lim.label}: ${items.length} added`;
             if (items.length < lim.min) msg += ` (need ${lim.min})`;
             if (items.length > lim.max) msg += ` (max ${lim.max})`;
             hint.textContent = msg;
@@ -4684,8 +4684,8 @@ function igCheckChipRatio(postId, item, i, type) {
             want = '9:16 full-screen';
         }
         el.innerHTML = ok
-            ? `${i + 1} <span class="text-success" title="${igRatioLabel(d.w, d.h)} — fits">✓</span>`
-            : `${i + 1} <span title="${igRatioLabel(d.w, d.h)} — a ${type} wants ${want}. Click 👁️ Preview to fix.">⚠️</span>`;
+            ? `${i + 1} <span class="text-success" title="${igRatioLabel(d.w, d.h)}: fits">✓</span>`
+            : `${i + 1} <span title="${igRatioLabel(d.w, d.h)}: a ${type} wants ${want}. Click 👁️ Preview to fix.">⚠️</span>`;
     });
 }
 
@@ -4701,10 +4701,10 @@ function igCheckFeedImage(postId) {
         const r = d.w / d.h;
         const label = igRatioLabel(d.w, d.h);
         if (r < IG_FEED_MIN * (1 - IG_RATIO_TOL) || r > IG_FEED_MAX * (1 + IG_RATIO_TOL)) {
-            hint.textContent = `⚠️ Image is ${label} — outside Instagram's 4:5–1.91:1 range. Click 👁️ Preview to fix.`;
+            hint.textContent = `⚠️ Image is ${label}: outside Instagram's 4:5–1.91:1 range. Click 👁️ Preview to fix.`;
             hint.className = 'small text-danger';
         } else {
-            hint.textContent = `✅ ${label} — fits Instagram`;
+            hint.textContent = `✅ ${label}: fits Instagram`;
             hint.className = 'small text-success';
         }
     });
@@ -4861,20 +4861,20 @@ function renderIgPreview() {
     // Tips
     const tips = {
         story: [
-            'Ideal: 1080×1920 (9:16) — fills the whole screen.',
-            'Keep faces and text out of the shaded top/bottom zones — Instagram overlays your username and the reply box there.',
+            'Ideal: 1080×1920 (9:16): fills the whole screen.',
+            'Keep faces and text out of the shaded top/bottom zones: Instagram overlays your username and the reply box there.',
         ],
         reel: [
             'Ideal: 1080×1920 (9:16), MP4 (H.264 + AAC), up to ~90 seconds.',
             'The right edge is covered by the like/comment rail; the bottom by the caption.',
         ],
         feed: [
-            'Allowed: between 4:5 (portrait) and 1.91:1 (landscape) — anything else is rejected.',
+            'Allowed: between 4:5 (portrait) and 1.91:1 (landscape); anything else is rejected.',
             '4:5 portrait takes up the most space in the feed.',
         ],
         carousel: [
             'Each item must be between 4:5 and 1.91:1.',
-            'Instagram crops every item to the FIRST item\'s shape — keep them consistent.',
+            'Instagram crops every item to the FIRST item\'s shape: keep them consistent.',
         ],
     };
     document.getElementById('ig-preview-tips').innerHTML =
@@ -4932,7 +4932,7 @@ function igUpdateFitStatus() {
     if (!st.dims) {
         dimsEl.textContent = 'Could not read the media dimensions (the host may block loading).';
         statusEl.className = 'alert alert-secondary py-2 small mb-3';
-        statusEl.textContent = 'Preview shown as Instagram would frame it — dimensions unavailable, so no automatic verdict.';
+        statusEl.textContent = 'Preview shown as Instagram would frame it; dimensions unavailable, so no automatic verdict.';
         return;
     }
     const { w, h } = st.dims;
@@ -4944,23 +4944,23 @@ function igUpdateFitStatus() {
     if (isStoryLike) {
         if (igRatioClose(r, IG_STORY_RATIO)) {
             statusEl.className = 'alert alert-success py-2 small mb-3';
-            statusEl.textContent = `✅ ${label} — fills the ${st.type} screen perfectly.`;
+            statusEl.textContent = `✅ ${label}: fills the ${st.type} screen perfectly.`;
         } else {
             statusEl.className = 'alert alert-warning py-2 small mb-3';
             statusEl.textContent = `⚠️ ${label} doesn't match the 9:16 full-screen ${st.type}. ` +
                 'Instagram will shrink it and pad the rest with a background, so it looks small and off. ' +
-                (isVideo ? 'Re-export the video at 1080×1920 (9:16) — videos can\'t be adjusted here.'
+                (isVideo ? 'Re-export the video at 1080×1920 (9:16); videos can\'t be adjusted here.'
                          : 'Fix it below: crop to fill, or fit it over a background.');
         }
     } else {
         if (r < IG_FEED_MIN * (1 - IG_RATIO_TOL) || r > IG_FEED_MAX * (1 + IG_RATIO_TOL)) {
             statusEl.className = 'alert alert-danger py-2 small mb-3';
-            statusEl.textContent = `❌ ${label} is outside Instagram's allowed range (4:5 to 1.91:1) — ` +
+            statusEl.textContent = `❌ ${label} is outside Instagram's allowed range (4:5 to 1.91:1), so ` +
                 'the post will be REJECTED. ' +
                 (isVideo ? 'Re-export the video within that range.' : 'Crop or pad it below before posting.');
         } else {
             statusEl.className = 'alert alert-success py-2 small mb-3';
-            statusEl.textContent = `✅ ${label} is within Instagram's allowed range — it will post as-is. ` +
+            statusEl.textContent = `✅ ${label} is within Instagram's allowed range: it will post as-is. ` +
                 (isVideo ? '' : 'Use the tools below only if you want a different shape.');
         }
     }
@@ -5388,7 +5388,7 @@ function igPlaceTag(x, y) {
     const input = document.getElementById('ig-tag-username');
     if (input) input.value = '';
     document.getElementById('ig-tag-note').textContent =
-        'Type a username, then tap the photo where they are. Tags are saved with the post and applied when it publishes (feed photos only — click a pin to remove it).';
+        'Type a username, then tap the photo where they are. Tags are saved with the post and applied when it publishes (feed photos only; click a pin to remove it).';
     igSaveUserTags();
     renderIgPreview();
 }
@@ -5493,7 +5493,7 @@ function recheckCardFilters(postItem) {
 }
 
 // Every row behind a card. With a platform filter active the list is showing
-// that platform only, so bulk actions stay inside it — deleting from a list
+// that platform only, so bulk actions stay inside it, deleting from a list
 // filtered to X must not take the Threads twin with it.
 function cardPostIds(postItem, respectFilter = true) {
     if (!postItem) return [];
@@ -5509,7 +5509,7 @@ function cardPostIds(postItem, respectFilter = true) {
 }
 
 // Card-wide edits (content, image, used, delete) send the card's rows so the
-// server applies them to all of them — the copy and image are what group the
+// server applies them to all of them, the copy and image are what group the
 // rows, so changing them on one platform alone would split the card.
 function cardIdsParam(postId) {
     const postItem = document.querySelector(`.post-item[data-post-id="${postId}"]`);
@@ -5759,7 +5759,7 @@ async function loadPostsBatch(limit) {
     const offset = parseInt(controls.more.dataset.offset || '0', 10);
     let data;
     try {
-        // Page within the filtered set — the server applies the same filters the
+        // Page within the filtered set: the server applies the same filters the
         // list was rendered under, so this can't surface non-matching posts.
         const res = await fetch('/compose/posts/more' + postFilterQuery(filters, {
             offset: String(offset),
@@ -5832,7 +5832,7 @@ async function loadAllPosts() {
                 const shown = parseInt(controls.more.dataset.offset || '0', 10);
                 controls.more.disabled = true;
                 controls.all.disabled = false;   // the same button stops it
-                controls.all.innerHTML = `⏳ Loading… ${shown} of ${controls.wrap.dataset.total} — click to stop`;
+                controls.all.innerHTML = `⏳ Loading… ${shown} of ${controls.wrap.dataset.total} (click to stop)`;
                 const data = await loadPostsBatch(POSTS_MAX_BATCH);
                 if (!data) break;   // failed, or the filters changed: keep what is loaded
                 showBatchResult(data);
@@ -6050,7 +6050,7 @@ function schedulePost() {
 // Select mode functions
 
 // When null, bulk actions act on the checked checkboxes currently in the DOM.
-// When set, they act on EVERY saved post matching the filter bar — including
+// When set, they act on EVERY saved post matching the filter bar, including
 // posts on pages that haven't been loaded:
 //   {filters: {platform, used, queued, image, source, brief}, total, byPlatform}
 let selectAllScope = null;
@@ -6074,7 +6074,7 @@ function currentPostFilters() {
         image: val('filter-image'),
         source: val('filter-source'),
         brief: val('filter-brief'),
-        // Not a filter — it rides along so every endpoint that renders a list
+        // Not a filter: it rides along so every endpoint that renders a list
         // returns it in the chosen order, but see NARROWING_FILTER_KEYS.
         sort: val('filter-sort'),
     };
@@ -6148,7 +6148,7 @@ async function offerSelectAllScope(loadedCount) {
         rowTotal = data.count;
         byPlatform = data.by_platform;
     } catch (e) {
-        return;  // Can't size the offer — leave the plain selection alone.
+        return;  // Can't size the offer: leave the plain selection alone.
     }
 
     if (total <= loadedCount) {
@@ -6174,7 +6174,7 @@ function enableSelectAllScope(filters, total, byPlatform, rowTotal) {
     };
 
     document.getElementById('select-all-scope-text').textContent =
-        `All ${total} ${scopeLabel(filters, total)} selected — bulk actions apply to every page.`;
+        `All ${total} ${scopeLabel(filters, total)} selected. Bulk actions apply to every page.`;
 
     const btn = document.getElementById('select-all-scope-btn');
     btn.textContent = 'Clear selection';
@@ -6196,7 +6196,7 @@ function onPostCheckboxChange() {
 }
 
 // Bulk actions hand the server the filter set and let it resolve the matching
-// posts itself. Post Now is the exception — it publishes one post per request,
+// posts itself. Post Now is the exception: it publishes one post per request,
 // so it genuinely needs the ids in the browser.
 async function fetchScopedPosts() {
     const res = await fetch('/compose/posts/ids' + postFilterQuery(selectAllScope.filters));
@@ -6326,7 +6326,7 @@ function updateSelectedCount() {
         document.getElementById('add-platform-count').textContent = count;
         document.getElementById('remove-platform-count').textContent = count;
 
-        // Image ops don't support the across-pages selection — they only act on
+        // Image ops don't support the across-pages selection: they only act on
         // the posts actually rendered, so hide them while a scope is active.
         if (scoped) {
             removeImageBtn.classList.add('d-none');
@@ -6417,7 +6417,7 @@ function updateSelectedCount() {
     }
 }
 
-// A card's ticked platforms, narrowed to the platform filter when one is set —
+// A card's ticked platforms, narrowed to the platform filter when one is set,
 // the same rule cardPostIds() follows, so counts match what actions will do.
 function selectedChips(card) {
     if (!card.postItem) return [];
@@ -6727,7 +6727,7 @@ async function queueSelectedPosts() {
     // the filters and queues each platform, instead of the browser shipping
     // thousands of ids or looping post by post.
     if (selectAllScope) {
-        // Which queueable platforms the selection actually covers — the banner's
+        // Which queueable platforms the selection actually covers, the banner's
         // per-platform counts already tell us, so no id fetch is needed.
         const scopePlatform = selectAllScope.filters.platform;
         const candidates = scopePlatform ? [scopePlatform] : Object.keys(selectAllScope.byPlatform || {});
@@ -6778,7 +6778,7 @@ async function queueSelectedPosts() {
         const queuedTotal = data.queued || 0;
         let msg = `Queued ${queuedTotal} post${queuedTotal !== 1 ? 's' : ''}`;
         if (data.skipped) msg += `, skipped ${data.skipped}`;
-        if (data.no_slots) msg += ' (ran out of time slots — add more)';
+        if (data.no_slots) msg += ' (ran out of time slots; add more)';
         if (notConnected.length) msg += `; not connected, so not queued: ${platformList(notConnected)}`;
         showToast(msg, data.no_slots || notConnected.length ? 'warning' : 'success');
         setTimeout(() => location.reload(), 1200);
@@ -7774,7 +7774,7 @@ async function findStockImagesForSelected() {
     toggleSelectMode();
 }
 
-// Total saved posts per platform (from the server, across ALL posts — not just
+// Total saved posts per platform (from the server, across ALL posts, not just
 // the page currently loaded). Used for the Queue-All modal counts. These count
 // platform rows, which is what queueing acts on; POSTS_TOTAL counts cards.
 const PLATFORM_TOTALS = {{ platform_totals | tojson }};
@@ -7836,7 +7836,7 @@ async function queueAllUnscheduled(platform) {
         }
         let msg = `Queued ${data.queued} ${platform} post${data.queued !== 1 ? 's' : ''}`;
         if (data.skipped) msg += `, skipped ${data.skipped}`;
-        if (data.no_slots) msg += ' (ran out of time slots — add more)';
+        if (data.no_slots) msg += ' (ran out of time slots; add more)';
         showToast(msg, data.no_slots ? 'warning' : 'success');
         setTimeout(() => location.reload(), 1200);
     } catch (e) {
@@ -7966,7 +7966,7 @@ async function clearAllPosts() {
 // showToast(message, type) is the shared one from static/insights-ui.js.
 
 // Post filtering functions
-// Discards a superseded filter render — changing two selects quickly fires two
+// Discards a superseded filter render, changing two selects quickly fires two
 // fetches that can come back out of order.
 let filterRequestSeq = 0;
 
@@ -8092,13 +8092,13 @@ function clearPostFilters() {
 // ============================================================================
 
 // The posts currently rendered in the results list. The server caps how many it
-// returns, so this is not always every matching post — see searchResultInfo.
+// returns, so this is not always every matching post, see searchResultInfo.
 let searchReplacePostData = [];
 let searchDebounceTimer = null;
 let excludedMatches = {}; // { "postId-matchIndex": true } for excluded matches
 let openSearchEdits = {}; // { postId: draftText } for inline editors currently open
 
-// Discards responses from a superseded search — each keystroke fires its own
+// Discards responses from a superseded search, each keystroke fires its own
 // request and they can come back out of order.
 let searchRequestSeq = 0;
 
@@ -8200,7 +8200,7 @@ async function doSearch(preserveState = false) {
         return;
     }
 
-    // The server does the matching, over every post the filter bar covers —
+    // The server does the matching, over every post the filter bar covers,
     // and with the same regex the replace will use.
     const filters = currentPostFilters();
     const params = { find: findText };
@@ -8246,7 +8246,7 @@ async function doSearch(preserveState = false) {
             postIds: (post.post_ids || [post.id]).join(','),
             content: content,
             platform: post.platform || 'unknown',
-            // Every platform this one card goes to — the edit covers all of them.
+            // Every platform this one card goes to: the edit covers all of them.
             platforms: post.platforms || [post.platform || 'unknown'],
             index: post.index != null ? String(post.index) : '?',
             // Where the card sits in the filtered list, for "Go to post".
@@ -8298,13 +8298,13 @@ async function doSearch(preserveState = false) {
     document.getElementById('search-click-hint').classList.remove('d-none');
 
     // Only a page of matches is rendered when there are a lot of them, but
-    // Replace All still covers every one — say so rather than implying the list
+    // Replace All still covers every one: say so rather than implying the list
     // is the whole set.
     const truncatedNotice = document.getElementById('search-truncated-notice');
     if (searchResultInfo.truncated) {
         truncatedNotice.querySelector('small').textContent =
             `Showing the first ${matchingPosts.length} of ${data.matched_posts} matching posts. ` +
-            `Replace All covers all ${data.matched_posts} — unticking a post here excludes just that post.`;
+            `Replace All covers all ${data.matched_posts}. Unticking a post here excludes just that post.`;
         truncatedNotice.classList.remove('d-none');
     } else {
         truncatedNotice.classList.add('d-none');
@@ -8578,7 +8578,7 @@ function cancelSearchResultEdit(postId) {
     const card = document.querySelector(`.search-result-card[data-post-id="${postId}"]`);
     if (!card) return;
 
-    // Drop the draft — the textarea is re-seeded from post data on reopen
+    // Drop the draft: the textarea is re-seeded from post data on reopen
     const textarea = document.getElementById(`search-edit-textarea-${postId}`);
     const post = searchReplacePostData.find(p => p.id === postId);
     if (textarea && post) textarea.value = post.content;
@@ -8684,7 +8684,7 @@ function saveSearchResultEdit(postId) {
 }
 
 // Keep the post as rendered on the page behind the modal in sync with the edit
-// Find the card showing a given saved post — it may be the card's primary row
+// Find the card showing a given saved post, it may be the card's primary row
 // or one of its twins, and only the primary row keys the card's element ids.
 function cardForPostId(postId) {
     const direct = document.querySelector(`.post-item[data-post-id="${postId}"]`);
@@ -8806,7 +8806,7 @@ async function jumpToSearchResult(resultId) {
             // A failed load has already said why; this says what it means.
             showToast(found.complete
                 ? `Post ${post.index} isn't in the list under the current filters`
-                : `Couldn't bring up Post ${post.index} — try Go to post again`, 'warning');
+                : `Couldn't bring up Post ${post.index}. Try Go to post again`, 'warning');
             return;
         }
     }
@@ -9016,7 +9016,7 @@ async function executeReplaceAll() {
             whole_word: wholeWord,
             exclude: excludeWordsInput,
             // The filters the results were produced under, not whatever the
-            // filter bar says now — the two can differ if it moved meanwhile.
+            // filter bar says now: the two can differ if it moved meanwhile.
             filters: searchResultInfo.filters || currentPostFilters(),
             deselected_ids: deselectedIds,
             excluded_matches: excludedMatches
@@ -9292,14 +9292,14 @@ function importFile() {
         if (data.skipped_details && data.skipped_details.length > 0) {
             const reasonIcons = {duplicate: '🔁', unsupported_platform: '🚫', empty_content: '📭'};
             html += '<details class="mt-2 small" ' + (data.imported === 0 ? 'open' : '') + '>';
-            html += '<summary class="text-muted fw-bold" style="cursor:pointer">⚠️ ' + data.skipped_details.length + ' skipped row(s) — click for details</summary>';
+            html += '<summary class="text-muted fw-bold" style="cursor:pointer">⚠️ ' + data.skipped_details.length + ' skipped row(s) (click for details)</summary>';
             html += '<div class="mt-2" style="max-height:300px;overflow-y:auto">';
             data.skipped_details.forEach(d => {
                 const icon = reasonIcons[d.reason] || '⚠️';
                 html += '<div class="border rounded p-2 mb-2 bg-white">';
                 html += '<div><strong>' + icon + ' Row ' + d.row + '</strong>';
                 if (d.platform) html += ' <span class="badge bg-secondary">' + d.platform + '</span>';
-                html += ' — ' + d.message;
+                html += ': ' + d.message;
                 if (d.duplicate_post_id) html += ' <a href="#saved-post-' + d.duplicate_post_id + '" class="ms-1" onclick="location.reload()" title="Scroll to post">[view]</a>';
                 html += '</div>';
                 if (d.preview) html += '<div class="text-muted mt-1" style="white-space:pre-wrap;word-break:break-word">"' + d.preview + '"</div>';

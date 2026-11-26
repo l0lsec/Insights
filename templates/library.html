@@ -19,7 +19,7 @@
                         {% if ollama.vision_ready %}✅{% else %}⚠️{% endif %} {{ ollama.vision_model }}
                     </div>
                     <div class="text-muted small">
-                        {% if ollama.vision_ready %}Vision ready — captions run free on this Mac.
+                        {% if ollama.vision_ready %}Vision ready: captions run free on this Mac.
                         {% else %}Not installed. Run <code>ollama pull {{ ollama.vision_model }}</code>.{% endif %}
                     </div>
                 {% else %}
@@ -113,7 +113,7 @@
         </table>
         {% else %}
         <p class="text-muted mb-0">
-            Add the archive you want sorted, and — if you have one — a folder you have already
+            Add the archive you want sorted, and, if you have one, a folder you have already
             sorted by hand. Its subfolder names become the categories.
         </p>
         {% endif %}
@@ -124,7 +124,7 @@
 {% if categories %}
 <div class="card mb-4">
     <div class="card-header"><strong>Categories</strong>
-        <span class="text-muted small">— learned from your sorted folder; untick to exclude</span>
+        <span class="text-muted small">· learned from your sorted folder; untick to exclude</span>
     </div>
     <div class="card-body">
         {% for c in categories %}
@@ -143,7 +143,7 @@
 
 {% if not scan %}
 <div class="alert alert-secondary">
-    No catalogue yet. Add an archive folder above and press <strong>Scan</strong> — it reads
+    No catalogue yet. Add an archive folder above and press <strong>Scan</strong>: it reads
     metadata only, so it costs nothing and takes seconds even for tens of thousands of files.
 </div>
 {% else %}
@@ -262,7 +262,7 @@
             </div>
             <div class="form-text mt-2">
                 Images are captioned locally and free. Only the short text mapping step can go to
-                the cloud — your photos never leave this Mac. With discovery on, your categories
+                the cloud; your photos never leave this Mac. With discovery on, your categories
                 are a starting point, not a constraint: content that fits none of them gets a new
                 name, and a name is adopted once it recurs across
                 {{ 3 }} events. Rarer suggestions are saved switched off for you to review.
@@ -320,7 +320,7 @@
 <!-- ── Copy plan ────────────────────────────────────────────────────────── -->
 <div class="card mb-4">
     <div class="card-header"><strong>Copy plan</strong>
-        <span class="text-muted small">— review, approve, then copy. Originals are never moved.</span>
+        <span class="text-muted small">· review, approve, then copy. Originals are never moved.</span>
     </div>
     <div class="card-body">
         <div class="row g-2 align-items-end mb-3">
@@ -367,7 +367,7 @@
             </div>
         </div>
         <div class="form-text">
-            <strong>Link</strong> builds the folder tree without copying or downloading anything —
+            <strong>Link</strong> builds the folder tree without copying or downloading anything:
             the only option that works when the archive is larger than your disk. <strong>Copy</strong>
             duplicates the bytes, and copying a cloud-only file downloads it first.
             Either way an undo manifest is written into the destination folder.
@@ -379,7 +379,7 @@
 <div class="card mb-4">
     <div class="card-header d-flex justify-content-between align-items-center">
         <div><strong>Needs review</strong>
-            <span class="text-muted small">— labels most likely to be wrong, worst first</span></div>
+            <span class="text-muted small">· labels most likely to be wrong, worst first</span></div>
         <button class="btn btn-sm btn-outline-warning" onclick="loadReview()">🔍 Find likely mistakes</button>
     </div>
     <div class="card-body p-0">
@@ -457,7 +457,7 @@ async function loadEstimate() {
         Will caption <strong>${e.sample_files.toLocaleString()}</strong> sample files,
         downloading <strong>${e.download_gb} GB</strong> of ${e.free_gb} GB free.
         <div class="mt-1">
-          Roughly <strong>${e.est_hours} h</strong> total —
+          Roughly <strong>${e.est_hours} h</strong> total:
           ${e.download_hours} h of downloading at ${e.mb_per_s} MB/s
           ${e.measured ? '(just measured on your archive)' : '(estimated)'},
           overlapped with ${e.vision_hours} h of captioning.
@@ -510,7 +510,7 @@ async function poll() {
 
     // Reload only after watching a job we were present for finish. Keying off
     // the status alone reloads on every page load once a scan has ever
-    // completed, because that status is then permanent — which reloads the
+    // completed, because that status is then permanent, which reloads the
     // page every second or so, forever, and makes it impossible to scroll or
     // read anything.
     if (s.running) { sawJobRunning = true; setTimeout(poll, 3000); }
@@ -534,7 +534,7 @@ async function buildPlan() {
 function renderPlan(summary, total) {
     const box = document.getElementById('planSummary');
     if (!summary || !summary.by_category || !summary.by_category.length) {
-        box.textContent = 'Plan is empty — try lowering the minimum confidence.';
+        box.textContent = 'Plan is empty. Try lowering the minimum confidence.';
         return;
     }
     let html = `<div class="mb-2"><strong>${(total || 0).toLocaleString()}</strong> files planned.
@@ -617,7 +617,7 @@ function esc(v) {
 }
 
 const PREVIEW_HINT = {
-    remote: 'In OneDrive, not downloaded — no preview without fetching it',
+    remote: 'In OneDrive, not downloaded; no preview without fetching it',
     local: 'On this Mac, preview not rendered yet',
 };
 
@@ -633,7 +633,7 @@ function thumbCell(f) {
                  style="object-fit:cover;border-radius:3px;cursor:pointer"
                  onclick="lightbox(${f.id}, '${esc(f.rel_path).replace(/'/g, "\\'")}')"
                  onerror="this.replaceWith(Object.assign(document.createElement('span'),
-                          {className:'text-muted small', textContent:'—',
+                          {className:'text-muted small', textContent:'–',
                            title:'Preview unavailable'}))">`;
 }
 
@@ -733,7 +733,7 @@ async function buildThumbs() {
     }
 
     // Watch the job to completion. Without this the button simply greys out and
-    // nothing ever reports back, which reads as the click having done nothing —
+    // nothing ever reports back, which reads as the click having done nothing,
     // especially on a re-run, where every preview is already cached and the
     // honest result is that there was no work to do.
     for (;;) {
@@ -754,7 +754,7 @@ async function buildThumbs() {
             out.innerHTML = made
                 ? `<span class="text-success">Rendered ${made.toLocaleString()} new previews${t.fetched ? `, fetching ${t.fetched.toLocaleString()} files (${((t.fetched_bytes||0)/1073741824).toFixed(1)} GB)` : ''}.</span>
                    ${(cache.files || 0).toLocaleString()} cached in total (${((cache.bytes || 0) / 1048576).toFixed(0)} MB).`
-                : `Nothing new to render — all ${(cache.files || 0).toLocaleString()} previews for
+                : `Nothing new to render: all ${(cache.files || 0).toLocaleString()} previews for
                    locally-available files are already cached
                    (${((cache.bytes || 0) / 1048576).toFixed(0)} MB).
                    <div class="mt-1">The remaining ${(t.skipped || 0).toLocaleString()} files are in OneDrive
@@ -779,7 +779,7 @@ async function thumbStats() {
 function categoryOptions(current) {
     const opts = LIBRARY_CATEGORIES.map(c =>
         `<option value="${esc(c)}"${c === current ? ' selected' : ''}>${esc(c)}</option>`).join('');
-    return `<option value="">— change to —</option>${opts}<option value="Unsorted">Unsorted</option>`;
+    return `<option value="">Change to…</option>${opts}<option value="Unsorted">Unsorted</option>`;
 }
 
 async function loadReview() {
@@ -841,7 +841,7 @@ async function loadDuplicates() {
     const r = await fetch(`/library/scan/${SCAN_ID}/duplicates`);
     const d = await r.json();
     const box = document.getElementById('browseResults');
-    let html = `<div class="mb-2"><strong>${d.total_groups}</strong> duplicate groups —
+    let html = `<div class="mb-2"><strong>${d.total_groups}</strong> duplicate groups:
         ${fmtGb(d.reclaimable_bytes)} reclaimable if you keep one copy of each.</div>
         <table class="table table-sm"><thead><tr><th>File</th><th class="text-end">Copies</th>
         <th class="text-end">Reclaimable</th></tr></thead><tbody>`;

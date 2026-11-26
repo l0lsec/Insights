@@ -68,7 +68,7 @@
             {% for row in rows %}
             <tr>
                 <td style="white-space: nowrap; font-variant-numeric: tabular-nums; color: #6c757d;">{{ row['ts'] }}</td>
-                <td>{{ row['username'] or '—' }}</td>
+                <td>{{ row['username'] or '–' }}</td>
                 <td><code>{{ row['action'] }}</code></td>
                 <td>{{ row['target'] or '' }}</td>
                 <td><span class="badge bg-secondary">{{ row['method'] or '' }}</span></td>
@@ -76,7 +76,7 @@
                 <td>
                     {% set sc = row['status_code'] %}
                     {% if sc is none %}
-                        <span class="text-muted">—</span>
+                        <span class="text-muted">–</span>
                     {% elif sc < 300 %}
                         <span class="badge bg-success">{{ sc }}</span>
                     {% elif sc < 400 %}

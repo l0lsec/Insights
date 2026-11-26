@@ -222,12 +222,12 @@
                     <code>{{ row['model'] }}</code>
                     {% if row['provider'] != 'openai' %}<span class="text-muted">· {{ row['provider'] }}</span>{% endif %}
                 </td>
-                <td>{{ row['username'] or '—' }}</td>
+                <td>{{ row['username'] or '–' }}</td>
                 <td class="text-end" style="font-variant-numeric: tabular-nums; color:#6c757d;">
                     {% if row['total_tokens'] %}{{ num(row['total_tokens']) }} tok
                     {%- elif row['audio_seconds'] %}{{ '%.1f'|format(row['audio_seconds'] / 60.0) }} min
                     {%- elif row['images'] %}{{ row['images'] }} img
-                    {%- else %}—{% endif %}
+                    {%- else %}–{% endif %}
                 </td>
                 <td class="text-end fw-semibold">{{ money(row['cost_usd']) }}</td>
             </tr>

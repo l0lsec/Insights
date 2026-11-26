@@ -126,7 +126,7 @@ def _extract_pdf(data: bytes) -> str:
     text = "\n\n".join(p for p in parts if p.strip())
     if not text.strip():
         raise ExtractionError(
-            "No selectable text found in this PDF — it may be a scanned image. "
+            "No selectable text found in this PDF. It may be a scanned image. "
             "Try a PDF with real text, or paste the content into the From Text tab."
         )
     return text

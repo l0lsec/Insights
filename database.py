@@ -1745,7 +1745,7 @@ def bulk_replace_post_content(
                 new_content = ''.join(new_content)
             else:
                 # No exclusions, replace all matches. The lambda keeps the
-                # replacement literal — re.sub would read backslash escapes in
+                # replacement literal: re.sub would read backslash escapes in
                 # a plain string, so a typed "\n" became a newline and "\1" or
                 # a trailing backslash raised. The selective branch above
                 # already appends replace_text as-is; this matches it, and what

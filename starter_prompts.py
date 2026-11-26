@@ -66,17 +66,17 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "category": "Promote Content",
         "title": "Promote a blog post",
         "content": (
-            "I published a blog titled \"[BLOG TITLE]\" — link: [URL].\n"
+            "I published a blog titled \"[BLOG TITLE]\", link: [URL].\n"
             "The core takeaway is: [ONE-SENTENCE MAIN POINT].\n\n"
             "Write posts that make a busy [AUDIENCE, e.g. IT director / practice "
             "owner] stop scrolling and click through.\n"
-            "- Open with a specific hook pulled from the piece — a scenario, a "
+            "- Open with a specific hook pulled from the piece: a scenario, a "
             "stat, or a pointed question. No generic intros.\n"
             "- Build the whole post around ONE concrete idea from the blog. Don't "
             "summarize the whole thing; leave a reason to click.\n"
             "- Sound like a practitioner talking to a peer, not a brochure. Clear "
             "point of view, plain English, no buzzwords, no FUD.\n"
-            "- Close with a low-key invite to read the full post — a reason to "
+            "- Close with a low-key invite to read the full post: a reason to "
             "click, not \"Read more today!\""
         ),
     },
@@ -84,7 +84,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "category": "Promote Content",
         "title": "Promote a video / YouTube",
         "content": (
-            "I just posted a video: \"[VIDEO TITLE]\" — link: [URL].\n"
+            "I just posted a video: \"[VIDEO TITLE]\", link: [URL].\n"
             "It covers [WHAT IT COVERS]. The one thing I want people to walk away "
             "with: [KEY TAKEAWAY].\n\n"
             "Write posts that tease the value without giving everything away.\n"
@@ -106,7 +106,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
             "- Each point = one concrete, usable idea a [AUDIENCE] can act on. No "
             "filler lines, no \"let's dive in,\" no restating the obvious.\n"
             "- Start with a hook strong enough to earn the second line.\n"
-            "- Keep a consistent, human voice throughout — short sentences, real "
+            "- Keep a consistent, human voice throughout: short sentences, real "
             "examples, a clear POV.\n"
             "- End with the link and one honest reason the full piece is worth "
             "reading."
@@ -124,10 +124,10 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
             "realistic attack path (chaining low-severity issues into real access), "
             "or what a human tester does that a tool can't.\n"
             "- Position: we test end-to-end and hand you findings you can actually "
-            "act on — offensive and defensive expertise, clear remediation.\n"
+            "act on: offensive and defensive expertise, clear remediation.\n"
             "- Voice: confident practitioner, not salesy. No \"hackers are "
             "everywhere\" FUD.\n"
-            "- Close with a soft invite to talk through a scoped test — a "
+            "- Close with a soft invite to talk through a scoped test: a "
             "question or offer, not a hard pitch."
         ),
     },
@@ -141,7 +141,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
             "- Use a concrete example of a gap that trips up real practices (e.g. "
             "[EXAMPLE: unencrypted backups, no documented risk analysis, ex-employee "
             "access]).\n"
-            "- Explain what a proper risk assessment actually surfaces — and why "
+            "- Explain what a proper risk assessment actually surfaces, and why "
             "\"we have a firewall\" is not a risk analysis.\n"
             "- Calm, credible, plain English. No regulatory scare tactics.\n"
             "- Close with an offer to walk through where a practice usually stands "
@@ -170,7 +170,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "content": (
             "Audience: growing organizations that need security leadership but not a "
             "full-time CISO yet.\n"
-            "Write posts about the real cost of nobody owning security strategy — "
+            "Write posts about the real cost of nobody owning security strategy: "
             "decisions that stall, risks nobody's tracking, board questions with no "
             "answer.\n"
             "- Make it concrete with a scenario, not abstractions.\n"
@@ -185,7 +185,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "title": "Ransomware readiness & tabletops",
         "content": (
             "Write posts on ransomware readiness for [execs / IT leaders].\n"
-            "Angle: the organizations that recover fast aren't lucky — they "
+            "Angle: the organizations that recover fast aren't lucky; they "
             "practiced.\n"
             "- Describe what a tabletop exercise actually reveals: who calls whom, "
             "whether the backups are truly tested, whether the plan survives contact "
@@ -220,8 +220,8 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "category": "Industry Angles",
         "title": "Tailor to any industry (fill-in)",
         "content": (
-            "Take my topic — [YOUR TOPIC OR SERVICE, e.g. ransomware readiness, a "
-            "pen test finding, a blog] — and tailor it for the [INDUSTRY] audience.\n"
+            "Take my topic, [YOUR TOPIC OR SERVICE, e.g. ransomware readiness, a "
+            "pen test finding, a blog], and tailor it for the [INDUSTRY] audience.\n"
             "- Ground it in that industry's real world: the regulations they answer "
             "to, the threats that actually hit them, and who signs off on security.\n"
             "- Use the words insiders use, not generic \"organizations face "
@@ -235,12 +235,12 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "category": "Industry Angles",
         "title": "Healthcare",
         "content": (
-            "Tailor my topic — [YOUR TOPIC OR SERVICE] — for a healthcare audience "
+            "Tailor my topic, [YOUR TOPIC OR SERVICE], for a healthcare audience "
             "(practice administrators, compliance officers, health-system CISOs).\n"
             "Their reality:\n"
             "- HIPAA / HITECH and protected health information (PHI); business "
             "associates and third-party risk.\n"
-            "- The real stakes aren't just fines — ransomware can halt care delivery "
+            "- The real stakes aren't just fines: ransomware can halt care delivery "
             "and put patient safety on the line.\n"
             "- Medical devices and legacy systems that can't just be patched.\n"
             "Write it in their language. One concrete scenario (e.g. an EHR outage, a "
@@ -253,7 +253,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "category": "Industry Angles",
         "title": "Financial Services",
         "content": (
-            "Tailor my topic — [YOUR TOPIC OR SERVICE] — for financial services "
+            "Tailor my topic, [YOUR TOPIC OR SERVICE], for financial services "
             "(banks, credit unions, wealth/advisory firms; audience: CISO, risk, and "
             "compliance leaders).\n"
             "Their reality:\n"
@@ -272,10 +272,10 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "category": "Industry Angles",
         "title": "Nonprofit",
         "content": (
-            "Tailor my topic — [YOUR TOPIC OR SERVICE] — for a nonprofit audience "
+            "Tailor my topic, [YOUR TOPIC OR SERVICE], for a nonprofit audience "
             "(executive directors, boards, development staff).\n"
             "Their reality:\n"
-            "- Lean budgets and lean (or outsourced) IT — security has to be "
+            "- Lean budgets and lean (or outsourced) IT; security has to be "
             "practical and affordable.\n"
             "- Donor data and payment info to protect; grant and funder security "
             "requirements to meet.\n"
@@ -290,13 +290,13 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "category": "Industry Angles",
         "title": "State & Local Government",
         "content": (
-            "Tailor my topic — [YOUR TOPIC OR SERVICE] — for state and local "
+            "Tailor my topic, [YOUR TOPIC OR SERVICE], for state and local "
             "government (IT directors, agency leaders, elected officials).\n"
             "Their reality:\n"
             "- CJIS, StateRAMP, public-records and (where relevant) election-security "
             "expectations.\n"
             "- Ransomware against municipalities can take down services residents "
-            "depend on — 911, permits, payments.\n"
+            "depend on: 911, permits, payments.\n"
             "- Tight procurement, legacy systems, and public accountability for every "
             "dollar.\n"
             "Speak to continuity of public services and taxpayer/constituent trust. "
@@ -309,7 +309,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "category": "Industry Angles",
         "title": "Higher Education",
         "content": (
-            "Tailor my topic — [YOUR TOPIC OR SERVICE] — for higher education "
+            "Tailor my topic, [YOUR TOPIC OR SERVICE], for higher education "
             "(CISOs, CIOs, IT leaders at colleges and universities).\n"
             "Their reality:\n"
             "- FERPA (student records), GLBA (student financial data), sometimes "
@@ -328,7 +328,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "category": "Industry Angles",
         "title": "Retail",
         "content": (
-            "Tailor my topic — [YOUR TOPIC OR SERVICE] — for retail (IT, loss "
+            "Tailor my topic, [YOUR TOPIC OR SERVICE], for retail (IT, loss "
             "prevention, franchise or multi-location owners).\n"
             "Their reality:\n"
             "- PCI DSS and cardholder data; point-of-sale malware and e-commerce "
@@ -348,14 +348,14 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "category": "Thought Leadership",
         "title": "Myth-buster post",
         "content": (
-            "Pick a common cybersecurity myth [MYTH — e.g. \"we're too small to "
+            "Pick a common cybersecurity myth [MYTH, e.g. \"we're too small to "
             "be a target,\" \"compliance means we're secure,\" \"the firewall "
             "protects us\"].\n"
             "Write a post that:\n"
             "- Names the myth in the hook.\n"
             "- Explains why it's wrong with ONE concrete example.\n"
             "- Gives the better mental model to replace it.\n"
-            "Strong point of view, respectful — no dunking on people. This is "
+            "Strong point of view, respectful, no dunking on people. This is "
             "where I sound like someone who has done the work. End with a question "
             "that invites people to share their own take."
         ),
@@ -369,7 +369,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
             "Structure: the situation → what we found → why it mattered "
             "→ the takeaway anyone can use.\n"
             "- No client-identifying details. Change specifics if needed.\n"
-            "- Human and concrete — this is the opposite of AI slop. Real detail "
+            "- Human and concrete: this is the opposite of AI slop. Real detail "
             "is what makes it land.\n"
             "- End with the one thing you want readers to go check in their own "
             "environment today."
@@ -380,7 +380,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "title": "React to a breach or trend",
         "content": (
             "A story just broke: [HEADLINE / LINK].\n"
-            "Write a post with MY take — not a rehash of the news.\n"
+            "Write a post with MY take, not a rehash of the news.\n"
             "- What's the real lesson? What would I tell a client to do differently?\n"
             "- What's overblown vs. what actually matters?\n"
             "- Measured and credible. No hot-take cringe, no ambulance chasing.\n"
@@ -393,7 +393,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "category": "Community & Engagement",
         "title": "Encourage people breaking into cyber",
         "content": (
-            "Write a post for people trying to break into cybersecurity — Show "
+            "Write a post for people trying to break into cybersecurity, with Show "
             "Up Show Out energy: direct, encouraging, real.\n"
             "- Share ONE concrete, non-obvious piece of advice [ADVICE / TOPIC] "
             "instead of \"get certs and network.\"\n"
@@ -409,7 +409,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "content": (
             "Write a short post that asks [AUDIENCE] a genuine question about [TOPIC] "
             "to spark real replies.\n"
-            "- Make it something people actually have opinions on — not "
+            "- Make it something people actually have opinions on, not "
             "engagement bait.\n"
             "- Give my own quick answer so it doesn't read like a survey.\n"
             "- Conversational, human, a little bold. Keep it tight."
@@ -419,7 +419,7 @@ STARTER_PROMPTS: List[Dict[str, str]] = [
         "category": "Community & Engagement",
         "title": "Explain a concept in plain English",
         "content": (
-            "Explain \"[CONCEPT — e.g. MFA fatigue, phishing-resistant auth, "
+            "Explain \"[CONCEPT, e.g. MFA fatigue, phishing-resistant auth, "
             "attack surface]\" to a non-technical [AUDIENCE] in plain English.\n"
             "- Use ONE everyday analogy that actually fits (don't force it).\n"
             "- No jargon without an immediate translation.\n"

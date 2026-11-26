@@ -2,7 +2,7 @@
 
 Uses the "Instagram API with Instagram Login" flavor (no Facebook Page link
 required). Requires an Instagram professional (Business or Creator) account.
-Feed posts REQUIRE an image — Instagram has no text-only posts.
+Feed posts REQUIRE an image: Instagram has no text-only posts.
 """
 
 from __future__ import annotations
@@ -532,7 +532,7 @@ class InstagramClient:
                     logger.warning("Failed to check Instagram container status: %s", status_response.status_code)
                     time.sleep(poll_interval)
             else:
-                # Exhausted retries — do NOT attempt a blind publish
+                # Exhausted retries: do NOT attempt a blind publish
                 logger.error("Instagram container %s not ready after %d attempts", container_id, max_retries)
                 return {
                     "success": False,
@@ -620,7 +620,7 @@ class InstagramClient:
             image_url: Public URL of the image to post
             user_tags: Optional list of {"username": str, "x": float, "y": float}
                 people-tags (x/y are 0..1 positions on the photo). Feed photos
-                only — the API ignores/rejects tags elsewhere.
+                only, the API ignores/rejects tags elsewhere.
             collaborators: Optional Instagram usernames to invite as collaborators
                 (at most MAX_COLLABORATORS). They receive an invite and the post
                 shows them only once they accept.
@@ -748,7 +748,7 @@ class InstagramClient:
         if error:
             return error
 
-        # Polling the parent covers child (video) processing — the parent will not
+        # Polling the parent covers child (video) processing; the parent will not
         # reach FINISHED until all children are ready.
         max_retries = VIDEO_MAX_RETRIES if has_video else IMAGE_MAX_RETRIES
         return self._poll_and_publish(parent_id, access_token, max_retries=max_retries)

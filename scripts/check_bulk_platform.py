@@ -495,8 +495,8 @@ def section_select():
     Y = rig.card("S-Y", ["linkedin"])
     Z = rig.card("S-Z", ["threads"])
 
-    # A platform-filtered selection sends one row id per card — not the card's
-    # first row — and must still act on the whole card.
+    # A platform-filtered selection sends one row id per card, not the card's
+    # first row, and must still act on the whole card.
     status, res = rig.post({"post_ids": [X["threads"], Y["linkedin"]],
                             "targets": ["twitter"], "queue": False})
     check(status == 200 and res["cards"] == 2 and res["added"] == 2,

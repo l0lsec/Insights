@@ -181,7 +181,7 @@ class _AnthropicChatClient:
 
     * ``system`` role messages become Anthropic's top-level ``system`` parameter.
     * OpenAI ``image_url`` content blocks become Anthropic ``image`` blocks.
-    * Sampling kwargs (``temperature``, ``top_p``, ``extra_body`` …) are dropped —
+    * Sampling kwargs (``temperature``, ``top_p``, ``extra_body`` …) are dropped:
       Claude Opus 4.7+ and Sonnet 5+ reject them with a 400.
     * ``max_tokens`` is required by Anthropic, so a default is supplied when a caller
       omits it.
@@ -1351,7 +1351,7 @@ def generate_posts_from_url(
                         + f"Create posts for these platforms:\n{platform_list}\n\n"
                         "For each post:\n"
                         "1. Summarize or comment on the key points\n"
-                        f"2. ALWAYS include the source URL ({url}) verbatim in the post body — this is mandatory for every platform, with no exceptions\n"
+                        f"2. ALWAYS include the source URL ({url}) verbatim in the post body. This is mandatory for every platform, with no exceptions\n"
                         "3. Add relevant hashtags\n"
                         "4. Make it engaging and encourage clicks/engagement\n"
                         + _build_format_instruction(plats, n)
@@ -1378,7 +1378,7 @@ def generate_posts_from_url(
 # ``generate_posts_from_text`` only feeds the first ~5000 chars of its input to
 # the model. For long uploaded documents that would silently drop most of the
 # content, so we first condense the full text into a compact digest that fits
-# the prompt — extracting key points from each chunk (map) and, if the merged
+# the prompt, extracting key points from each chunk (map) and, if the merged
 # result is still too long, condensing again (reduce).
 
 CONDENSE_THRESHOLD = 6000     # chars; at or below this, pass text through unchanged
@@ -1431,7 +1431,7 @@ def _summarize_chunk(client, model, chunk: str, use_local: bool, provider: str) 
                 "from an excerpt of a longer document. Reply with a tight bulleted list. "
                 "Preserve concrete details (numbers, names, findings, direct quotes) that "
                 "would make strong social media content. Do not add commentary, intros, or "
-                "conclusions — only the extracted points."
+                "conclusions: only the extracted points."
             ),
         },
         {
@@ -1496,7 +1496,7 @@ def condense_document_text(
 
     summaries = _summarize_all(chunks)
     if not summaries:
-        # Every summarization failed — fall back to the truncated original.
+        # Every summarization failed: fall back to the truncated original.
         logger.warning("Document condensation produced no summaries; falling back to truncation")
         fallback = text[:CONDENSE_HARD_CAP]
         meta["final_chars"] = len(fallback)
@@ -1575,7 +1575,7 @@ def generate_posts_from_text(
         if source_url:
             post_steps = (
                 "1. Capture the key message or insight\n"
-                f"2. ALWAYS include the source URL ({source_url}) verbatim in the post body — this is mandatory for every platform, with no exceptions\n"
+                f"2. ALWAYS include the source URL ({source_url}) verbatim in the post body. This is mandatory for every platform, with no exceptions\n"
                 "3. Optimize for the platform's format\n"
                 "4. Include relevant hashtags\n"
                 "5. Make it engaging and shareable\n"
@@ -1913,7 +1913,7 @@ def _build_thumbnail_prompt(metadata: dict, aspect: str, style: str = "bold") ->
     """Build a single-stage image-generation prompt for a YouTube thumbnail.
 
     The prompt instructs ``gpt-image-1`` to render the *complete* thumbnail
-    including bold text, visual effects, and photorealistic elements — no
+    including bold text, visual effects, and photorealistic elements, no
     post-processing or text overlay needed.
 
     Parameters
@@ -1939,7 +1939,7 @@ def _build_thumbnail_prompt(metadata: dict, aspect: str, style: str = "bold") ->
                 break
         if not hook:
             hook = description[:80].strip()
-        # Keep it punchy — truncate long hooks
+        # Keep it punchy: truncate long hooks
         if len(hook) > 60:
             hook = hook[:57].rstrip() + "..."
 
@@ -1993,7 +1993,7 @@ def _build_thumbnail_prompt(metadata: dict, aspect: str, style: str = "bold") ->
             f"{orientation.capitalize()} ({aspect} aspect ratio)."
         )
 
-    else:  # "bold" (default) — MrBeast-style maximum impact
+    else:  # "bold" (default): MrBeast-style maximum impact
         prompt = (
             f"Create a highly attractive {thumb_type}. "
             f"Photorealistic style with graphic elements. "
@@ -2015,7 +2015,7 @@ def _build_thumbnail_prompt(metadata: dict, aspect: str, style: str = "bold") ->
             f"A red 'WATCH NOW!' button with play arrow icon in the bottom right corner. "
             f"Extremely vibrant, high contrast, saturated colors. "
             f"Dynamic composition with arrows or graphic elements directing attention. "
-            f"Professional YouTube thumbnail style — loud, attention-grabbing, clickable. "
+            f"Professional YouTube thumbnail style: loud, attention-grabbing, clickable. "
             f"{orientation.capitalize()} ({aspect} aspect ratio)."
         )
 

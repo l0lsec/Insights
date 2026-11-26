@@ -4,7 +4,7 @@
 {% block content %}
 {% if is_text %}
 <div class="alert alert-light border mb-3">
-    <strong>📄 Text Article</strong> — 
+    <strong>📄 Text Article</strong> · 
     <a href="{{ original_link }}" target="_blank" class="alert-link">Read original article ↗</a>
 </div>
 {% else %}
@@ -74,7 +74,7 @@
                 <h2 class="mb-0 h5">✍️ Generate Article</h2>
             </div>
             <div class="card-body">
-                <p class="text-muted">Create a blog post or article based on this {% if is_text %}source article{% else %}podcast episode{% endif %}. Specify a topic to focus on—like cybersecurity, privacy, or a specific technology discussed.</p>
+                <p class="text-muted">Create a blog post or article based on this {% if is_text %}source article{% else %}podcast episode{% endif %}. Specify a topic to focus on, like cybersecurity, privacy, or a specific technology discussed.</p>
                 <form method="post" action="{{ url_for('create_article') }}" data-processing>
                     <input type="hidden" name="episode_url" value="{{ url }}">
                     <div class="mb-3">
@@ -97,7 +97,7 @@
                         <label for="extra_context" class="form-label fw-bold">Additional Context <span class="text-muted fw-normal">(optional)</span></label>
                         <textarea class="form-control" id="extra_context" name="extra_context" rows="3"
                                   placeholder="Add any extra context, specific points to emphasize, your own insights, or instructions for the article..."></textarea>
-                        <div class="form-text">Provide additional information or guidance to shape the article—background context, key points to highlight, your perspective, etc.</div>
+                        <div class="form-text">Provide additional information or guidance to shape the article: background context, key points to highlight, your perspective, etc.</div>
                     </div>
                     <button type="submit" class="btn btn-primary">
                         <span class="spinner-border spinner-border-sm d-none" role="status"></span>
